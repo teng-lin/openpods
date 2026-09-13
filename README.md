@@ -54,6 +54,11 @@ The AAP protocol is consistent across all AirPods models (based on analysis of t
 │                         BLE scan (btleplug),             │
 │                         Media (wpctl / pactl / playerctl)│
 ├──────────────────────────────────────────────────────────┤
+│  librepods-windows      L2CAP (WinSock AF_BTH),          │
+│                         WinRT Bluetooth monitor,         │
+│                         BLE scan (btleplug),             │
+│                         Media (SMTC via WinRT)           │
+├──────────────────────────────────────────────────────────┤
 │  librepods-core         AAP parser, packet builder,      │
 │                         device state, BLE ad decoder,    │
 │                         transport traits                 │
@@ -65,6 +70,7 @@ The AAP protocol is consistent across all AirPods models (based on analysis of t
 |---|---|---|
 | `librepods-core` | `serde`, `thiserror`, `log`, `aes` | Protocol engine, device state, BLE parsing |
 | `librepods-linux` | `nix`, `zbus`, `btleplug`, `tokio`, `libc` | Linux Bluetooth + media I/O |
+| `librepods-windows` | `btleplug`, `tokio`, `windows`, `windows-sys` | Windows Bluetooth + media I/O |
 | `librepods-cli` | `clap`, `env_logger`, `tokio` | Headless daemon |
 
 ## Prerequisites (Ubuntu / Debian)
@@ -417,6 +423,9 @@ cargo test
 
 # Core only (must pass on any target)
 cargo test -p librepods-core
+
+# Cross-platform sanity check (crate-purity litmus test)
+cargo check -p librepods-core --target aarch64-linux-android
 ```
 
 ## Troubleshooting
