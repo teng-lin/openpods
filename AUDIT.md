@@ -105,20 +105,22 @@ After fixes: 32 core tests + 1 doctest, and `fmt`/`clippy` (host + Windows targe
 
 These are gaps and risks that were **not** applied, with the evidence gathered for each. Priorities are `impact × effort`; nothing here is a crash or a wire-format regression — all unknown inputs already degrade to `ParsedPacket::Unknown` / `CrossDeviceAction::Unknown` without panicking.
 
+> **Implementation status (2026-09-13):** C1, C2, C5, C6, C7, C9 and C10 addressed; C3 documented in code; C4 left unchanged by design; C8 deferred. See the Status column.
+
 ### C-triage
 
-| # | Item | Impact | Effort | Priority |
-|---|---|---|---|---|
-| C9 | Entire `crossdevice` subsystem unused by the app; upstream reference absent | Dead subsystem, unverifiable constants | M (decide keep/remove) | **P1 (decision)** |
-| C1 | `ControlCommandId` missing 9 upstream ids | Events map to `Unknown`, less typed logging | S (additive) | P2 |
-| C2 | `opcodes.rs` missing ~9 upstream opcodes | These events map to `Unknown` | S (additive) | P2 |
-| C10 | `HEAD_TRACKING_START/STOP` never sent | Head-tracking feature may never activate | S–M (device test) | P2 |
-| C3 | `REQUEST_BATTERY` / `REQUEST_ANC` / `DATA_HEADER` unverified | Possible wrong cross-device behavior | M (needs source) | P2 |
-| C4 | Receive loop assumes `1 recv() = 1 packet` | Fragile if a backend streams/coalesces | M | P3 |
-| C7 | Cluster of unused `pub const`s | Hygiene / misleading API surface | S | P3 |
-| C5 | `which_exists()` shells out to `which` | Extra runtime dependency | S | P3 |
-| C6 | Windows errors lose their `source` | Weaker diagnostics | S | P3 |
-| C8 | Comment refs to non-existent `docs/*` | Slightly misleading | S | P4 |
+| # | Item | Impact | Effort | Priority | Status |
+|---|---|---|---|---|---|
+| C9 | Entire `crossdevice` subsystem unused by the app; upstream reference absent | Dead subsystem, unverifiable constants | M (decide keep/remove) | **P1 (decision)** | ✅ Experimental notice added |
+| C1 | `ControlCommandId` missing 9 upstream ids | Events map to `Unknown`, less typed logging | S (additive) | P2 | ✅ Added |
+| C2 | `opcodes.rs` missing ~9 upstream opcodes | These events map to `Unknown` | S (additive) | P2 | ✅ Constants added |
+| C10 | `HEAD_TRACKING_START/STOP` never sent | Head-tracking feature may never activate | S–M (device test) | P2 | ✅ Wired (needs device test) |
+| C3 | `REQUEST_BATTERY` / `REQUEST_ANC` / `DATA_HEADER` unverified | Possible wrong cross-device behavior | M (needs source) | P2 | 📝 Documented |
+| C4 | Receive loop assumes `1 recv() = 1 packet` | Fragile if a backend streams/coalesces | M | P3 | ⏸ No change (by design) |
+| C7 | Cluster of unused `pub const`s | Hygiene / misleading API surface | S | P3 | ✅ Annotated |
+| C5 | `which_exists()` shells out to `which` | Extra runtime dependency | S | P3 | ✅ Fixed |
+| C6 | Windows errors lose their `source` | Weaker diagnostics | S | P3 | ✅ Fixed |
+| C8 | Comment refs to non-existent `docs/*` | Slightly misleading | S | P4 | ⏸ Deferred |
 
 ### C1 — `ControlCommandId` is missing 9 upstream identifiers
 - **File:** `librepods-core/src/protocol/control_command.rs`
