@@ -94,10 +94,18 @@ impl LinuxMediaControl {
         }
     }
 
+    /// Lock the cached sink-id slot, recovering from a poisoned mutex rather
+    /// than panicking (a poisoned lock must not take down the daemon).
+    fn sink_id_cache(&self) -> std::sync::MutexGuard<'_, Option<u32>> {
+        self.wpctl_sink_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Set the MAC address of the connected AirPods (colon-separated).
     pub fn set_device_address(&mut self, mac: &str) {
         self.device_mac_underscored = mac.replace(':', "_");
-        *self.wpctl_sink_id.lock().unwrap() = None;
+        *self.sink_id_cache() = None;
     }
 
     /// Activate the A2DP sink profile and set AirPods as default output.
@@ -151,7 +159,7 @@ impl LinuxMediaControl {
 
     /// Find the WirePlumber sink ID for the AirPods by parsing `wpctl status`.
     fn wpctl_find_sink(&self) -> Result<u32, TransportError> {
-        if let Some(id) = *self.wpctl_sink_id.lock().unwrap() {
+        if let Some(id) = *self.sink_id_cache() {
             return Ok(id);
         }
 
@@ -190,7 +198,7 @@ impl LinuxMediaControl {
                 let cleaned = trimmed.trim_start_matches('*').trim();
                 if let Some(dot_pos) = cleaned.find('.') {
                     if let Ok(id) = cleaned[..dot_pos].trim().parse::<u32>() {
-                        *self.wpctl_sink_id.lock().unwrap() = Some(id);
+                        *self.sink_id_cache() = Some(id);
                         return Ok(id);
                     }
                 }
