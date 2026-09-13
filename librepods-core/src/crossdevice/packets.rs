@@ -4,6 +4,10 @@
 
 //! Cross-device packet constants.
 //!
+//! **Experimental** — see [`crate::crossdevice`] for status. The constants below
+//! are not exercised in production; `REQUEST_BATTERY`, `REQUEST_ANC` and
+//! `DATA_HEADER` are unverified against upstream.
+//!
 //! References:
 //! - `CrossDevice.kt` `CrossDevicePackets` enum
 //! - `airpods_packets.h` `Phone::*` namespace

@@ -7,6 +7,9 @@
 //! Stateless dispatcher: given an incoming cross-device packet, returns a
 //! [`CrossDeviceAction`] that the platform layer should execute.
 //!
+//! **Experimental** — see [`crate::crossdevice`] for status. Not wired into the
+//! CLI yet; only unit tests call [`handle_packet`].
+//!
 //! References:
 //! - `CrossDevice.kt` `handleClientConnection()`
 //! - `main.cpp` `handlePhonePacket()`
