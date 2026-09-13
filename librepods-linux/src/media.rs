@@ -7,6 +7,7 @@
 //!
 //! Reference: `mediacontroller.cpp`
 
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::sync::Mutex;
 
@@ -37,14 +38,20 @@ fn detect_backend() -> AudioBackend {
     }
 }
 
+/// Check whether `cmd` resolves to an executable file on `$PATH`.
+///
+/// Resolved in-process rather than shelling out to `which`, so the daemon does
+/// not depend on that binary being installed.
 fn which_exists(cmd: &str) -> bool {
-    Command::new("which")
-        .arg(cmd)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        dir.join(cmd)
+            .metadata()
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    })
 }
 
 fn playerctl_available() -> bool {

@@ -94,10 +94,13 @@ impl L2capWindows {
         let sock = unsafe { ws_socket(AF_BTH as i32, SOCK_SEQPACKET, BTHPROTO_L2CAP as i32) };
         if sock == INVALID_SOCKET {
             let err = unsafe { WSAGetLastError() };
-            return Err(TransportError::new(format!(
-                "failed to create L2CAP socket (AF_BTH, SOCK_SEQPACKET, BTHPROTO_L2CAP): \
+            return Err(TransportError::with_source(
+                format!(
+                    "failed to create L2CAP socket (AF_BTH, SOCK_SEQPACKET, BTHPROTO_L2CAP): \
                  Winsock error {err}. Is the Bluetooth adapter enabled?"
-            )));
+                ),
+                std::io::Error::from_raw_os_error(err),
+            ));
         }
 
         let sockaddr = SOCKADDR_BTH {
@@ -122,10 +125,13 @@ impl L2capWindows {
         if ret != 0 {
             let err = unsafe { WSAGetLastError() };
             unsafe { ws_close(sock) };
-            return Err(TransportError::new(format!(
-                "L2CAP connect to {address} PSM 0x{psm:04X} failed (Winsock error {err}). \
-                 Ensure the AirPods are paired, connected and in range."
-            )));
+            return Err(TransportError::with_source(
+                format!(
+                    "L2CAP connect to {address} PSM 0x{psm:04X} failed (Winsock error {err}). \
+                     Ensure the AirPods are paired, connected and in range."
+                ),
+                std::io::Error::from_raw_os_error(err),
+            ));
         }
 
         log::info!("L2CAP connected to {address} PSM 0x{psm:04X}");
@@ -148,9 +154,10 @@ impl L2capTransport for L2capWindows {
         let n = unsafe { ws_send(self.sock, data.as_ptr(), data.len() as i32, 0) };
         if n < 0 {
             let err = unsafe { WSAGetLastError() };
-            return Err(TransportError::new(format!(
-                "L2CAP send failed (Winsock error {err})"
-            )));
+            return Err(TransportError::with_source(
+                format!("L2CAP send failed (Winsock error {err})"),
+                std::io::Error::from_raw_os_error(err),
+            ));
         }
         if n as usize != data.len() {
             return Err(TransportError::new(format!(
@@ -171,9 +178,10 @@ impl L2capTransport for L2capWindows {
         let n = unsafe { ws_recv(self.sock, buf.as_mut_ptr(), buf.len() as i32, 0) };
         if n < 0 {
             let err = unsafe { WSAGetLastError() };
-            return Err(TransportError::new(format!(
-                "L2CAP recv failed (Winsock error {err})"
-            )));
+            return Err(TransportError::with_source(
+                format!("L2CAP recv failed (Winsock error {err})"),
+                std::io::Error::from_raw_os_error(err),
+            ));
         }
         if n == 0 {
             self.connected.store(false, Ordering::Relaxed);
