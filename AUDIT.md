@@ -103,16 +103,78 @@ After fixes: 32 core tests + 1 doctest, and `fmt`/`clippy` (host + Windows targe
 
 ## C. Suggestions / backlog (no code change)
 
-| # | Area | Note |
-|---|---|---|
-| C1 | `ControlCommandId` | Missing several upstream ids: `0x06 OWNS_CONNECTION`, `0x0A EAR_DETECTION_CONFIG`, `0x20 AUTOMATIC_CONNECTION_CONFIG`, `0x35 SLEEP_DETECTION_CONFIG`, `0x36 ALLOW_AUTO_CONNECT`, `0x37 PPE_TOGGLE_CONFIG`, `0x38 PPE_CAP_LEVEL_CONFIG`, `0x39 STEM_CONFIG`, `0x3B DYNAMIC_END_OF_CHARGE`. They currently fall through to `Unknown` (safe, no panic). |
-| C2 | `opcodes.rs` | Missing upstream opcodes: `0x0E AUDIO_SOURCE`, `0x10 SMART_ROUTING`, `0x11 SMART_ROUTING_RESP`, `0x14 SEND_CONNECTED_MAC`, `0x19 STEM_PRESS`, `0x2E CONNECTED_DEVICES`, `0x53 HEADPHONE_ACCOMMODATION`, `0x63 CUSTOM_EQ`. → `Unknown`. |
-| C3 | `crossdevice/packets.rs` | `REQUEST_BATTERY` (`00 02 00 01`) and `REQUEST_ANC` (`00 02 00 02`) are **not** in `airpods_packets.h`; neither is `DATA_HEADER` → source unverified; the cross-device reference code still needs to be located. |
-| C4 | `librepods-cli/src/main.rs` | The receive loop assumes `1 recv() = 1 packet`. On Linux `SOCK_SEQPACKET` preserves message boundaries so it is currently fine, but if a backend ever returns a coalesced or partial packet the parse breaks. Add buffering/framing if more backends are supported. |
-| C5 | `librepods-linux/src/media.rs` | `which_exists()` shells out to `which`; could be replaced with a pure-Rust `$PATH` lookup to drop the external dependency. |
-| C6 | `librepods-windows/*` | `TransportError::new` for Winsock errors drops the `source` (string only); consider `with_source`. Volume control is not implemented (already noted in the README). |
-| C7 | Whole crate | Several unused `pub const`s (`AIRPODS_DISCONNECTED`, `EAR_DETECTION_PREFIX`, `REQUEST_MAGIC_CLOUD_KEYS`, `opcodes::SET_FEATURE_FLAGS`) — they are API surface, so clippy is silent. Consider documenting them or marking `#[allow(dead_code)]`. |
-| C8 | Comments | References to `docs/control_commands.md` and `AAP Definitions.md` point at upstream and do not exist in this repo — worth stating the upstream path explicitly. |
+These are gaps and risks that were **not** applied, with the evidence gathered for each. Priorities are `impact × effort`; nothing here is a crash or a wire-format regression — all unknown inputs already degrade to `ParsedPacket::Unknown` / `CrossDeviceAction::Unknown` without panicking.
+
+### C-triage
+
+| # | Item | Impact | Effort | Priority |
+|---|---|---|---|---|
+| C9 | Entire `crossdevice` subsystem unused by the app; upstream reference absent | Dead subsystem, unverifiable constants | M (decide keep/remove) | **P1 (decision)** |
+| C1 | `ControlCommandId` missing 9 upstream ids | Events map to `Unknown`, less typed logging | S (additive) | P2 |
+| C2 | `opcodes.rs` missing ~9 upstream opcodes | These events map to `Unknown` | S (additive) | P2 |
+| C10 | `HEAD_TRACKING_START/STOP` never sent | Head-tracking feature may never activate | S–M (device test) | P2 |
+| C3 | `REQUEST_BATTERY` / `REQUEST_ANC` / `DATA_HEADER` unverified | Possible wrong cross-device behavior | M (needs source) | P2 |
+| C4 | Receive loop assumes `1 recv() = 1 packet` | Fragile if a backend streams/coalesces | M | P3 |
+| C7 | Cluster of unused `pub const`s | Hygiene / misleading API surface | S | P3 |
+| C5 | `which_exists()` shells out to `which` | Extra runtime dependency | S | P3 |
+| C6 | Windows errors lose their `source` | Weaker diagnostics | S | P3 |
+| C8 | Comment refs to non-existent `docs/*` | Slightly misleading | S | P4 |
+
+### C1 — `ControlCommandId` is missing 9 upstream identifiers
+- **File:** `librepods-core/src/protocol/control_command.rs`
+- **Missing (upstream `AACPManager.kt` `ControlCommandIdentifiers`):** `0x06 OWNS_CONNECTION`, `0x0A EAR_DETECTION_CONFIG`, `0x20 AUTOMATIC_CONNECTION_CONFIG`, `0x35 SLEEP_DETECTION_CONFIG`, `0x36 ALLOW_AUTO_CONNECT`, `0x37 PPE_TOGGLE_CONFIG`, `0x38 PPE_CAP_LEVEL_CONFIG`, `0x39 STEM_CONFIG`, `0x3B DYNAMIC_END_OF_CHARGE`.
+- **Behavior today:** `parse_control_command()` logs `Unknown control command identifier` and returns `ParsedPacket::Unknown` — safe, but the event is dropped rather than surfaced as a typed `ControlCommand`.
+- **Recommendation:** additive enum + `from_byte` arms; low risk. Optionally add `apply_to_state` handling for the ones with a known bool/state (`0x06`, `0x0A`, `0x20`).
+
+### C2 — `opcodes.rs` is missing ~9 upstream opcodes
+- **File:** `librepods-core/src/protocol/opcodes.rs`
+- **Missing (upstream `AACPManager.kt` `Opcodes`):** `0x0E AUDIO_SOURCE`, `0x10 SMART_ROUTING`, `0x11 SMART_ROUTING_RESP`, `0x14 SEND_CONNECTED_MAC`, `0x19 STEM_PRESS`, `0x2E CONNECTED_DEVICES`, `0x53 HEADPHONE_ACCOMMODATION`, `0x63 CUSTOM_EQ` (plus the redundant `0x0C`).
+- **Behavior today:** fall through to `ParsedPacket::Unknown` and are only `log::debug!`-ed.
+- **Recommendation:** add the constants first (single source of truth, zero risk); add parser variants only with raw-byte round-trip tests, per the QWEN.md rule. `0x19 STEM_PRESS` is the highest-value one (user stem gestures).
+
+### C3 — Cross-device constants cannot be verified against upstream
+- **File:** `librepods-core/src/crossdevice/packets.rs`
+- **Finding:** `REQUEST_BATTERY` (`00 02 00 01`), `REQUEST_ANC` (`00 02 00 02`) and `DATA_HEADER` (`00 04 00 01`) are **not** in `airpods_packets.h`, which only defines `Phone::NOTIFICATION`, `CONNECTED`, `DISCONNECTED`, `STATUS_REQUEST`, `DISCONNECT_REQUEST`. A full walk of the upstream tree found **no** `CrossDevice.kt` / `main.cpp` (the files cited by this module's comments), so the provenance of these three constants is untraceable in the current upstream branch.
+- **Impact:** unverified; could be wrong, but currently harmless because nothing consumes them (see C9).
+- **Recommendation:** either locate the original reference (older branch/tag/PR) or mark the module experimental.
+
+### C4 — Receive loop assumes one datagram per `recv()`
+- **File:** `librepods-cli/src/main.rs:353,371,392` (`let mut buf = [0u8; 1024];` + one `recv` per iteration)
+- **Finding:** the loop treats one `recv()` as exactly one AAP packet. This is currently **correct** because both backends use `SOCK_SEQPACKET` (`nix::unistd::read` on Linux, `ws_recv` on Windows), which preserves message boundaries — one `read` returns one datagram. The 1024-byte buffer is comfortably larger than any known packet (largest is `HEADPHONE_ACCOMMODATION` at 140 bytes; head-tracking ≈70).
+- **Risk:** if a future backend returns a partial or coalesced read, `parse()` would see a truncated/garbage packet and the loop would `log::warn!` and drop it — degrading silently rather than buffering.
+- **Recommendation:** no change required for the current two backends; add a length-prefixed/streaming framing layer only if a byte-stream backend is ever added.
+
+### C5 — `which_exists()` shells out to `which`
+- **File:** `librepods-linux/src/media.rs` (`Command::new("which")`)
+- **Impact:** the daemon depends on the `which` binary being present; on minimal images it may be missing, silently disabling backend detection.
+- **Recommendation:** resolve the executable against `$PATH` in pure Rust (or use an existing crate already in the tree).
+
+### C6 — Windows transport errors discard the OS error source
+- **File:** `librepods-windows/src/l2cap.rs`
+- **Finding:** `socket()`/`connect()`/`send()`/`recv()` failures use `TransportError::new(format!("… Winsock error {err}"))`, which is `TransportError::Other(String)` — the raw Winsock error is embedded in the string and not exposed as `#[source]`.
+- **Recommendation:** use `TransportError::with_source` (or a dedicated `Winsock(i32)` variant) so callers can match on the code. Diagnostics only.
+
+### C7 — Cluster of unused `pub const`s
+- **Files:** `librepods-core/src/protocol/packets.rs`, `opcodes.rs`, `crossdevice/packets.rs`
+- **Evidence (repo-wide grep, definitions with no other reference):** `AIRPODS_DISCONNECTED`, `EAR_DETECTION_PREFIX`, `REQUEST_MAGIC_CLOUD_KEYS`, `HEAD_TRACKING_START`, `HEAD_TRACKING_STOP`, `crossdevice::NOTIFICATION`, and the opcode constants `opcodes::REQUEST_NOTIFICATIONS` / `opcodes::RENAME` / `opcodes::SET_FEATURE_FLAGS` (the *packet* constant is used, the *opcode* one is not).
+- **Why clippy is silent:** they are `pub` items of a library, so `dead_code` does not fire.
+- **Recommendation:** keep as documented API surface, or gate with `#[allow(dead_code)]`/`#[doc(hidden)]`. Note `HEAD_TRACKING_START/STOP` being unused ties into C10.
+
+### C8 — Comments reference files that do not exist in this repo
+- **Finding:** module docs cite `docs/control_commands.md`, `AAP Definitions.md`, `CrossDevice.kt`, `main.cpp`, `BasicControlCommand.hpp`, etc. None are vendored here; they live in the upstream reference.
+- **Recommendation:** prefix such references with the upstream repo URL so readers can follow them.
+
+### C9 — The entire `crossdevice` subsystem is unused by the application
+- **Files:** `librepods-core/src/crossdevice/{mod,packets,relay}.rs`
+- **Evidence:** the only references to `handle_packet`/`CrossDeviceAction`/`crossdevice::packets::*` are inside the module's own tests; `librepods-cli` and both platform crates never import `crossdevice`. It is also the home of the unverifiable constants in C3.
+- **Impact:** ~165 lines + tests that are compiled and maintained but never exercised in production. No runtime risk (it cannot be reached), but it inflates the "implemented features" surface and its upstream provenance is missing (see C3).
+- **Recommendation:** make an explicit product decision — either (a) wire it into the CLI/platform crates as a real cross-device/relay feature, or (b) mark the module clearly as experimental/unsupported (or remove it) so it is not mistaken for working code. This is the highest-impact item in this section because it is about *direction*, not a missing enum arm.
+
+### C10 — Head-tracking START/STOP are never sent
+- **Files:** `librepods-core/src/protocol/packets.rs` (`HEAD_TRACKING_START`, `HEAD_TRACKING_STOP`), `librepods-cli/src/main.rs`
+- **Finding:** the CLI parses inbound head-tracking sensor data and `is_head_tracking_data()` is used to suppress its logging, but the outgoing START/STOP packets are never sent by any code path (see C7).
+- **Impact:** the README advertises "receive raw spatial audio head tracking sensor data"; whether the AirPods emit it without an explicit START is unverified. If START is required, the feature is inert.
+- **Recommendation:** confirm on a real device; if required, send `HEAD_TRACKING_START` after the handshake (and `HEAD_TRACKING_STOP` on disconnect), reusing the existing constants.
 
 ---
 
