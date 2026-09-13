@@ -385,6 +385,12 @@ fn run_connection(
 
     log::info!("Handshake complete. Entering receive loop...");
 
+    // Start head-tracking sensor streaming. Best-effort: devices without
+    // spatial audio support simply ignore the packet.
+    if let Err(e) = transport.send(&packets::HEAD_TRACKING_START) {
+        log::warn!("Failed to start head tracking (continuing): {e}");
+    }
+
     let mut ear_mc = media.map(EarMediaController::new);
 
     // --- Main receive loop ---
@@ -444,7 +450,8 @@ fn run_connection(
         }
     }
 
-    // Cleanup
+    // Cleanup: stop head tracking (best-effort) and release the audio output.
+    let _ = transport.send(&packets::HEAD_TRACKING_STOP);
     if let Some(emc) = ear_mc.as_ref() {
         emc.cleanup();
     }
