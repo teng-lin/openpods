@@ -27,10 +27,26 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y \
           pkg-config \
-          libdbus-1-dev
+          libdbus-1-dev \
+          libudev-dev
+
+    - name: Add lint components
+      run: rustup component add rustfmt clippy
+
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+
+    - name: Clippy
+      run: cargo clippy --all-targets -- -D warnings
 
     - name: Build
       run: cargo build --verbose
 
     - name: Run tests
       run: cargo test --verbose
+
+    - name: Check core for Android (crate-purity litmus test)
+      if: runner.os == 'Linux'
+      run: |
+        rustup target add aarch64-linux-android
+        cargo check -p librepods-core --target aarch64-linux-android
