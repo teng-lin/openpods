@@ -33,8 +33,8 @@ pub const HEADTRACKING: u8 = 0x17;
 /// Device metadata — name, model number, manufacturer (opcode `0x1D`).
 pub const DEVICE_METADATA: u8 = 0x1D;
 
-/// Rename device (opcode `0x1E`).
-pub const RENAME: u8 = 0x1E;
+/// Rename device (opcode `0x1A`).
+pub const RENAME: u8 = 0x1A;
 
 /// Proximity keys request (opcode `0x30`).
 pub const PROXIMITY_KEYS_REQ: u8 = 0x30;

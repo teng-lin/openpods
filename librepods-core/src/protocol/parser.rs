@@ -104,7 +104,7 @@ pub enum ParsedPacket {
         manufacturer: String,
     },
 
-    /// Head tracking sensor data (raw payload after header).
+    /// Head tracking sensor data (the full raw packet, including its 6-byte header).
     HeadTracking(Vec<u8>),
 
     /// Proximity keys response.
@@ -143,9 +143,11 @@ pub fn parse(packet: &[u8]) -> Result<ParsedPacket, ParseError> {
         return Ok(ParsedPacket::FeaturesAck);
     }
 
-    // Magic cloud keys response
+    // Magic cloud keys response — the common 2-key proximity response carrying
+    // IRK (0x01) + EncKey (0x04). Fall back to the generic proximity parser when
+    // the payload does not match that exact layout.
     if packet.starts_with(&packets::MAGIC_CLOUD_KEYS_HEADER) {
-        return parse_magic_cloud_keys(packet);
+        return parse_magic_cloud_keys(packet).or_else(|_| parse_proximity_keys(packet));
     }
 
     // Standard packets must start with the AAP header
@@ -344,7 +346,9 @@ fn parse_magic_cloud_keys(packet: &[u8]) -> Result<ParsedPacket, ParseError> {
 
     // Second TLV block — EncKey (type 0x04)
     if idx >= packet.len() || packet[idx] != 0x04 {
-        return Err(ParseError::MagicCloudKeys("expected EncKey type 0x04".into()));
+        return Err(ParseError::MagicCloudKeys(
+            "expected EncKey type 0x04".into(),
+        ));
     }
     idx += 1;
     let len2 = ((packet[idx] as u16) << 8) | packet[idx + 1] as u16;
@@ -431,6 +435,127 @@ mod tests {
                 assert_eq!(info.case_.level, 17);
             }
             other => panic!("expected Battery, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_conversational_awareness() {
+        // 04 00 04 00 4B 00 02 00 01 [level]
+        let pkt = [0x04, 0x00, 0x04, 0x00, 0x4B, 0x00, 0x02, 0x00, 0x01, 0x05];
+        match parse(&pkt).unwrap() {
+            ParsedPacket::ConversationalAwareness { status } => assert_eq!(status, 0x05),
+            other => panic!("expected ConversationalAwareness, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_control_command_notification() {
+        // ConversationDetectConfig (0x28), data = 01 00 00 00
+        let pkt = [
+            0x04, 0x00, 0x04, 0x00, 0x09, 0x00, 0x28, 0x01, 0x00, 0x00, 0x00,
+        ];
+        match parse(&pkt).unwrap() {
+            ParsedPacket::ControlCommand { id, data } => {
+                assert_eq!(id, ControlCommandId::ConversationDetectConfig);
+                assert_eq!(data, [0x01, 0x00, 0x00, 0x00]);
+            }
+            other => panic!("expected ControlCommand, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_unknown_control_command_is_unknown() {
+        let pkt = [
+            0x04, 0x00, 0x04, 0x00, 0x09, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00,
+        ];
+        match parse(&pkt).unwrap() {
+            ParsedPacket::Unknown(data) => assert_eq!(data, pkt),
+            other => panic!("expected Unknown, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_metadata() {
+        let mut pkt = vec![0x04, 0x00, 0x04, 0x00, 0x1D, 0, 0, 0, 0, 0, 0];
+        pkt.extend_from_slice(b"AirPods\0A3047\0Apple\0");
+        match parse(&pkt).unwrap() {
+            ParsedPacket::Metadata {
+                name,
+                model_number,
+                manufacturer,
+            } => {
+                assert_eq!(name, "AirPods");
+                assert_eq!(model_number, "A3047");
+                assert_eq!(manufacturer, "Apple");
+            }
+            other => panic!("expected Metadata, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_head_tracking() {
+        let mut pkt = vec![0x04, 0x00, 0x04, 0x00, 0x17, 0x00];
+        pkt.resize(70, 0x00);
+        match parse(&pkt).unwrap() {
+            ParsedPacket::HeadTracking(data) => assert_eq!(data.len(), 70),
+            other => panic!("expected HeadTracking, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_proximity_keys_single() {
+        // 04 00 04 00 31 00 [count=1] [01 00 10 00] [16-byte IRK]
+        let mut pkt = vec![0x04, 0x00, 0x04, 0x00, 0x31, 0x00, 0x01];
+        pkt.extend_from_slice(&[0x01, 0x00, 0x10, 0x00]);
+        pkt.extend_from_slice(&[0xAA; 16]);
+        match parse(&pkt).unwrap() {
+            ParsedPacket::ProximityKeys(keys) => {
+                assert_eq!(keys.len(), 1);
+                assert_eq!(keys[0].key_type, ProximityKeyType::Irk);
+                assert_eq!(keys[0].data, vec![0xAA; 16]);
+            }
+            other => panic!("expected ProximityKeys, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_magic_cloud_keys() {
+        // 04 00 04 00 31 00 02 | IRK TLV | EncKey TLV
+        let mut pkt = vec![0x04, 0x00, 0x04, 0x00, 0x31, 0x00, 0x02];
+        pkt.extend_from_slice(&[0x01, 0x00, 0x10, 0x00]);
+        pkt.extend_from_slice(&[0x11; 16]);
+        pkt.extend_from_slice(&[0x04, 0x00, 0x10, 0x00]);
+        pkt.extend_from_slice(&[0x22; 16]);
+        match parse(&pkt).unwrap() {
+            ParsedPacket::MagicCloudKeys { irk, enc_key } => {
+                assert_eq!(irk, [0x11; 16]);
+                assert_eq!(enc_key, [0x22; 16]);
+            }
+            other => panic!("expected MagicCloudKeys, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn two_key_response_falls_back_to_proximity_keys() {
+        // count = 2 but both keys are IRK, so the strict IRK+EncKey magic parse
+        // fails and the generic proximity parser must take over.
+        let mut pkt = vec![0x04, 0x00, 0x04, 0x00, 0x31, 0x00, 0x02];
+        pkt.extend_from_slice(&[0x01, 0x00, 0x10, 0x00]);
+        pkt.extend_from_slice(&[0x33; 16]);
+        pkt.extend_from_slice(&[0x01, 0x00, 0x10, 0x00]);
+        pkt.extend_from_slice(&[0x44; 16]);
+        match parse(&pkt).unwrap() {
+            ParsedPacket::ProximityKeys(keys) => assert_eq!(keys.len(), 2),
+            other => panic!("expected ProximityKeys, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_unknown_opcode() {
+        let pkt = [0x04, 0x00, 0x04, 0x00, 0xEE, 0x00];
+        match parse(&pkt).unwrap() {
+            ParsedPacket::Unknown(data) => assert_eq!(data, pkt),
+            other => panic!("expected Unknown, got {:?}", other),
         }
     }
 }

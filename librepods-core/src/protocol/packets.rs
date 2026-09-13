@@ -39,8 +39,12 @@ pub const HANDSHAKE: [u8; 16] = [
 
 /// Set specific features — enables Conversational Awareness during audio
 /// playback and Adaptive Transparency. Sent after receiving handshake ACK.
+///
+/// The feature-flag byte is `0xD7`, matching `createSetFeatureFlagsPacket()`
+/// in `AACPManager.kt` and `Connection::SET_SPECIFIC_FEATURES` in
+/// `airpods_packets.h`.
 pub const SET_SPECIFIC_FEATURES: [u8; 14] = [
-    0x04, 0x00, 0x04, 0x00, 0x4D, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x04, 0x00, 0x04, 0x00, 0x4D, 0x00, 0xD7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
 /// Request notifications — subscribe to battery, ear detection, noise control,

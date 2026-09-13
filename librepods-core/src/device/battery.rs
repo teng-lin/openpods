@@ -53,12 +53,17 @@ impl Component {
 }
 
 /// Charging / discharging / disconnected state.
+///
+/// `OptimizedCharging` (`0x05`) is reported when the pod is on the charger but
+/// charging is paused (e.g. by charge limiting). Source: `Packets.kt`
+/// `BatteryStatus`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum BatteryStatus {
     Charging = 0x01,
     Discharging = 0x02,
     Disconnected = 0x04,
+    OptimizedCharging = 0x05,
 }
 
 impl BatteryStatus {
@@ -67,6 +72,7 @@ impl BatteryStatus {
             0x01 => Some(Self::Charging),
             0x02 => Some(Self::Discharging),
             0x04 => Some(Self::Disconnected),
+            0x05 => Some(Self::OptimizedCharging),
             _ => None,
         }
     }
@@ -216,5 +222,18 @@ mod tests {
         assert_eq!(info.case_.level, 17);
         assert_eq!(info.case_.status, BatteryStatus::Discharging);
         assert_eq!(info.primary_pod, Component::Right); // Right appears first
+    }
+
+    #[test]
+    fn parse_optimized_charging_status() {
+        // Two components: Right on optimized charging (0x05), Left discharging (0x02).
+        let pkt: Vec<u8> = vec![
+            0x04, 0x00, 0x04, 0x00, 0x04, 0x00, 0x02, //
+            0x02, 0x01, 0x50, 0x05, 0x01, // Right, 80%, optimized charging
+            0x04, 0x01, 0x40, 0x02, 0x01, // Left, 64%, discharging
+        ];
+        let info = parse_battery(&pkt).unwrap();
+        assert_eq!(info.right.status, BatteryStatus::OptimizedCharging);
+        assert_eq!(info.left.status, BatteryStatus::Discharging);
     }
 }

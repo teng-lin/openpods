@@ -225,7 +225,7 @@ pub fn parse_advertisement(data: &[u8]) -> Option<BleAdvertData> {
     let color = data[9];
     let connection_state = ConnectionState::from_byte(data[10]);
 
-    let mut advert = BleAdvertData {
+    let advert = BleAdvertData {
         paired,
         model_id,
         model,
@@ -254,8 +254,6 @@ pub fn parse_advertisement(data: &[u8]) -> Option<BleAdvertData> {
     // externally, the caller can use `decrypt_battery` to fill in encrypted_*
     // fields. We don't do decryption here to keep the function pure and not
     // require the key as a parameter.
-    let _ = &mut advert; // suppress unused mut warning
-
     Some(advert)
 }
 
@@ -264,13 +262,14 @@ pub fn parse_advertisement(data: &[u8]) -> Option<BleAdvertData> {
 /// `encrypted_payload` should be exactly 16 bytes (the last 16 bytes of the
 /// manufacturer data). `enc_key` is the 16-byte AES key from proximity keys.
 ///
-/// Returns the decrypted block on success, `None` on failure.
+/// Always succeeds for a well-formed 16-byte payload; the decrypted values are
+/// written into `advert` in place.
 pub fn decrypt_battery(
     advert: &mut BleAdvertData,
     encrypted_payload: &[u8; 16],
     enc_key: &[u8; 16],
     primary_left: bool,
-) -> Option<()> {
+) {
     use aes::cipher::{BlockDecrypt, KeyInit};
     use aes::Aes128;
 
@@ -304,8 +303,6 @@ pub fn decrypt_battery(
         advert.encrypted_case_battery = Some(cl);
         advert.encrypted_case_charging = Some(cc);
     }
-
-    Some(())
 }
 
 #[cfg(test)]
