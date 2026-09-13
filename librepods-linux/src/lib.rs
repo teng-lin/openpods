@@ -3,6 +3,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Linux platform implementations for LibrePods transport traits.
+//!
+//! This crate is only compiled on Linux. On other targets it is empty so that
+//! a workspace-wide `cargo build` still succeeds.
+
+#![cfg(target_os = "linux")]
 
 pub mod ble;
 pub mod bluez_monitor;

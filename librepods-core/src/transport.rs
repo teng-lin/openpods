@@ -112,7 +112,22 @@ pub trait DeviceMonitor: Send + Sync {
 ///
 /// Implemented by:
 /// - `librepods-linux`: MPRIS D-Bus interface + PulseAudio/PipeWire
+/// - `librepods-windows`: SMTC (WinRT) for playback + Win32 for routing checks
 pub trait MediaControl: Send + Sync {
+    /// Set the Bluetooth address of the connected AirPods (colon-separated).
+    ///
+    /// Must be called before any routing / activation method.
+    fn set_device_address(&mut self, address: &str);
+
+    /// Activate the AirPods audio output and make it the default sink.
+    ///
+    /// Idempotent. On platforms that route Bluetooth audio automatically this
+    /// may be a no-op.
+    fn activate_audio(&self) -> Result<(), TransportError>;
+
+    /// Release / remove the AirPods audio output on disconnect.
+    fn remove_audio_output(&self) -> Result<(), TransportError>;
+
     fn play(&self) -> Result<(), TransportError>;
     fn pause(&self) -> Result<(), TransportError>;
     fn set_volume(&self, percent: u8) -> Result<(), TransportError>;

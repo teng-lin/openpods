@@ -283,6 +283,18 @@ impl LinuxMediaControl {
 // ---------------------------------------------------------------------------
 
 impl MediaControl for LinuxMediaControl {
+    fn set_device_address(&mut self, address: &str) {
+        LinuxMediaControl::set_device_address(self, address);
+    }
+
+    fn activate_audio(&self) -> Result<(), TransportError> {
+        LinuxMediaControl::activate_audio(self)
+    }
+
+    fn remove_audio_output(&self) -> Result<(), TransportError> {
+        LinuxMediaControl::remove_audio_output(self)
+    }
+
     fn play(&self) -> Result<(), TransportError> {
         if self.has_playerctl {
             let status = Command::new("playerctl")

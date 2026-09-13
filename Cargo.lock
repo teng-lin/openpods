@@ -772,6 +772,7 @@ dependencies = [
  "env_logger",
  "librepods-core",
  "librepods-linux",
+ "librepods-windows",
  "log",
  "tokio",
 ]
@@ -799,6 +800,19 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "zbus",
+]
+
+[[package]]
+name = "librepods-windows"
+version = "0.1.0"
+dependencies = [
+ "btleplug",
+ "librepods-core",
+ "log",
+ "thiserror 2.0.18",
+ "tokio",
+ "windows",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

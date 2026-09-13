@@ -18,10 +18,33 @@ use librepods_core::device::ble_advert;
 use librepods_core::device::state::{model_from_number, DeviceState};
 use librepods_core::protocol::{packets, parser};
 use librepods_core::transport::{BleScanner, DeviceMonitor, L2capTransport, MediaControl};
-use librepods_linux::ble::BtleplugScanner;
-use librepods_linux::bluez_monitor::BluezMonitor;
-use librepods_linux::l2cap::L2capLinux;
-use librepods_linux::media::LinuxMediaControl;
+
+// ---------------------------------------------------------------------------
+// Platform selection
+//
+// The CLI only depends on the `librepods-core` traits; the concrete platform
+// implementation is selected here at compile time via Cargo target-specific
+// dependencies.
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+mod platform {
+    pub use librepods_linux::ble::BtleplugScanner as Scanner;
+    pub use librepods_linux::bluez_monitor::BluezMonitor as Monitor;
+    pub use librepods_linux::l2cap::L2capLinux as Transport;
+    pub use librepods_linux::media::LinuxMediaControl as Media;
+}
+
+#[cfg(target_os = "windows")]
+mod platform {
+    pub use librepods_windows::ble::BtleplugScanner as Scanner;
+    pub use librepods_windows::device_monitor::WindowsDeviceMonitor as Monitor;
+    pub use librepods_windows::l2cap::L2capWindows as Transport;
+    pub use librepods_windows::media::WindowsMediaControl as Media;
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+compile_error!("librepods-cli currently supports only Linux and Windows targets");
 
 #[derive(Parser)]
 #[command(name = "librepods", about = "LibrePods CLI daemon")]
@@ -58,11 +81,11 @@ fn main() {
         log::info!("Using provided address: {addr}");
         addr
     } else {
-        log::info!("Watching for AirPods via BlueZ...");
-        let monitor = match BluezMonitor::start() {
-            Ok(m) => m,
+        log::info!("Watching for AirPods...");
+        let monitor: Box<dyn DeviceMonitor> = match platform::Monitor::start() {
+            Ok(m) => Box::new(m),
             Err(e) => {
-                log::error!("Failed to start BlueZ monitor: {e}");
+                log::error!("Failed to start device monitor: {e}");
                 std::process::exit(1);
             }
         };
@@ -100,16 +123,16 @@ fn main() {
         ..DeviceState::default()
     };
 
-    let media = if cli.no_media {
+    let media: Option<Box<dyn MediaControl>> = if cli.no_media {
         log::info!("Media control disabled (--no-media)");
         None
     } else {
-        let mut mc = LinuxMediaControl::new();
+        let mut mc = platform::Media::new();
         mc.set_device_address(&address);
-        Some(mc)
+        Some(Box::new(mc))
     };
 
-    if let Err(e) = run_connection(&transport, &mut state, media.as_ref()) {
+    if let Err(e) = run_connection(transport.as_ref(), &mut state, media.as_deref()) {
         log::error!("Connection ended: {e}");
     }
 
@@ -126,8 +149,8 @@ fn run_ble_scan() {
         .build()
         .expect("failed to build tokio runtime");
 
-    let scanner = match rt.block_on(BtleplugScanner::start()) {
-        Ok(s) => s,
+    let scanner: Box<dyn BleScanner> = match rt.block_on(platform::Scanner::start()) {
+        Ok(s) => Box::new(s),
         Err(e) => {
             log::error!("Failed to start BLE scanner: {e}");
             log::error!("Make sure Bluetooth is enabled and you have permission to scan.");
@@ -215,11 +238,11 @@ fn run_ble_scan() {
     }
 }
 
-fn connect_with_retries(address: &str, max_retries: u32) -> Option<L2capLinux> {
+fn connect_with_retries(address: &str, max_retries: u32) -> Option<Box<dyn L2capTransport>> {
     for attempt in 1..=max_retries {
         log::info!("Connection attempt {attempt}/{max_retries} to {address}");
-        match L2capLinux::connect(address) {
-            Ok(t) => return Some(t),
+        match platform::Transport::connect(address) {
+            Ok(t) => return Some(Box::new(t)),
             Err(e) => {
                 log::warn!("Attempt {attempt} failed: {e}");
                 if attempt < max_retries {
@@ -240,13 +263,13 @@ fn connect_with_retries(address: &str, max_retries: u32) -> Option<L2capLinux> {
 /// Keeps internal state about whether audio has been activated and whether
 /// we auto-paused so we can resume when a pod goes back in ear.
 struct EarMediaController<'a> {
-    media: &'a LinuxMediaControl,
+    media: &'a dyn MediaControl,
     audio_activated: bool,
     paused_by_us: bool,
 }
 
 impl<'a> EarMediaController<'a> {
-    fn new(media: &'a LinuxMediaControl) -> Self {
+    fn new(media: &'a dyn MediaControl) -> Self {
         Self {
             media,
             audio_activated: false,
@@ -316,9 +339,9 @@ impl<'a> EarMediaController<'a> {
 // ---------------------------------------------------------------------------
 
 fn run_connection(
-    transport: &L2capLinux,
+    transport: &dyn L2capTransport,
     state: &mut DeviceState,
-    media: Option<&LinuxMediaControl>,
+    media: Option<&dyn MediaControl>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // --- Handshake sequence ---
 

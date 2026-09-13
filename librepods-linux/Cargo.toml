@@ -7,12 +7,15 @@ description = "Linux platform implementations for LibrePods (BlueZ, MPRIS, L2CAP
 
 [dependencies]
 librepods-core = { path = "../librepods-core" }
+log = "0.4"
+thiserror = "2"
+
+# Platform-specific I/O is only pulled in on Linux; on other targets this
+# crate compiles to an empty library (see `src/lib.rs`).
+[target.'cfg(target_os = "linux")'.dependencies]
 tokio = { version = "1", features = ["full"] }
 nix = { version = "0.31.2", features = ["socket", "net"] }
 zbus = { version = "5", default-features = false, features = ["tokio", "blocking-api"] }
 btleplug = "0.12.0"
 libc = "0.2"
-log = "0.4"
-thiserror = "2"
 futures = "0.3"
-
