@@ -27,6 +27,8 @@ pub const CONTROL_COMMAND_HEADER: [u8; 6] = [0x04, 0x00, 0x04, 0x00, 0x09, 0x00]
 pub enum ControlCommandId {
     MicMode = 0x01,
     ButtonSendMode = 0x05,
+    OwnsConnection = 0x06,
+    EarDetectionConfig = 0x0A,
     ListeningMode = 0x0D,
     VoiceTrigger = 0x12,
     SingleClickMode = 0x14,
@@ -39,6 +41,7 @@ pub enum ControlCommandId {
     CrownRotationDirection = 0x1C,
     AutoAnswerMode = 0x1E,
     ChimeVolume = 0x1F,
+    AutomaticConnectionConfig = 0x20,
     VolumeSwipeInterval = 0x23,
     CallManagementConfig = 0x24,
     VolumeSwipeMode = 0x25,
@@ -54,6 +57,12 @@ pub enum ControlCommandId {
     SiriMultitoneConfig = 0x32,
     HearingAssistConfig = 0x33,
     AllowOffOption = 0x34,
+    SleepDetectionConfig = 0x35,
+    AllowAutoConnect = 0x36,
+    PpeToggleConfig = 0x37,
+    PpeCapLevelConfig = 0x38,
+    StemConfig = 0x39,
+    DynamicEndOfCharge = 0x3B,
 }
 
 impl ControlCommandId {
@@ -62,6 +71,8 @@ impl ControlCommandId {
         match b {
             0x01 => Some(Self::MicMode),
             0x05 => Some(Self::ButtonSendMode),
+            0x06 => Some(Self::OwnsConnection),
+            0x0A => Some(Self::EarDetectionConfig),
             0x0D => Some(Self::ListeningMode),
             0x12 => Some(Self::VoiceTrigger),
             0x14 => Some(Self::SingleClickMode),
@@ -74,6 +85,7 @@ impl ControlCommandId {
             0x1C => Some(Self::CrownRotationDirection),
             0x1E => Some(Self::AutoAnswerMode),
             0x1F => Some(Self::ChimeVolume),
+            0x20 => Some(Self::AutomaticConnectionConfig),
             0x23 => Some(Self::VolumeSwipeInterval),
             0x24 => Some(Self::CallManagementConfig),
             0x25 => Some(Self::VolumeSwipeMode),
@@ -89,6 +101,12 @@ impl ControlCommandId {
             0x32 => Some(Self::SiriMultitoneConfig),
             0x33 => Some(Self::HearingAssistConfig),
             0x34 => Some(Self::AllowOffOption),
+            0x35 => Some(Self::SleepDetectionConfig),
+            0x36 => Some(Self::AllowAutoConnect),
+            0x37 => Some(Self::PpeToggleConfig),
+            0x38 => Some(Self::PpeCapLevelConfig),
+            0x39 => Some(Self::StemConfig),
+            0x3B => Some(Self::DynamicEndOfCharge),
             _ => None,
         }
     }
@@ -217,6 +235,14 @@ mod tests {
         assert_eq!(
             ControlCommandId::from_byte(0x34),
             Some(ControlCommandId::AllowOffOption)
+        );
+        assert_eq!(
+            ControlCommandId::from_byte(0x06),
+            Some(ControlCommandId::OwnsConnection)
+        );
+        assert_eq!(
+            ControlCommandId::from_byte(0x3B),
+            Some(ControlCommandId::DynamicEndOfCharge)
         );
         assert_eq!(ControlCommandId::from_byte(0xFF), None);
     }

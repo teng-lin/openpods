@@ -66,6 +66,8 @@ pub const FEATURES_ACK_PREFIX: [u8; 6] = [0x04, 0x00, 0x04, 0x00, 0x2B, 0x00];
 pub const BATTERY_PREFIX: [u8; 6] = [0x04, 0x00, 0x04, 0x00, 0x04, 0x00];
 
 /// Ear detection prefix — `04 00 04 00 06 00`.
+///
+/// Reserved — not currently referenced by the parser or CLI.
 pub const EAR_DETECTION_PREFIX: [u8; 6] = [0x04, 0x00, 0x04, 0x00, 0x06, 0x00];
 
 /// Metadata prefix — `04 00 04 00 1D`.
@@ -75,6 +77,8 @@ pub const METADATA_PREFIX: [u8; 5] = [0x04, 0x00, 0x04, 0x00, 0x1D];
 pub const CA_DATA_PREFIX: [u8; 8] = [0x04, 0x00, 0x04, 0x00, 0x4B, 0x00, 0x02, 0x00];
 
 /// AirPods disconnected (from phone cross-device) — `00 01 00 00`.
+///
+/// Reserved — not currently referenced by the parser or CLI.
 pub const AIRPODS_DISCONNECTED: [u8; 4] = [0x00, 0x01, 0x00, 0x00];
 
 // ---------------------------------------------------------------------------
@@ -98,6 +102,8 @@ pub const HEAD_TRACKING_STOP: [u8; 29] = [
 // ---------------------------------------------------------------------------
 
 /// Request proximity (magic pairing) cloud keys.
+///
+/// Reserved — not currently referenced by the parser or CLI.
 pub const REQUEST_MAGIC_CLOUD_KEYS: [u8; 8] = [0x04, 0x00, 0x04, 0x00, 0x30, 0x00, 0x05, 0x00];
 
 /// Magic cloud keys response header.
