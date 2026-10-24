@@ -4,6 +4,23 @@ These results establish automated development gates at the exact snapshots below
 They do not complete physical case/suspend/audio acceptance or a 24-hour soak.
 Rerun checks if application source changes after the tested checkpoint.
 
+## Latest parser and disconnect-guard verification
+
+[Source and results](evidence/2026-10-24/automated-verification.json) record clean
+`818c20d`, application-equivalent to root `eca6ef6`. All-feature pure-core Miri
+passed 74 unit tests, 8 regressions and 1 doctest. Four 60-second bounded fuzz
+runs exited zero without crash artifacts (22,516,081 AACP, 20,467,186 BLE,
+5,390,519 IPC and 5,643,784 config executions; 61 seconds reported per run).
+The core, IPC/config and fuzz input component hashes are recorded explicitly.
+
+Linux AddressSanitizer passed all 3 dispatch-boundary tests, including the new
+owned-FD probe, with leak detection enabled. The unchanged queued-disconnected
+client regression passed 100 repetitions in each of minimal and BLE builds,
+after reproducing the pre-fix race on the seventh isolated execution. This
+closes the kernel-EOF versus asynchronous-reader scheduling gap without relaxing
+assertions or adding a test delay. Final sleep-orchestration verification and
+clean coverage are separate gates; these results do not establish either one.
+
 ## Stable checkpoint
 
 Tested commit `bc78c011f3bac3f457e739c7b63e8e186da9e7c7`, tree

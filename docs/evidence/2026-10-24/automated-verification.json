@@ -1,0 +1,79 @@
+{
+  "source": {
+    "captured_utc": "2026-10-24T22:38:17.952309+00:00",
+    "commit": "818c20dc7f6e503d54c2e50255dd77780a331733",
+    "tree": "566a0b8ea87b82aba2c744e291ba7ef0f249ba78",
+    "status": "",
+    "components": {
+      "librepods-core": "1bec7489785fae97323e335818d3d4dd6c4bc431",
+      "librepods-daemon/src/ipc.rs": "4f42078dbe112e6c3140408c118d0fe76fdcd8a2",
+      "librepods-daemon/src/config.rs": "b45e3c57d1bd0439f03cfe9b99705a70e041f383",
+      "fuzz": "cfc14d1f9aa9879e56f3317eb91a2ae7162304fd",
+      "Cargo.lock": "cb13a6b9f210f92ec4b75586362552313577fc46"
+    },
+    "f12b2e0_components": {
+      "librepods-core": "1bec7489785fae97323e335818d3d4dd6c4bc431",
+      "librepods-daemon/src/ipc.rs": "4f42078dbe112e6c3140408c118d0fe76fdcd8a2",
+      "librepods-daemon/src/config.rs": "b45e3c57d1bd0439f03cfe9b99705a70e041f383",
+      "fuzz": "cfc14d1f9aa9879e56f3317eb91a2ae7162304fd",
+      "Cargo.lock": "cb13a6b9f210f92ec4b75586362552313577fc46"
+    },
+    "fuzz_lock_sha256_before": "d43de8638be49c738d19152c6e9f962305ef6031f7a69c673d9b0a0f81d03650",
+    "asan_components": {
+      "librepods-daemon/src/session.rs": "b3d4ac9ad836e074ce4f43bbb44ba4ba21b6e7a4",
+      "librepods-daemon/src/runtime.rs": "db11cf44215de59f6aa373be8d7207d91da73b2e"
+    }
+  },
+  "results": {
+    "fuzz_lock_sha256_after": "d43de8638be49c738d19152c6e9f962305ef6031f7a69c673d9b0a0f81d03650",
+    "fuzz": {
+      "aacp": {
+        "exit_code": 0,
+        "executions": 22516081,
+        "seconds": 61,
+        "crash_artifacts": []
+      },
+      "ble": {
+        "exit_code": 0,
+        "executions": 20467186,
+        "seconds": 61,
+        "crash_artifacts": []
+      },
+      "ipc": {
+        "exit_code": 0,
+        "executions": 5390519,
+        "seconds": 61,
+        "crash_artifacts": []
+      },
+      "config": {
+        "exit_code": 0,
+        "executions": 5643784,
+        "seconds": 61,
+        "crash_artifacts": []
+      }
+    },
+    "miri": {
+      "exit_code": 0,
+      "units": 74,
+      "regressions": 8,
+      "doctests": 1
+    },
+    "final_status": "",
+    "asan_dispatch": {
+      "exit_code": 0,
+      "passed": 3,
+      "filtered": 62,
+      "target": "x86_64-unknown-linux-gnu",
+      "features": "all",
+      "sanitizer": "address",
+      "asan_options": "detect_leaks=1:halt_on_error=1"
+    }
+  },
+  "archive_sha256": "cd1d84c86598798fdede523b0504c5278a1f96b74b3018b50de1abf80c36d21e",
+  "limits": [
+    "Bounded fuzzing is not exhaustive safety proof.",
+    "Miri covers pure core, including optional BLE, not OS adapters.",
+    "ASAN covers3Linuxdispatch tests; linked system libraries are not fully instrumented.",
+    "Sleep orchestration changed after this checkpoint; its final tests are recorded separately."
+  ]
+}
