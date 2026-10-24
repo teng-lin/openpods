@@ -455,7 +455,7 @@ mod tests {
         })
         .await;
         assert!(matches!(
-            monitor.next_event_timeout(Duration::ZERO),
+            monitor.next_event_timeout(Duration::from_secs(1)),
             Ok(Some(DeviceEvent::Connected { .. }))
         ));
         service
@@ -464,7 +464,7 @@ mod tests {
             .expect("release BlueZ");
         wait_for(&monitor, |snapshot| !snapshot.available).await;
         assert!(matches!(
-            monitor.next_event_timeout(Duration::ZERO),
+            monitor.next_event_timeout(Duration::from_secs(1)),
             Ok(Some(DeviceEvent::Disconnected { .. }))
         ));
         service
@@ -479,6 +479,17 @@ mod tests {
                     .is_some_and(|device| device.airpods)
         })
         .await;
+        assert!(matches!(
+            monitor.next_event_timeout(Duration::from_secs(1)),
+            Ok(Some(DeviceEvent::Connected { .. }))
+        ));
+        assert!(
+            matches!(
+                monitor.next_event_timeout(Duration::from_millis(20)),
+                Ok(None)
+            ),
+            "reconciled snapshots must not duplicate connection events"
+        );
         monitor.shutdown();
     }
 
