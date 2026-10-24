@@ -1097,7 +1097,7 @@ fn actual_serializer_generates_legacy_consumer_fixtures() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn newer_queued_setting_supersedes_old_desire_without_extra_writes() {
+async fn newer_queued_setting_supersedes_old_desire_and_writes_only_final_value() {
     let shared = Arc::new(Shared::default());
     let harness = Harness::start(shared.clone(), Config::default()).await;
     harness.ready().await;
@@ -1165,8 +1165,15 @@ async fn newer_queued_setting_supersedes_old_desire_without_extra_writes() {
         .error
         .is_none());
     let latest = newer.await.expect("newer").expect("response");
-    assert_eq!(latest.result, Some(serde_json::json!("AlreadySet")));
-    assert_eq!(shared.changes.lock().expect("changes").len(), 1);
+    assert_eq!(latest.result, Some(serde_json::json!("Confirmed")));
+    assert_eq!(
+        *shared.changes.lock().expect("changes"),
+        vec![
+            SettingChange::ListeningMode(NoiseControlMode::Transparency).packet(),
+            SettingChange::ConversationalAwareness(true).packet(),
+        ],
+        "superseded desired value was written or final mutation was replayed"
+    );
     harness.stop().await;
 }
 
@@ -2467,4 +2474,58 @@ async fn readback_handshake_obeys_original_deadline_and_ignores_late_old_reports
         "late readback caused mutation replay"
     );
     harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_cached_config_target_still_writes_once_and_reads_a_fresh_generation() {
+    for (change, id, value) in [
+        (SettingChange::ConversationalAwareness(true), 0x28, 1),
+        (SettingChange::SingleEarbudAnc(false), 0x1B, 2),
+        (SettingChange::AdaptiveNoiseLevel(50), 0x2E, 50),
+    ] {
+        let shared = Arc::new(Shared::default());
+        shared.suppress_config_echo.store(true, Ordering::SeqCst);
+        *shared.mode.lock().expect("mode") = Some(NoiseControlMode::Adaptive);
+        let harness = Harness::start(shared.clone(), Config::default()).await;
+        let initial = harness
+            .wait_for(|snapshot| {
+                snapshot.connected
+                    && snapshot.device.reported_controls.get(&id) == Some(&[value, 0, 0, 0])
+            })
+            .await;
+        let mut previous_generation = initial.session_generation;
+        for repetition in 1..=2 {
+            let response = harness
+                .request(
+                    580 + repetition as u64,
+                    Operation::Change(change.clone()),
+                    1500,
+                )
+                .await;
+            assert_eq!(
+                response.result,
+                Some(serde_json::json!("Confirmed")),
+                "cached config cannot justify AlreadySet"
+            );
+            let fresh = harness
+                .wait_for(|snapshot| {
+                    snapshot.session_generation > previous_generation
+                        && snapshot.device.reported_controls.get(&id) == Some(&[value, 0, 0, 0])
+                })
+                .await;
+            assert!(!fresh.device.observations["metadata"].stale);
+            assert_eq!(
+                fresh.device.observations[&format!("control.{id:02x}")].generation,
+                fresh.session_generation
+            );
+            previous_generation = fresh.session_generation;
+            assert_eq!(shared.connections.load(Ordering::SeqCst), repetition + 1);
+            assert_eq!(
+                *shared.changes.lock().expect("mutations"),
+                vec![change.packet(); repetition],
+                "cached target skipped an explicit desired write or replayed a mutation"
+            );
+        }
+        harness.stop().await;
+    }
 }
