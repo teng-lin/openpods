@@ -46,6 +46,11 @@ struct KeyExchange {
     envelope: Envelope,
     keys: KeyRead,
 }
+struct ReadbackConnection {
+    address: String,
+    generation: u64,
+    deadline: Instant,
+}
 struct Active {
     envelope: Envelope,
     pending: PendingChange,
@@ -104,7 +109,7 @@ impl SessionHandle {
                 Operation::Capabilities => Response::ok(id, status.capabilities()),
                 Operation::Doctor => Response::ok(
                     id,
-                    serde_json::json!({"lifecycle":status.lifecycle,"last_error":status.last_error,"ble":status.ble,"queue_depth":status.queue_depth}),
+                    serde_json::json!({"lifecycle":status.lifecycle,"adapter_ready":status.adapter_ready,"bluez_connected":status.bluez_connected,"aacp_ready":status.connected,"last_error":status.last_error,"ble":status.ble,"queue_depth":status.queue_depth}),
                 ),
                 _ => Response::snapshot(id, &status),
             };
@@ -381,21 +386,27 @@ impl Worker {
                 ),
             ));
         }
+        if let Some(mut active) = self.active.take() {
+            let action = active.pending.transport_lost();
+            let response = self.action_response(active.envelope.request.id, action);
+            let _ = active.envelope.reply.send(response);
+        }
+        self.release_transport();
+    }
+    /// Release only the owned vendor channel; a readback transaction stays active.
+    fn release_transport(&mut self) {
         if let Some(connection) = self.connection.take() {
             connection.close();
         }
         if let Ok(mut transport) = self.transport.lock() {
             *transport = None;
         }
-        if let Some(mut active) = self.active.take() {
-            let action = active.pending.transport_lost();
-            let response = self.action_response(active.envelope.request.id, action);
-            let _ = active.envelope.reply.send(response);
-        }
         self.state.end_session(self.generation);
         self.status.connected = false;
     }
     fn sync_recovery(&mut self) {
+        self.status.adapter_ready = self.adapter_ready;
+        self.status.bluez_connected = self.bluez_connected;
         self.status.lifecycle = match self.recovery.state {
             Lifecycle::WaitingForAdapter => "waiting_for_adapter",
             Lifecycle::WaitingForDevice => "waiting_for_device",
@@ -505,12 +516,59 @@ impl Worker {
             self.publish();
         }
     }
+    fn connection_budget(
+        &self,
+        readback: Option<&ReadbackConnection>,
+        limit: Duration,
+    ) -> Result<Duration, DaemonError> {
+        if self.stopped.load(Ordering::SeqCst) || self.backend.sleeping() {
+            return Err(DaemonError::new(
+                ErrorCode::Cancelled,
+                "connection",
+                "connection preparation interrupted",
+            ));
+        }
+        if let Some(readback) = readback {
+            if self
+                .active
+                .as_ref()
+                .is_none_or(|active| active.envelope.reply.is_closed())
+            {
+                return Err(DaemonError::new(
+                    ErrorCode::Cancelled,
+                    "readback",
+                    "request was cancelled",
+                ));
+            }
+            let remaining = readback.deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(DaemonError::new(
+                    ErrorCode::CommandTimeout,
+                    "readback",
+                    "original command deadline elapsed",
+                ));
+            }
+            Ok(limit.min(remaining))
+        } else {
+            Ok(limit)
+        }
+    }
     fn connect(&mut self) -> Result<(), DaemonError> {
+        self.connect_bounded(None)
+    }
+    fn connect_bounded(
+        &mut self,
+        readback: Option<&ReadbackConnection>,
+    ) -> Result<(), DaemonError> {
+        self.connection_budget(readback, Duration::from_secs(3))?;
         self.lifecycle(Lifecycle::WaitingForDevice);
         let address = self.config.address.as_deref().or_else(|| {
             (!self.state.bluetooth_address.is_empty())
                 .then_some(self.state.bluetooth_address.as_str())
         });
+        let address = readback
+            .map(|readback| readback.address.as_str())
+            .or(address);
         let endpoint = match self.backend.discover(address) {
             Ok(endpoint) => {
                 self.adapter_ready = true;
@@ -523,10 +581,22 @@ impl Worker {
                 return Err(error);
             }
         };
-        self.generation = self
+        self.connection_budget(readback, Duration::from_secs(3))?;
+        let generation = self
             .generation
             .max(self.recovery.generation)
             .saturating_add(1);
+        if readback.is_some_and(|readback| {
+            !readback.address.eq_ignore_ascii_case(&endpoint.address)
+                || generation != readback.generation
+        }) {
+            return Err(DaemonError::new(
+                ErrorCode::Cancelled,
+                "readback",
+                "device identity or expected generation changed",
+            ));
+        }
+        self.generation = generation;
         self.recovery.generation = self.generation;
         self.state
             .set_device_identity(&endpoint.address, &endpoint.name);
@@ -534,15 +604,31 @@ impl Worker {
         self.recovery.state = Lifecycle::Connecting;
         self.sync_recovery();
         self.poll_telemetry(false);
-        self.telemetry.pause_for_connection()?;
+        if readback.is_some() {
+            self.telemetry.pause_for_connection_with_timeout(
+                self.connection_budget(readback, Duration::from_millis(500))?,
+            )?;
+        } else {
+            self.telemetry.pause_for_connection()?;
+        }
         self.publish();
-        let connection = self.backend.connect(&endpoint, Duration::from_secs(3))?;
+        let connection = self.backend.connect(
+            &endpoint,
+            self.connection_budget(readback, Duration::from_secs(3))?,
+        )?;
+        if let Err(error) = self.connection_budget(readback, Duration::from_secs(1)) {
+            connection.close();
+            return Err(error);
+        }
         if let Ok(mut transport) = self.transport.lock() {
             *transport = Some(connection.clone());
         }
         self.connection = Some(connection.clone());
         self.lifecycle(Lifecycle::AwaitingHandshake);
-        let mut handshake = Handshake::new(self.generation, self.now(), 3000);
+        let budget = self
+            .connection_budget(readback, Duration::from_secs(3))?
+            .as_millis() as u64;
+        let mut handshake = Handshake::new(self.generation, self.now(), budget);
         let mut action = handshake.start();
         let mut bytes = [0u8; 1024];
         loop {
@@ -573,7 +659,10 @@ impl Worker {
             match action {
                 HandshakeAction::Send(packet) => {
                     connection
-                        .send(&packet, Duration::from_secs(1))
+                        .send(
+                            &packet,
+                            self.connection_budget(readback, Duration::from_secs(1))?,
+                        )
                         .map_err(|e| transport_error("handshake send", e))?;
                     action = handshake.mark_subscribed(self.generation, self.now());
                     continue;
@@ -595,7 +684,7 @@ impl Worker {
                 }
                 HandshakeAction::Wait => {}
             }
-            match connection.recv(&mut bytes, READ_SLICE) {
+            match connection.recv(&mut bytes, self.connection_budget(readback, READ_SLICE)?) {
                 Ok(size) => {
                     if let Ok(packet) = parser::parse(&bytes[..size]) {
                         self.state
@@ -612,6 +701,7 @@ impl Worker {
                 Err(error) => return Err(transport_error("handshake receive", error)),
             }
         }
+        self.connection_budget(readback, Duration::from_secs(1))?;
         self.recovery.ready(self.now());
         self.sync_recovery();
         self.status.connected = true;
@@ -693,6 +783,43 @@ impl Worker {
                         }
                     }
                 }
+                CommandAction::ReopenForReadback { generation } => {
+                    action = active
+                        .pending
+                        .mark_readback_reopened(generation, self.now());
+                    if action != CommandAction::Wait {
+                        continue;
+                    }
+                    let readback = ReadbackConnection {
+                        address: self.state.bluetooth_address.clone(),
+                        generation,
+                        deadline: active.envelope.deadline,
+                    };
+                    self.active = Some(active);
+                    self.release_transport();
+                    self.publish();
+                    let result = self.connect_bounded(Some(&readback));
+                    let Some(mut resumed) = self.active.take() else {
+                        return;
+                    };
+                    action = match result {
+                        Ok(()) => {
+                            if resumed.envelope.reply.is_closed()
+                                || self.stopped.load(Ordering::SeqCst)
+                                || self.backend.sleeping()
+                            {
+                                resumed.pending.cancel()
+                            } else {
+                                resumed.pending.observe_readback(&self.state, self.now())
+                            }
+                        }
+                        Err(error) => {
+                            self.status.last_error = Some(error);
+                            resumed.pending.transport_lost()
+                        }
+                    };
+                    active = resumed;
+                }
                 CommandAction::Complete(outcome) => {
                     let uncertain = matches!(outcome, CommandOutcome::OutcomeUnknown);
                     let response = self.action_response(
@@ -767,7 +894,7 @@ impl Worker {
             Operation::Capabilities => Response::ok(id, self.status.capabilities()),
             Operation::Doctor => Response::ok(
                 id,
-                serde_json::json!({"lifecycle":self.status.lifecycle,"last_error":self.status.last_error,"ble":self.status.ble,"queue_depth":self.status.queue_depth}),
+                serde_json::json!({"lifecycle":self.status.lifecycle,"adapter_ready":self.status.adapter_ready,"bluez_connected":self.status.bluez_connected,"aacp_ready":self.status.connected,"last_error":self.status.last_error,"ble":self.status.ble,"queue_depth":self.status.queue_depth}),
             ),
             Operation::Change(change) => {
                 if !self.status.connected {
@@ -1049,10 +1176,14 @@ impl Worker {
                                 self.state
                                     .apply_packet(&packet, self.generation, self.now());
                             if let Some(mut active) = self.active.take() {
-                                let action =
+                                let mut action =
                                     active
                                         .pending
                                         .on_packet(&packet, self.generation, self.now());
+                                if action == CommandAction::Wait {
+                                    action =
+                                        active.pending.observe_readback(&self.state, self.now());
+                                }
                                 self.handle_action(active, action);
                             }
                             if changed {
