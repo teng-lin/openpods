@@ -41,7 +41,7 @@ def read_manifest(prefix):
     if path.is_symlink():
         raise ValueError("installation manifest is a symlink")
     if not path.exists():
-        return {"version": 1, "files": {}}
+        return {"version": 1, "files": {}, "unit_dir": None}
     result = json.loads(path.read_text())
     if result.get("version") != 1 or not isinstance(result.get("files"), dict):
         raise ValueError("unknown installation manifest version/shape")
@@ -65,6 +65,8 @@ def install(prefix, binary, unit_dir):
     manifest = read_manifest(prefix)
     destination = prefix / "bin/librepods-cli"
     unit_path = unit_dir / UNIT
+    if any(ord(character) < 32 for character in str(destination)):
+        raise ValueError("binary destination contains control characters")
     owned_destination(destination, manifest)
     owned_destination(unit_path, manifest)
     # systemd performs percent expansion even inside double-quoted arguments.
@@ -72,10 +74,24 @@ def install(prefix, binary, unit_dir):
     unit = (ROOT / "packaging/systemd/librepods-rs.service.in").read_text()
     files = [(destination, binary.read_bytes(), 0o755),
              (unit_path, unit.replace("@BINARY@", escaped).encode(), 0o644)]
-    for path, data, mode in files:
-        atomic_write(path, data, mode)
-        manifest["files"][str(path)] = digest(path)
-    atomic_write(manifest_path(prefix), (json.dumps(manifest, indent=2) + "\n").encode(), 0o600)
+    backups = {path: (path.read_bytes(), path.stat().st_mode & 0o777) if path.exists() else None
+               for path, _, _ in files}
+    changed = []
+    try:
+        for path, data, mode in files:
+            atomic_write(path, data, mode)
+            changed.append(path)
+            manifest["files"][str(path)] = digest(path)
+        manifest["unit_dir"] = str(unit_dir)
+        atomic_write(manifest_path(prefix), (json.dumps(manifest, indent=2) + "\n").encode(), 0o600)
+    except OSError:
+        for path in reversed(changed):
+            if backups[path] is None:
+                path.unlink(missing_ok=True)
+            else:
+                data, mode = backups[path]
+                atomic_write(path, data, mode)
+        raise
     return [path for path, _, _ in files]
 
 
@@ -87,7 +103,7 @@ def uninstall(prefix):
         path = Path(name)
         # A manifest is not permission to delete arbitrary filesystem paths.
         valid_binary = path == prefix / "bin/librepods-cli"
-        valid_unit = path.name == UNIT and path.parent.name == "user" and path.parent.parent.name == "systemd"
+        valid_unit = manifest.get("unit_dir") is not None and path == Path(manifest["unit_dir"]) / UNIT
         if not (valid_binary or valid_unit) or path.is_symlink():
             preserved.append(name)
             continue

@@ -6,6 +6,7 @@ from pathlib import Path
 import stat
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("installer", ROOT / "scripts/install.py")
@@ -67,6 +68,31 @@ class Installation(unittest.TestCase):
         path.write_text(json.dumps({"version": 999, "files": {}}))
         with self.assertRaises(ValueError):
             installer.uninstall(self.prefix)
+
+    def test_failed_install_rolls_back_files_already_written(self):
+        installer.install(self.prefix, self.binary, self.unit_dir)
+        installed = self.prefix / "bin/librepods-cli"
+        original = installed.read_bytes()
+        self.binary.write_bytes(b"replacement binary")
+        real_write = installer.atomic_write
+        failed = False
+
+        def fail_once(path, data, mode):
+            nonlocal failed
+            if path == self.unit_dir / installer.UNIT and not failed:
+                failed = True
+                raise OSError("injected read-only destination")
+            real_write(path, data, mode)
+
+        with mock.patch.object(installer, "atomic_write", side_effect=fail_once):
+            with self.assertRaises(OSError):
+                installer.install(self.prefix, self.binary, self.unit_dir)
+        self.assertEqual(installed.read_bytes(), original)
+        installer.uninstall(self.prefix)
+
+    def test_systemd_argument_cannot_inject_unit_directives(self):
+        with self.assertRaises(ValueError):
+            installer.install(self.root / "bad\nExecStart=unsafe", self.binary, self.unit_dir)
 
 
 if __name__ == "__main__":
