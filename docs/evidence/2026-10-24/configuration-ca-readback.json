@@ -1,0 +1,48 @@
+{
+  "probe": "unmodified release candidate single-write AACP-only readback",
+  "binary_sha256": "aa9f923e0e0b4b0923b84a14611218633ba52eb31f993bebdf8a1bca4103f013",
+  "checks": [
+    {
+      "setting": "CA alternate",
+      "exit": 0,
+      "result": "Confirmed",
+      "elapsed_ms": 105.3086289903149
+    },
+    {
+      "setting": "CA restore",
+      "exit": 0,
+      "result": "Confirmed",
+      "elapsed_ms": 82.37550299963914
+    }
+  ],
+  "initial": {
+    "ca": 1,
+    "mode": "Transparency",
+    "generation": 1
+  },
+  "after_alternate": {
+    "ca": [
+      2,
+      0,
+      0,
+      0
+    ],
+    "mode": "Transparency",
+    "generation": 2,
+    "bluez_connected": true,
+    "readback_attempts_total": 1
+  },
+  "final": {
+    "ca": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "mode": "Transparency",
+    "generation": 3
+  },
+  "restored": true,
+  "mode_preserved": true,
+  "audio_selection_preserved": true
+}

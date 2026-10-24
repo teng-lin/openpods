@@ -1,0 +1,172 @@
+{
+  "probe": "unmodified release candidate configuration acceptance",
+  "binary_sha256": "aa9f923e0e0b4b0923b84a14611218633ba52eb31f993bebdf8a1bca4103f013",
+  "checks": [
+    {
+      "setting": "one-bud ANC alternate",
+      "exit": 0,
+      "result": "Confirmed",
+      "elapsed_ms": 245.52231300913263,
+      "generation_before": 3,
+      "generation_after": 4,
+      "observed_level": [
+        50,
+        0,
+        0,
+        0
+      ],
+      "observed_one_bud": [
+        1,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "setting": "one-bud ANC restore",
+      "exit": 0,
+      "result": "Confirmed",
+      "elapsed_ms": 247.97405599383637,
+      "generation_before": 4,
+      "generation_after": 5,
+      "observed_level": [
+        50,
+        0,
+        0,
+        0
+      ],
+      "observed_one_bud": [
+        2,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "setting": "Adaptive mode",
+      "exit": 0,
+      "result": "Confirmed",
+      "elapsed_ms": 834.7194420057349,
+      "generation_before": 5,
+      "generation_after": 5,
+      "observed_level": [
+        50,
+        0,
+        0,
+        0
+      ],
+      "observed_one_bud": [
+        2,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "setting": "adaptive level 0",
+      "exit": 0,
+      "result": "Confirmed",
+      "elapsed_ms": 229.9322610051604,
+      "generation_before": 5,
+      "generation_after": 6,
+      "observed_level": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "observed_one_bud": [
+        2,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "setting": "adaptive level 100",
+      "exit": 0,
+      "result": "Confirmed",
+      "elapsed_ms": 202.12106200051494,
+      "generation_before": 6,
+      "generation_after": 7,
+      "observed_level": [
+        100,
+        0,
+        0,
+        0
+      ],
+      "observed_one_bud": [
+        2,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "setting": "adaptive level restore",
+      "exit": 0,
+      "result": "Confirmed",
+      "elapsed_ms": 181.5135960059706,
+      "generation_before": 7,
+      "generation_after": 8,
+      "observed_level": [
+        50,
+        0,
+        0,
+        0
+      ],
+      "observed_one_bud": [
+        2,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "setting": "mode cleanup",
+      "exit": 0,
+      "result": "Confirmed",
+      "elapsed_ms": 1506.317912004306,
+      "generation_before": 8,
+      "generation_after": 8,
+      "observed_level": [
+        50,
+        0,
+        0,
+        0
+      ],
+      "observed_one_bud": [
+        2,
+        0,
+        0,
+        0
+      ]
+    }
+  ],
+  "failures": [],
+  "initial": {
+    "mode": "Transparency",
+    "one_bud_anc": 2,
+    "adaptive_level": 50
+  },
+  "restored": true,
+  "audio_selection_preserved": true,
+  "final": {
+    "mode": "Transparency",
+    "one_bud_anc": [
+      2,
+      0,
+      0,
+      0
+    ],
+    "adaptive_level": [
+      50,
+      0,
+      0,
+      0
+    ],
+    "bluez_connected": true,
+    "readback_attempts_total": 7,
+    "reconnect_attempts_total": 0
+  }
+}
