@@ -26,11 +26,11 @@ class CliContract(unittest.TestCase):
         (root / "librepods-rs").mkdir(mode=0o700)
         self.socket = root / "librepods-rs/control.sock"
 
-    def call(self, *args):
-        return subprocess.run([str(BINARY), "--json", *args], env=self.env,
+    def call(self, *args, machine=True):
+        return subprocess.run([str(BINARY), *(["--json"] if machine else []), *args], env=self.env,
                               capture_output=True, text=True, timeout=5)
 
-    def exchange(self, args, response):
+    def exchange(self, args, response, machine=True):
         received, failures = [], []
         server = socket.socket(socket.AF_UNIX)
         self.addCleanup(server.close)
@@ -53,7 +53,7 @@ class CliContract(unittest.TestCase):
 
         thread = threading.Thread(target=peer, daemon=True)
         thread.start()
-        result = self.call(*args)
+        result = self.call(*args, machine=machine)
         thread.join(4)
         self.assertFalse(thread.is_alive(), "IPC peer did not finish")
         self.assertEqual(failures, [])
@@ -103,6 +103,15 @@ class CliContract(unittest.TestCase):
         self.assertTrue(snapshots[0]["connected"])
         self.assertFalse(snapshots[1]["connected"])
         self.assertTrue(snapshots[1]["device"]["observations"]["battery.left"]["stale"])
+
+    def test_terminal_watch_marks_retained_battery_as_stale_after_disconnect(self):
+        snapshot = json.loads((FIXTURES / "disconnected.json").read_text())
+        result, _ = self.exchange(["--status"], lambda req: {
+            "version": 1, "id": req["id"], "result": snapshot, "error": None}, machine=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        reading = next(line for line in result.stdout.splitlines() if line.startswith("Left battery"))
+        self.assertRegex(reading.lower(), r"stale|cached|unavailable",
+            "a retained disconnected measurement must not appear live")
 
     def test_compat_status_matches_actual_legacy_serializer(self):
         snapshot = json.loads((FIXTURES / "pro2.json").read_text())
