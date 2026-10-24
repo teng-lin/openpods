@@ -17,6 +17,8 @@ use tokio::process::Command;
 
 use crate::error::{ErrorKind, PlatformError};
 
+pub use crate::player_monitor::{PlayerEvent, PlayerMonitor};
+
 const TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_OUTPUT: u64 = 4 * 1024 * 1024;
 
