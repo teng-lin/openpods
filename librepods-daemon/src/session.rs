@@ -37,6 +37,7 @@ const READ_SLICE: Duration = Duration::from_millis(40);
 const AVAILABILITY_POLL_MS: u64 = 1000;
 
 struct Envelope {
+    suspend_epoch: u64,
     peer: Option<Arc<OwnedFd>>,
     target_address: Option<String>,
     request: Request,
@@ -109,6 +110,7 @@ impl SessionHandle {
     }
     async fn request_inner(&self, mut request: Request, peer: Option<Arc<OwnedFd>>) -> Response {
         let id = request.id;
+        let admission_suspend_epoch = self.backend.suspend_epoch();
         if peer.as_ref().is_some_and(|peer| !peer_connected(peer)) {
             return Response::failed(
                 id,
@@ -159,6 +161,19 @@ impl SessionHandle {
                 _ => Response::snapshot(id, &status),
             };
         }
+        if self.backend.sleeping()
+            || self.status.borrow().lifecycle == "suspended"
+            || self.backend.suspend_epoch() != admission_suspend_epoch
+        {
+            return Response::failed(
+                id,
+                DaemonError::new(
+                    ErrorCode::Cancelled,
+                    "suspend",
+                    "request cannot cross a pending suspend cycle",
+                ),
+            );
+        }
         let readonly = matches!(request.operation, Operation::FetchKeys);
         let duration = Duration::from_millis(request.timeout_ms);
         let readonly_audio = matches!(request.operation, Operation::AudioStatus);
@@ -176,6 +191,7 @@ impl SessionHandle {
                 (status.session_generation, status.device.address.clone())
             };
             let audio_address = address.clone();
+            let audio_suspend_epoch = admission_suspend_epoch;
             if peer.as_ref().is_some_and(|peer| !peer_connected(peer)) {
                 return Response::failed(
                     id,
@@ -183,6 +199,19 @@ impl SessionHandle {
                         ErrorCode::Cancelled,
                         "IPC peer",
                         "request peer closed before audio dispatch",
+                    ),
+                );
+            }
+            if self.backend.sleeping()
+                || self.backend.suspend_epoch() != admission_suspend_epoch
+                || self.status.borrow().lifecycle == "suspended"
+            {
+                return Response::failed(
+                    id,
+                    DaemonError::new(
+                        ErrorCode::Cancelled,
+                        "suspend",
+                        "audio request crossed suspend before dispatch",
                     ),
                 );
             }
@@ -199,11 +228,14 @@ impl SessionHandle {
                 let status = self.status.borrow();
                 status.session_generation != audio_generation
                     || status.device.address != audio_address
+                    || status.lifecycle == "suspended"
+                    || self.backend.suspend_epoch() != audio_suspend_epoch
+                    || self.backend.sleeping()
             };
             if matches!(&result, Ok(Ok(_)))
                 && (changed_session || self.stopped.load(Ordering::SeqCst))
             {
-                return Response::failed(id,DaemonError::new(if readonly_audio {ErrorCode::Cancelled} else {ErrorCode::OutcomeUnknown},"audio","session changed while audio operation was in flight; old result was not published"));
+                return Response::failed(id,DaemonError::new(if readonly_audio {ErrorCode::Cancelled} else {ErrorCode::OutcomeUnknown},"audio","session or suspend epoch changed while audio operation was in flight; old result was not published"));
             }
             return match result {
                 Ok(Ok(value))=>{self.audio_feed.send_replace(value.clone());Response::ok(id,value)},
@@ -218,6 +250,7 @@ impl SessionHandle {
         let dispatched = Arc::new(AtomicBool::new(false));
         let (reply, rx) = oneshot::channel();
         match self.sender.try_send(Envelope {
+            suspend_epoch: admission_suspend_epoch,
             peer,
             target_address,
             request,
@@ -355,6 +388,7 @@ impl Session {
                 next_probe_ms: 0,
                 adapter_ready: false,
                 bluez_connected: false,
+                handled_suspend_epoch: 0,
             }
             .run();
         });
@@ -403,6 +437,7 @@ struct Worker {
     next_probe_ms: u64,
     adapter_ready: bool,
     bluez_connected: bool,
+    handled_suspend_epoch: u64,
 }
 
 impl Worker {
@@ -460,6 +495,34 @@ impl Worker {
         self.state.end_session(self.generation);
         self.status.connected = false;
     }
+    fn handle_suspend(&mut self) {
+        let epoch = self.backend.suspend_epoch();
+        let changed =
+            self.recovery.state != Lifecycle::Suspended || epoch != self.handled_suspend_epoch;
+        if changed {
+            self.disconnect();
+            self.recovery.suspend();
+            self.handled_suspend_epoch = epoch;
+            self.sync_recovery();
+        }
+        let had_queued = !self.queue.is_empty();
+        while let Some(envelope) = self.queue.pop_front() {
+            let _ = envelope.reply.send(Response::failed(
+                envelope.request.id,
+                DaemonError::new(
+                    ErrorCode::Cancelled,
+                    "suspend",
+                    "queued request cancelled before resume",
+                ),
+            ));
+        }
+        if changed || had_queued {
+            self.publish();
+        }
+        // Budget checks cannot clear this evidence. A newer edge remains pending.
+        self.backend.acknowledge_suspend(epoch);
+    }
+
     fn sync_recovery(&mut self) {
         self.status.adapter_ready = self.adapter_ready;
         self.status.bluez_connected = self.bluez_connected;
@@ -585,11 +648,10 @@ impl Worker {
             ));
         }
         if let Some(readback) = readback {
-            if self
-                .active
-                .as_ref()
-                .is_none_or(|active| active.envelope.client_cancelled())
-            {
+            if self.active.as_ref().is_none_or(|active| {
+                active.envelope.client_cancelled()
+                    || active.envelope.suspend_epoch != self.backend.suspend_epoch()
+            }) {
                 return Err(DaemonError::new(
                     ErrorCode::Cancelled,
                     "readback",
@@ -804,6 +866,30 @@ impl Worker {
     }
     fn handle_action(&mut self, mut active: Active, mut action: CommandAction) {
         loop {
+            let sleeping = self.backend.sleeping();
+            if sleeping || active.envelope.suspend_epoch != self.backend.suspend_epoch() {
+                let written = active.envelope.dispatched.load(Ordering::SeqCst);
+                active.pending.cancel();
+                let response = Response::failed(
+                    active.envelope.request.id,
+                    DaemonError::new(
+                        if written {
+                            ErrorCode::OutcomeUnknown
+                        } else {
+                            ErrorCode::Cancelled
+                        },
+                        "suspend",
+                        "request interrupted by suspend; no mutation will be replayed",
+                    ),
+                );
+                if sleeping {
+                    self.handle_suspend();
+                } else {
+                    self.publish();
+                }
+                let _ = active.envelope.reply.send(response);
+                return;
+            }
             match action {
                 CommandAction::Wait => {
                     self.active = Some(active);
@@ -916,6 +1002,20 @@ impl Worker {
         }
     }
     fn enqueue(&mut self, envelope: Envelope) {
+        if self.backend.sleeping()
+            || self.recovery.state == Lifecycle::Suspended
+            || envelope.suspend_epoch != self.backend.suspend_epoch()
+        {
+            let _ = envelope.reply.send(Response::failed(
+                envelope.request.id,
+                DaemonError::new(
+                    ErrorCode::Cancelled,
+                    "suspend",
+                    "request cannot cross suspend",
+                ),
+            ));
+            return;
+        }
         if envelope.client_cancelled() {
             envelope.cancel_before_dispatch();
             return;
@@ -935,12 +1035,26 @@ impl Worker {
         }
     }
     fn dispatch(&mut self) {
+        if self.backend.sleeping() || self.recovery.state == Lifecycle::Suspended {
+            return;
+        }
         if self.active.is_some() || self.key_exchange.is_some() {
             return;
         }
         let Some(envelope) = self.queue.pop_front() else {
             return;
         };
+        if envelope.suspend_epoch != self.backend.suspend_epoch() {
+            let _ = envelope.reply.send(Response::failed(
+                envelope.request.id,
+                DaemonError::new(
+                    ErrorCode::Cancelled,
+                    "suspend",
+                    "request was admitted before a completed suspend cycle",
+                ),
+            ));
+            return;
+        }
         if envelope.client_cancelled() {
             envelope.cancel_before_dispatch();
             return;
@@ -1044,6 +1158,18 @@ impl Worker {
                                 "request expired before dispatch",
                             ),
                         ));
+                        return;
+                    }
+                    if self.backend.sleeping() {
+                        let _ = envelope.reply.send(Response::failed(
+                            id,
+                            DaemonError::new(
+                                ErrorCode::Cancelled,
+                                "suspend",
+                                "key request interrupted before dispatch",
+                            ),
+                        ));
+                        self.handle_suspend();
                         return;
                     }
                     envelope.dispatched.store(true, Ordering::SeqCst);
@@ -1178,11 +1304,8 @@ impl Worker {
                 self.enqueue(envelope);
             }
             let sleeping = self.backend.sleeping();
-            if sleeping && self.recovery.state != Lifecycle::Suspended {
-                self.disconnect();
-                self.recovery.suspend();
-                self.sync_recovery();
-                self.publish();
+            if sleeping {
+                self.handle_suspend();
             }
             if !sleeping && self.recovery.state == Lifecycle::Suspended {
                 self.recovery.resume(self.now());
@@ -1230,6 +1353,10 @@ impl Worker {
                 match connection.recv(&mut bytes, READ_SLICE) {
                     Ok(size) => match parser::parse(&bytes[..size]) {
                         Ok(packet) => {
+                            if self.backend.sleeping() {
+                                self.handle_suspend();
+                                continue;
+                            }
                             if let Some(mut exchange) = self.key_exchange.take() {
                                 if !exchange.envelope.client_cancelled()
                                     && Instant::now() < exchange.envelope.deadline
@@ -1376,6 +1503,7 @@ mod dispatch_tests {
             next_probe_ms: 0,
             adapter_ready: true,
             bluez_connected: true,
+            handled_suspend_epoch: 0,
         }
     }
     #[test]
@@ -1420,6 +1548,7 @@ mod dispatch_tests {
         let (reply, mut response) = oneshot::channel();
         let dispatched = Arc::new(AtomicBool::new(false));
         owner.enqueue(Envelope {
+            suspend_epoch: 0,
             peer: Some(peer),
             target_address: None,
             request: Request {
@@ -1481,6 +1610,7 @@ mod dispatch_tests {
             };
             let dispatched = Arc::new(AtomicBool::new(false));
             let envelope = Envelope {
+                suspend_epoch: 0,
                 peer,
                 target_address: None,
                 request: Request {

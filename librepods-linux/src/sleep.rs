@@ -4,7 +4,7 @@
 
 //! Cancellable login1 PrepareForSleep subscription.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
@@ -20,6 +20,7 @@ pub struct SleepMonitor {
     worker: Option<std::thread::JoinHandle<()>>,
     ready: Arc<AtomicBool>,
     sleeping: Arc<AtomicBool>,
+    suspend_epoch: Arc<AtomicU64>,
 }
 
 impl SleepMonitor {
@@ -40,6 +41,11 @@ impl SleepMonitor {
         self.sleeping.load(Ordering::Acquire)
     }
 
+    /// Monotonic evidence of every observed prepare-for-sleep edge, independent of polling.
+    pub fn suspend_epoch(&self) -> u64 {
+        self.suspend_epoch.load(Ordering::Acquire)
+    }
+
     fn start_with_bus(address: Option<String>) -> Result<Self, TransportError> {
         let (sender, receiver) = mpsc::sync_channel(8);
         let (cancel, mut stop) = watch::channel(false);
@@ -47,12 +53,14 @@ impl SleepMonitor {
         let worker_ready = ready.clone();
         let sleeping = Arc::new(AtomicBool::new(false));
         let worker_sleeping = sleeping.clone();
+        let suspend_epoch = Arc::new(AtomicU64::new(0));
+        let worker_epoch = suspend_epoch.clone();
         let worker = std::thread::Builder::new().name("librepods-sleep".into()).spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() { Ok(runtime) => runtime, Err(_) => return };
             runtime.block_on(async {
                 loop {
                     let mut inner_stop = stop.clone();
-                    tokio::select! { _ = stop.changed() => return, result = listen(&sender,&mut inner_stop,&address,&worker_ready,&worker_sleeping) => if let Err(error) = result { log::debug!("Sleep monitor unavailable: {error}"); } }
+                    tokio::select! { _ = stop.changed() => return, result = listen(&sender,&mut inner_stop,&address,&worker_ready,&worker_sleeping,&worker_epoch) => if let Err(error) = result { log::debug!("Sleep monitor unavailable: {error}"); } }
                     worker_ready.store(false,Ordering::Release);
                     tokio::select! { _ = stop.changed() => return, _ = tokio::time::sleep(Duration::from_secs(5)) => {} }
                 }
@@ -64,6 +72,7 @@ impl SleepMonitor {
             worker: Some(worker),
             ready,
             sleeping,
+            suspend_epoch,
         })
     }
 
@@ -101,6 +110,7 @@ async fn listen(
     address: &Option<String>,
     ready: &AtomicBool,
     current_sleeping: &AtomicBool,
+    suspend_epoch: &AtomicU64,
 ) -> Result<(), TransportError> {
     let connect = async {
         match address {
@@ -124,6 +134,9 @@ async fn listen(
         let message =
             message.map_err(|error| TransportError::with_source("read sleep event", error))?;
         if let Ok(sleeping) = message.body().deserialize::<bool>() {
+            if sleeping && !current_sleeping.load(Ordering::Acquire) {
+                suspend_epoch.fetch_add(1, Ordering::AcqRel);
+            }
             current_sleeping.store(sleeping, Ordering::Release);
             match sender.try_send(sleeping) {
                 Ok(()) => {}

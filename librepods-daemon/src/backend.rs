@@ -33,6 +33,12 @@ pub trait Backend: Send + Sync {
     fn sleeping(&self) -> bool {
         false
     }
+    /// Observed prepare-for-sleep edges; reading this must never acknowledge them.
+    fn suspend_epoch(&self) -> u64 {
+        0
+    }
+    /// Called only by the owner after active/queued work and its generation are invalidated.
+    fn acknowledge_suspend(&self, _epoch: u64) {}
     fn cancel(&self) {}
     fn desktop_enabled(&self) -> bool {
         false
@@ -71,6 +77,7 @@ pub struct LinuxBackend {
     monitor: Option<librepods_linux::bluez_monitor::BluezMonitor>,
     connecting: std::sync::Mutex<Option<librepods_linux::l2cap::Cancellation>>,
     cancelled: std::sync::atomic::AtomicBool,
+    acknowledged_suspend: std::sync::atomic::AtomicU64,
 }
 impl Default for LinuxBackend {
     fn default() -> Self {
@@ -79,6 +86,7 @@ impl Default for LinuxBackend {
             monitor: librepods_linux::bluez_monitor::BluezMonitor::start().ok(),
             connecting: std::sync::Mutex::new(None),
             cancelled: std::sync::atomic::AtomicBool::new(false),
+            acknowledged_suspend: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -100,8 +108,29 @@ impl Backend for LinuxBackend {
         self.sleep
             .lock()
             .ok()
-            .and_then(|monitor| monitor.as_ref().map(|monitor| monitor.is_sleeping()))
+            .and_then(|monitor| {
+                monitor.as_ref().map(|monitor| {
+                    monitor.is_sleeping()
+                        || monitor.suspend_epoch()
+                            != self
+                                .acknowledged_suspend
+                                .load(std::sync::atomic::Ordering::Acquire)
+                })
+            })
             .unwrap_or(false)
+    }
+    fn suspend_epoch(&self) -> u64 {
+        self.sleep
+            .lock()
+            .ok()
+            .and_then(|monitor| monitor.as_ref().map(|monitor| monitor.suspend_epoch()))
+            .unwrap_or(0)
+    }
+    fn acknowledge_suspend(&self, epoch: u64) {
+        // Never acknowledge a future edge or regress an already handled acknowledgement.
+        let observed = epoch.min(self.suspend_epoch());
+        self.acknowledged_suspend
+            .fetch_max(observed, std::sync::atomic::Ordering::AcqRel);
     }
     fn discover(&self, address: Option<&str>) -> Result<Endpoint, DaemonError> {
         let snapshot = self
@@ -436,3 +465,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "backend_tests.rs"]
+mod sleep_epoch_tests;
