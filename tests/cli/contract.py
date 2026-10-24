@@ -201,6 +201,21 @@ class CliContract(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(json.loads(result.stderr), error)
 
+    def test_watch_validates_correlation_and_payload_invariant_before_daemon_error(self):
+        error = {"code": "unsupported", "stage": "watch", "message": "example rejection", "retryable": False}
+        cases = [
+            (lambda req: {"version": 1, "id": req["id"] + 1, "result": None, "error": error}, "version_mismatch"),
+            (lambda req: {"version": 99, "id": req["id"], "result": None, "error": error}, "version_mismatch"),
+            (lambda req: {"version": 1, "id": req["id"], "result": {}, "error": error}, "malformed_frame"),
+            (lambda req: {"version": 1, "id": req["id"], "result": None, "error": error}, "unsupported"),
+        ]
+        for response, expected in cases:
+            with self.subTest(expected=expected):
+                result, _ = self.exchange(["--status"], response)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(json.loads(result.stderr)["code"], expected)
+
     def test_foreign_response_identifier_and_version_are_rejected(self):
         for version, identifier in [(1, 99), (99, 1)]:
             with self.subTest(version=version, identifier=identifier):
