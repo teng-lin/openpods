@@ -195,14 +195,33 @@ impl Backend for LinuxBackend {
                     ))
                 }
             };
+            let mutation = action.is_some();
             if let Some(action) = action {
                 desktop::audio_action(&address, action)
                     .await
-                    .map_err(|e| transport_error("audio action", e))?;
+                    .map_err(|error| {
+                        let mut error = transport_error("audio action", error);
+                        if matches!(
+                            error.code,
+                            ErrorCode::CommandTimeout
+                                | ErrorCode::MalformedFrame
+                                | ErrorCode::ConnectFailed
+                        ) {
+                            error.code = ErrorCode::OutcomeUnknown;
+                            error.retryable = false;
+                        }
+                        error
+                    })?;
             }
-            let snapshot = desktop::audio_snapshot(&address)
-                .await
-                .map_err(|e| transport_error("audio status", e))?;
+            let snapshot = desktop::audio_snapshot(&address).await.map_err(|error| {
+                let mut error = transport_error("audio status",error);
+                if mutation {
+                    error.code = ErrorCode::OutcomeUnknown;
+                    error.retryable = false;
+                    error.message = format!("audio action returned but readback failed: {}; inspect status before repeating",error.message);
+                }
+                error
+            })?;
             serde_json::to_value(snapshot)
                 .map_err(|e| DaemonError::new(ErrorCode::Internal, "audio", e.to_string()))
         })
@@ -280,7 +299,14 @@ pub fn transport_error(stage: &str, error: TransportError) -> DaemonError {
             _ => ErrorCode::ConnectFailed,
         },
     };
-    DaemonError::new(code, stage, error.to_string())
+    if matches!(
+        code,
+        ErrorCode::ConnectFailed | ErrorCode::ServiceUnavailable | ErrorCode::CommandTimeout
+    ) {
+        DaemonError::transient(code, stage, error.to_string())
+    } else {
+        DaemonError::new(code, stage, error.to_string())
+    }
 }
 
 pub fn is_timeout(error: &TransportError) -> bool {

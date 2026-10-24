@@ -229,6 +229,7 @@ impl Backend for EmulatedBackend {
                         selected_device: false,
                         muted: false,
                         volume_percent: Some(50.0),
+                        volume_channels: None,
                         state: Some("RUNNING".into()),
                         monitor: false,
                     })

@@ -147,7 +147,10 @@ impl SessionHandle {
             }
             return match result {
                 Ok(Ok(value))=>{self.audio_feed.send_replace(value.clone());Response::ok(id,value)},
-                Ok(Err(error))=>Response::failed(id,error),
+                Ok(Err(mut error))=>{
+                    if !readonly_audio && error.code == ErrorCode::CommandTimeout {error.code=ErrorCode::OutcomeUnknown;error.retryable=false;}
+                    Response::failed(id,error)
+                },
                 Err(_)=>Response::failed(id,DaemonError::new(if readonly_audio{ErrorCode::CommandTimeout}else{ErrorCode::OutcomeUnknown},"audio","audio operation deadline elapsed; inspect status before retrying a mutation")),
             };
         }
