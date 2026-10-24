@@ -279,6 +279,10 @@ impl Harness {
     }
 
     async fn stop(mut self) {
+        self.shutdown_in_place().await;
+    }
+
+    async fn shutdown_in_place(&mut self) {
         let _ = self.shutdown.take().expect("shutdown sender").send(());
         tokio::time::timeout(
             Duration::from_secs(2),
@@ -458,7 +462,7 @@ async fn preferences_persist_and_legacy_publication_cleans_up_on_shutdown() {
         legacy_compatibility: true,
         ..Config::default()
     };
-    let harness = Harness::start(Arc::new(Shared::default()), config).await;
+    let mut harness = Harness::start(Arc::new(Shared::default()), config).await;
     harness.ready().await;
     let response = harness
         .request(40, Operation::EarPolicy(EarPolicy::BothRemoved), 1000)
@@ -477,9 +481,11 @@ async fn preferences_persist_and_legacy_publication_cleans_up_on_shutdown() {
         assert!(Instant::now() < deadline, "legacy status not published");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    let legacy = harness.paths.legacy_state.clone();
-    harness.stop().await;
-    assert!(!legacy.exists(), "owned legacy snapshot survives stop");
+    harness.shutdown_in_place().await;
+    assert!(
+        !harness.paths.legacy_state.exists(),
+        "owned legacy snapshot survives stop"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1077,4 +1083,57 @@ async fn saturated_actor_queue_rejects_excess_and_expires_without_late_reconnect
     assert_eq!(shared.changes.lock().expect("changes").len(), 1);
     active.abort();
     session.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_drains_legacy_publication_and_never_recreates_owned_files_after_return() {
+    // Keep the directory alive after shutdown; TempDir cleanup must not hide
+    // delayed publisher writes or make a missing-artifact assertion vacuous.
+    for _ in 0..8 {
+        let mut harness = Harness::start(
+            Arc::new(Shared::default()),
+            Config {
+                legacy_compatibility: true,
+                ..Config::default()
+            },
+        )
+        .await;
+        harness.ready().await;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !harness.paths.legacy_state.exists() {
+            assert!(Instant::now() < deadline, "legacy publication missing");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let peer = harness
+            .shared
+            .peers
+            .lock()
+            .expect("peers")
+            .last()
+            .expect("peer")
+            .clone();
+        for value in 0..128 {
+            peer.push(ControlCommand::create(0x3E, &[value, 0, 0, 0]).to_vec());
+        }
+        harness.shutdown_in_place().await;
+        for _ in 0..6 {
+            assert!(
+                !harness.paths.socket().exists(),
+                "socket recreated after shutdown"
+            );
+            assert!(
+                !harness.paths.state_file().exists(),
+                "native status recreated after shutdown"
+            );
+            assert!(
+                !harness.paths.legacy_state.exists(),
+                "legacy status recreated after shutdown"
+            );
+            assert!(
+                harness.paths.runtime.is_dir(),
+                "test directory vanished before assertion"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 }
