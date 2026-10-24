@@ -72,15 +72,26 @@ This bounded campaign is not exhaustive proof. Scheduled CI uses a longer
 
 ## Interpreter, dependency and packaging checks
 
-On production checkpoint `6405fc3`, Miri passed 67 pure-core unit tests, 8 protocol
-regressions and 1 doctest; the regression suite took 95.45 seconds. Evidence:
-`/tmp/librepods-rs-6405fc3-miri.log`. Later orientation-only source changes were
-covered by the ordinary stable suites; this Miri result is explicitly historical.
+The final pure-core Miri run passed 67 unit tests, 8 protocol regressions and
+1 doctest, including the final orientation fix. The regression suite took
+95.45 seconds. Exact core tree: `89c6312d8e9f5a91a43ae2813c3efae9dca5d752`.
+Evidence: `/tmp/librepods-rs-final-core-miri.log` and
+`/tmp/librepods-rs-final-core-miri-source.json`. This does not claim Miri coverage
+for OS Bluetooth/desktop adapters.
 
-`cargo deny --locked check` passed advisories, bans, licenses and sources at the
-recorded earlier integration checkpoint. No advisory exemption was added;
-workspace Tokio 1.54.1 resolves the initially detected 1.50 advisory. Recheck the
-final lock before release.
+The final `cargo deny --locked check` passed advisories, bans, licenses and
+sources with zero error records, against Cargo.lock SHA-256
+`e93e7ca714de465d2f2997fcce65ada0dcd40983fe63fa5a36fb76dc2c1cde64`.
+No advisory exemption was added. Evidence: `/tmp/librepods-rs-final-lock-deny.log`.
+Workspace Tokio 1.54.1 resolves the initially detected 1.50 advisory.
+
+An additional isolated child forced a real partial regular-file write to fail
+with EFBIG using its own RLIMIT_FSIZE soft limit. It verified the exact OS cause,
+unchanged last-good status and removal of the partial temporary. Its soft limit
+was restored before exit; the instrumented run and llvm-cov report both passed
+without truncated profiles (`/tmp/librepods-rs-midwrite-coverage.json`). ENOSPC
+cause preservation is tested with a synthetic OS error only; no actual filesystem
+was filled, and this does not claim a real disk-full integration event.
 
 Packaging tests operate only on temporary prefixes. Real `systemd-analyze --user
 verify` accepted both default and opt-in compatibility unit arguments, including
