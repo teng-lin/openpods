@@ -1,0 +1,44 @@
+{
+  "elapsed_seconds": 600.0155153880041,
+  "samples": 121,
+  "failures": [],
+  "status_latency_p95_ms": 3.3781759993871674,
+  "cpu_percent_one_core": 0.17332885122603486,
+  "rss_max_kib": 11644,
+  "rss_first_kib": 10720,
+  "rss_last_kib": 11644,
+  "release_duration_met": false,
+  "integrity": {
+    "baseline_binary_identity_verified": true,
+    "binary_identity_verified": true,
+    "source_metadata_complete": true,
+    "compiled_no_ble_proven": true,
+    "journal_volume": {
+      "unit": "librepods-rs.service",
+      "entries_observed": 0,
+      "bytes_observed": 0,
+      "entry_limit": 10000,
+      "byte_limit": 1048576,
+      "truncated": false,
+      "timed_out": false,
+      "exit_code": 0,
+      "complete": true
+    },
+    "release_evidence_complete": true
+  },
+  "release_soak_passed": false,
+  "memory_growth_review_required": true,
+  "source": {
+    "source_commit": "33e181f1f0d507f16f61471cc26587c6ce4ddccb",
+    "source_tree_hash": "0926001d8dedc04da721f7d135fa09e3e6137413",
+    "source_tree_state": "clean",
+    "started_utc": "2026-10-24T21:40:33Z",
+    "requested_seconds": 600.0
+  },
+  "binary_sha256": "bfc8d9290d2d83aa1b1b760e98bd4265f84ef6f91510aea80c032f9358180765",
+  "limits": [
+    "Ten-minute diagnostic, not a 24-hour release soak.",
+    "RSS increased during this warm-up window; memory stability is not established.",
+    "Recorded binary precedes the final configuration-readback and queued-client cancellation fixes."
+  ]
+}

@@ -88,8 +88,8 @@ the original target or establish audible playback continuity.
 A completed 600-second diagnostic on the earlier `33e181f` application checkpoint
 measured 0.1733% CPU of one core, p95 local status latency 3.378 ms and maximum
 RSS 11644 KiB. RSS increased from its first sample; this is a warm-up diagnostic,
-not the required 24-hour stability proof. Raw private samples are in
-`target/idle-33e181f/`. The final 24-hour run has not started.
+not the required 24-hour stability proof. [Redacted diagnostic summary](evidence/2026-10-24/idle-diagnostic.json);
+raw private samples are in `target/idle-33e181f/`. The final 24-hour run has not started.
 
 Physical work still required: 20 case/reconnect cycles, adapter/BlueZ restart,
 10 suspend/resume cycles (including queued work), continuous playback listening,
