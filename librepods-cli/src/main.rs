@@ -295,7 +295,7 @@ async fn run(cli: &Cli) -> Result<(), DaemonError> {
         return runtime::serve(paths, config, Arc::new(LinuxBackend::default())).await;
     }
     if cli.scan {
-        return scan().await;
+        return scan(&paths).await;
     }
     let operation = cli.operation()?;
     let watch = matches!(operation, Operation::Watch);
@@ -443,27 +443,78 @@ fn show_response(cli: &Cli, response: Response) -> Result<(), DaemonError> {
 }
 
 #[cfg(all(target_os = "linux", feature = "ble"))]
-async fn scan() -> Result<(), DaemonError> {
-    use librepods_core::transport::BleScanner;
-    let scanner = librepods_linux::ble::BtleplugScanner::start()
-        .await
-        .map_err(|e| DaemonError::new(ErrorCode::Unsupported, "BLE", e.to_string()))?;
-    let scanner = Arc::new(scanner);
-    loop {
-        let next = scanner.clone();
-        let advert = tokio::task::spawn_blocking(move || next.next_advertisement())
-            .await
-            .map_err(|e| DaemonError::new(ErrorCode::Internal, "BLE", e.to_string()))?
-            .map_err(|e| DaemonError::new(ErrorCode::DeviceUnavailable, "BLE", e.to_string()))?;
-        if let Some(parsed) =
-            librepods_core::device::ble_advert::parse_advertisement(&advert.manufacturer_data)
+async fn scan(paths: &librepods_daemon::storage::Paths) -> Result<(), DaemonError> {
+    use librepods_daemon::{backend::transport_error, runtime, storage::OwnerGuard};
+    if paths.legacy_socket.exists() {
+        return Err(DaemonError::new(
+            ErrorCode::ServiceUnavailable,
+            "BLE scan",
+            "stop the existing connection owner before diagnostic scanning",
+        ));
+    }
+    let _owner = OwnerGuard::acquire(paths, &runtime::instance_id())?;
+    let monitor = librepods_linux::bluez_monitor::BluezMonitor::start()
+        .map_err(|error| transport_error("BLE controller monitor", error))?;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !monitor.current_snapshot().available {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        DaemonError::new(
+            ErrorCode::AdapterUnavailable,
+            "BLE scan",
+            "BlueZ readiness is unknown; scanning was not started",
+        )
+    })?;
+    let check_controller = || {
+        let snapshot = monitor.current_snapshot();
+        if !snapshot.adapter_ready() {
+            return Err(DaemonError::new(
+                ErrorCode::AdapterUnavailable,
+                "BLE scan",
+                "Bluetooth adapter unavailable",
+            ));
+        }
+        if snapshot
+            .devices
+            .iter()
+            .any(|device| device.airpods && device.connected)
         {
-            println!("{parsed:?}");
+            return Err(DaemonError::new(ErrorCode::Unsupported,"BLE scan","connected diagnostic scanning requires a separate controller coexistence acceptance run"));
+        }
+        Ok(())
+    };
+    check_controller()?;
+    let scanner = Arc::new(
+        librepods_linux::ble::BtleplugScanner::start()
+            .await
+            .map_err(|error| transport_error("BLE scan", error))?,
+    );
+    let stop = tokio::signal::ctrl_c();
+    tokio::pin!(stop);
+    loop {
+        check_controller()?;
+        let source = scanner.clone();
+        let mut next = tokio::task::spawn_blocking(move || {
+            source.next_advertisement_timeout(Duration::from_millis(100))
+        });
+        let advert = tokio::select! {
+            _=&mut stop=>{let _=next.await;return Ok(());},
+            result=&mut next=>result.map_err(|error|DaemonError::new(ErrorCode::Internal,"BLE scan",error.to_string()))?.map_err(|error|transport_error("BLE scan",error))?,
+        };
+        if let Some(advert) = advert {
+            if let Some(parsed) =
+                librepods_core::device::ble_advert::parse_advertisement(&advert.manufacturer_data)
+            {
+                println!("Unverified advertisement: {parsed:?}");
+            }
         }
     }
 }
 #[cfg(all(target_os = "linux", not(feature = "ble")))]
-async fn scan() -> Result<(), DaemonError> {
+async fn scan(_paths: &librepods_daemon::storage::Paths) -> Result<(), DaemonError> {
     Err(DaemonError::new(
         ErrorCode::Unsupported,
         "BLE",

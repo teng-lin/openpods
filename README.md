@@ -1,564 +1,150 @@
-# LIBREPODS-RS
+# LibrePods RS
 
-A pure-Rust implementation of the Apple Accessory Protocol (AAP) for AirPods™, with a cross-platform core and platform-specific I/O.
+A Rust Apple Accessory Protocol (AACP) implementation with a persistent Linux
+service, local CLI, and reusable protocol core. The primary development device
+is AirPods Pro 2 USB-C on Omarchy. See the [release evidence](docs/release-evidence.md)
+for acceptance status; unfinished hardware and soak gates remain unfinished.
 
-## Overview
+The default build contains no BLE scanner or cryptography backend. Connected
+battery, listening-mode controls, ear reports and reconnect work over AACP.
+Automatic playback, routing, profile recovery, volume ducking and notifications
+are opt-in host policies. Ordinary operation does not require root, file
+capabilities, Bluetooth identity changes or an audio-server restart.
 
-`librepods-rs` is an open-source tool that lets you use AirPods as first-class citizens on Linux. It speaks AAP over Bluetooth L2CAP to read battery levels, control noise cancellation, detect ear gestures, auto play/pause media, and more. No Apple device needed.
+## Build and start
 
-This is a clean-room Rust rewrite inspired by [LibrePods](https://github.com/kavishdevar/librepods) (Kotlin/C++), designed for embeddability, portability, and strict crate-boundary separation.
-
-## Features
-
-- **Battery Monitoring**: Real-time left/right/case battery levels and charging status
-- **Noise Control**: Switch between Off, ANC, Transparency, and Adaptive modes
-- **Ear Detection**: Automatic play/pause when you put in or take out your AirPods
-- **Conversational Awareness**: Monitor and toggle CA status during audio playback
-- **Long-Press Configuration**: Customize which noise control modes cycle on stem press
-- **Rename**: Change your AirPods device name over AAP
-- **BLE Advertisement Decoding**: Scan for nearby AirPods without pairing. See model, battery, lid state
-- **Encrypted Battery**: AES-128 decryption of high-resolution battery data from BLE ads
-- **Head Tracking**: Receive raw spatial audio head tracking sensor data
-- **Device Metadata**: Read device name, model number, manufacturer
-- **Media Control**: Automatic A2DP activation, PipeWire (`wpctl`) / PulseAudio (`pactl`) backend detection
-- **Cross-Platform Core**: `librepods-core` is pure Rust with no OS dependencies, ready to be embedded in future platform targets
-
-> **Note:** Some advanced features (Hearing Aid, Customize Transparency Mode, Multi-device connectivity) require changing the Bluetooth VendorID to Apple's. See [VendorID Configuration](#vendorid-configuration) below.
-
-## Device Compatibility
-
-| Model | Status | Notes |
-|---|---|---|
-| AirPods Pro 2 (USB-C) | ✅ Tested | Primary development device |
-| AirPods Pro 2 (Lightning) | ✅ Tested | Same protocol as USB-C variant |
-| AirPods Pro | ⚠️ Expected | Same protocol family, not yet verified |
-| AirPods Max (Lightning) | ⚠️ Expected | Same protocol family, not yet verified |
-| AirPods Max (USB-C) | ⚠️ Expected | Same protocol family, not yet verified |
-| AirPods (4th gen, ANC) | ⚠️ Expected | Basic features should work |
-| AirPods (4th gen) | ⚠️ Expected | Basic features (battery, ear detection) |
-| AirPods (3rd gen) | ⚠️ Expected | Basic features (battery, ear detection) |
-| AirPods (2nd gen) | ⚠️ Expected | Basic features (battery, ear detection) |
-| AirPods (1st gen) | ⚠️ Expected | Basic features (battery, ear detection) |
-
-The AAP protocol is consistent across all AirPods models (based on analysis of the macOS Bluetooth stack). Noise control, adaptive transparency, and conversational awareness are only available on models that support them in hardware.
-
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────────┐
-│  librepods-cli          CLI daemon, state machine,       │
-│                         clap, env_logger                 │
-├──────────────────────────────────────────────────────────┤
-│  librepods-linux        L2CAP socket (nix, libc),        │
-│                         BlueZ D-Bus (zbus, tokio),       │
-│                         BLE scan (btleplug),             │
-│                         Media (wpctl / pactl / playerctl)│
-├──────────────────────────────────────────────────────────┤
-│  librepods-windows      L2CAP (WinSock AF_BTH),          │
-│                         WinRT Bluetooth monitor,         │
-│                         BLE scan (btleplug),             │
-│                         Media (SMTC via WinRT)           │
-├──────────────────────────────────────────────────────────┤
-│  librepods-core         AAP parser, packet builder,      │
-│                         device state, BLE ad decoder,    │
-│                         transport traits                 │
-│                         ⚠ NO platform I/O, pure Rust     │
-└──────────────────────────────────────────────────────────┘
-```
-
-| Crate | Allowed deps | Purpose |
-|---|---|---|
-| `librepods-core` | `serde`, `thiserror`, `log`, `aes` | Protocol engine, device state, BLE parsing |
-| `librepods-linux` | `nix`, `zbus`, `btleplug`, `tokio`, `libc` | Linux Bluetooth + media I/O |
-| `librepods-windows` | `btleplug`, `tokio`, `windows`, `windows-sys` | Windows Bluetooth + media I/O |
-| `librepods-cli` | `clap`, `env_logger`, `tokio` | Headless daemon |
-
-## Prerequisites (Ubuntu / Debian)
-
-### Build dependencies
+Install the toolchain pinned in [rust-toolchain.toml](rust-toolchain.toml), a C
+linker, and the development dependencies appropriate to your distribution.
+BLE builds additionally use the system D-Bus development library.
 
 ```bash
-sudo apt update
-sudo apt install -y build-essential pkg-config curl \
-    libdbus-1-dev libudev-dev
+cargo build -p librepods-cli --release --no-default-features --locked
+./target/release/librepods-cli serve --address AA:BB:CC:DD:EE:FF
 ```
 
-| Package | Why |
-|---|---|
-| `build-essential` | C linker for native crate build scripts |
-| `pkg-config` | Finds `libdbus` and `libudev` at compile time |
-| `libdbus-1-dev` | D-Bus headers, required by `zbus` (BlueZ monitor) and `btleplug` (BLE scan) |
-| `libudev-dev` | udev headers, required by `btleplug` for device enumeration |
-
-### Rust toolchain
+Use an already paired and connected device. Without `--address`, the service
+selects a single connected AirPods device and rejects ambiguity. It owns the
+AACP connection until stopped. Run clients in another terminal:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
+./target/release/librepods-cli status --json
+./target/release/librepods-cli --status
+./target/release/librepods-cli capabilities --json
+./target/release/librepods-cli doctor --json
+./target/release/librepods-cli --noise-control anc
+./target/release/librepods-cli --noise-control transparency
+./target/release/librepods-cli --noise-control adaptive
+./target/release/librepods-cli --conversation-awareness on
+./target/release/librepods-cli --one-bud-anc off
+./target/release/librepods-cli adaptive-level 50
 ```
 
-### Bluetooth stack
+Adaptive level accepts 0–100 and requires a fresh Adaptive-mode report. Off and
+other settings depend on the model and firmware. Unknown readings remain unknown;
+retained battery readings become stale after disconnect. Confirmed commands
+observe the reported target state after dispatch. A lost confirmation yields
+`outcome_unknown`; inspect status before retrying. Requests are serialized and
+expired or disconnected clients cannot leave an unsent mutation queued.
+
+An explicit client `--address` asserts the daemon's selected device; it does not
+silently retarget a running service. `--direct` is an isolated diagnostic session
+that holds the same ownership lock and refuses a competing daemon/direct owner.
+Rename and long-press commands have protocol support but remain experimental
+until their actual firmware confirmations are accepted.
+
+## Audio and desktop policies
+
+Audio observation and repairs are separate from ANC and battery communication:
 
 ```bash
-sudo apt install -y bluetooth bluez
-sudo systemctl enable --now bluetooth
+./target/release/librepods-cli audio status --json
+./target/release/librepods-cli audio output SINK_NAME
+./target/release/librepods-cli audio input SOURCE_NAME
+./target/release/librepods-cli audio profile PROFILE_NAME
+./target/release/librepods-cli audio move-stream STREAM_ID SINK_NAME
+./target/release/librepods-cli audio unmute
+./target/release/librepods-cli ear off
 ```
 
-Verify the adapter is up:
+Audio discovery uses structured `pactl` JSON through PipeWire's PulseAudio
+interface or PulseAudio. MPRIS playback and notifications use the user bus.
+Missing optional desktop facilities degrade audio automation while AACP remains
+usable. An external microphone remains valid with AirPods playback. A missing
+microphone in a playback profile does not trigger an implicit headset switch.
+Choose a capture-capable profile explicitly when that playback tradeoff is wanted.
+
+`ear one` and `ear both` persist host pause preferences. Resume requires exact,
+confirmed ownership of a player's pause; manual playback or owner loss cancels
+that ownership. Further opt-ins are configured in the private, schema-versioned
+`$XDG_CONFIG_HOME/librepods-rs/config.json` (default `~/.config`):
+
+```json
+{"schema_version":1,"ca_ducking":false,"audio_recovery":false,"auto_route":false,"low_battery_notifications":false}
+```
+
+Large audio graphs are summarized explicitly in ordinary status. Detailed audio
+requests have a bounded response and report `response_too_large` when necessary.
+Native requests are capped at 16 KiB and responses at 128 KiB.
+
+## Installation and Omarchy compatibility
+
+Follow [deployment and rollback](docs/deployment.md) for the hardened systemd user
+unit, private paths, migration and restoration. Test a temporary switch before
+changing startup enablement. Keep exactly one connection owner enabled.
+
+The existing panel can use the compatibility client:
 
 ```bash
-bluetoothctl show          # should print adapter info
+librepods-cli compat status
+librepods-cli compat noise:anc
+librepods-cli compat ear:both
 ```
 
-### Audio & media (optional, for auto play/pause)
+Optional legacy publication requires `legacy_compatibility: true`. It preserves
+foreign status files and reports a publication error rather than replacing them.
+The native socket is `$XDG_RUNTIME_DIR/librepods-rs/control.sock`; native status
+is `$XDG_STATE_HOME/librepods-rs/status.json` (default `~/.local/state`).
 
-Ubuntu 22.04+ ships PipeWire by default. Install the CLI tools the daemon uses at runtime:
+## Optional BLE
 
 ```bash
-# PipeWire (recommended, Ubuntu 22.04+)
-sudo apt install -y wireplumber
-
-# Or PulseAudio (older Ubuntu)
-sudo apt install -y pulseaudio-utils
-
-# Playback control (play/pause on ear detection)
-sudo apt install -y playerctl
+cargo build -p librepods-cli --release --features ble --locked
+librepods-cli keys fetch
+librepods-cli ble on
+librepods-cli ble off
+librepods-cli keys forget
 ```
 
-> `librepods-cli` detects the backend automatically at startup: `wpctl` → `pactl` → fallback. No config needed.
-
-### TL;DR one-liner
-
-```bash
-sudo apt install -y build-essential pkg-config libdbus-1-dev libudev-dev \
-    bluetooth bluez wireplumber playerctl \
-  && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-## Windows Support
-
-Windows is supported through the `librepods-windows` crate, which implements the
-same transport traits as the Linux backend:
-
-| Concern | Windows implementation |
-|---|---|
-| L2CAP | WinSock Bluetooth sockets (`AF_BTH` + `BTHPROTO_L2CAP`) |
-| Device monitor | WinRT `Windows.Devices.Bluetooth` polling |
-| BLE scan | `btleplug` (WinRT backend) |
-| Media | SMTC `Windows.Media.Control` for play/pause |
-
-`librepods-core` is platform-independent and shared by both backends. The CLI
-selects the backend at compile time (see the `platform` module in
-`librepods-cli/src/main.rs`).
-
-### Requirements
-
-- Windows 10 (1809+) or Windows 11, with a working Bluetooth adapter
-- The Rust toolchain (MSVC) — `winget install Rustlang.Rustup` or <https://rustup.rs>
-- AirPods **paired** to Windows first (Settings → Bluetooth & devices)
-
-### Build & run
-
-PowerShell:
-
-```powershell
-cargo build --release -p librepods-cli
-
-# Scan for nearby AirPods (no pairing needed)
-.\target\release\librepods-cli.exe --scan
-
-# Connect to paired AirPods (auto-detect, or pass the address directly)
-$env:RUST_LOG="info"; .\target\release\librepods-cli.exe
-.\target\release\librepods-cli.exe --address AA:BB:CC:DD:EE:FF
-```
-
-Unlike Linux, no `CAP_NET_RAW` / `setcap` step is required. If Bluetooth policy
-restricts socket access, try running the terminal as Administrator.
-
-### Windows notes
-
-- AirPods are auto-detected by device name containing `"AirPods"`; pass
-  `--address` if you renamed them.
-- Media play/pause uses the active SMTC media session. Volume control and manual
-  audio routing are not implemented yet (Windows routes A2DP automatically).
-- The `librepods-linux` crate compiles to an empty library on Windows, so a
-  workspace-wide `cargo build` succeeds on both platforms.
-
-## Quick Start
-
-### 1. Pair your AirPods
-
-```bash
-bluetoothctl
-# scan on
-# (wait for "AirPods" to appear, note the MAC address)
-# pair AA:BB:CC:DD:EE:FF
-# trust AA:BB:CC:DD:EE:FF
-# connect AA:BB:CC:DD:EE:FF
-# exit
-```
-
-### 2. Build & run
-
-```bash
-cargo build --release -p librepods-cli
-
-# Bluetooth sockets require CAP_NET_RAW
-sudo setcap cap_net_raw,cap_net_admin+eip ./target/release/librepods-cli
-
-# Auto-detect connected AirPods
-RUST_LOG=info ./target/release/librepods-cli
-
-# Or specify address directly
-RUST_LOG=info ./target/release/librepods-cli --address AA:BB:CC:DD:EE:FF
-```
-
-### 3. Scan for nearby AirPods (no pairing needed)
-
-```bash
-./target/release/librepods-cli --scan
-```
-
-Example output:
-
-```
-┌─────────────────────────────────────────────
-│ 🎧 AirPods found!
-│ Model:       AirPodsPro2Usbc
-│ BLE address: XX:XX:XX:XX:XX:XX (random)
-│ RSSI:        -42 dBm
-│ Paired:      yes (to another device)
-│ Left:        80%
-│ Right:       90% ⚡
-│ Case:        40%
-│ Lid:         Open
-│ Connection:  Idle
-└─────────────────────────────────────────────
-```
-
-### Live terminal status
-
-```bash
-./target/debug/librepods-cli --status --address AA:BB:CC:DD:EE:FF
-```
-
-Shows device details, earbud and case battery, listening mode, ear detection,
-and all received control settings. The terminal refreshes when reported values
-change; redirected output contains plain-text snapshots. Press Ctrl+C to exit.
-Status mode disables media automation and does not start head-tracking streaming.
-
-Missing readings are shown as **Unavailable** or **Not reported**, rather than
-default values. Settings include their identifier and all four raw hexadecimal
-bytes; unknown identifiers are retained. Only known boolean settings are labeled
-Enabled/Disabled. This displays notifications received from the AirPods, not an
-exhaustive inventory of every setting supported by their firmware.
-
-### Change listening mode and settings
-
-```bash
-./target/debug/librepods-cli --address AA:BB:CC:DD:EE:FF --noise-control anc
-./target/debug/librepods-cli --address AA:BB:CC:DD:EE:FF --noise-control off
-./target/debug/librepods-cli --address AA:BB:CC:DD:EE:FF --noise-control transparency
-./target/debug/librepods-cli --address AA:BB:CC:DD:EE:FF --noise-control adaptive
-./target/debug/librepods-cli --address AA:BB:CC:DD:EE:FF --conversation-awareness on
-./target/debug/librepods-cli --address AA:BB:CC:DD:EE:FF --one-bud-anc off
-```
-
-Choose one setting per invocation. Toggle options accept `on` or `off`;
-`--noise-control on` is an alias for `anc`. Commands disable media automation,
-observe the initial setting, and wait up to five seconds for confirmation.
-Already-matching values need no write. A missing acknowledgement returns an
-error and a nonzero exit status. These bounded setting exchanges currently
-require the Linux transport. Stop any existing monitor before opening a separate
-command connection. Add `--status` to keep showing live status after confirmation.
-
-The AirPods must accept the mode: wear the earbuds, and enable **Off Listening
-Mode** in Apple's settings first if the firmware refuses `off`.
-
-## CLI Options
-
-```
-Usage: librepods-cli [OPTIONS]
-
-Options:
-  -a, --address <ADDRESS>  Bluetooth address (e.g. "AA:BB:CC:DD:EE:FF")
-      --retries <RETRIES>  Maximum connection retry attempts [default: 3]
-  -s, --scan               Scan for nearby AirPods via BLE advertisements
-      --no-media           Disable media control (no auto play/pause)
-      --status             Show live status and settings; disables media automation
-      --noise-control <MODE>  anc (or on), off, transparency, adaptive
-      --conversation-awareness <VALUE>  on, off
-      --one-bud-anc <VALUE>   on, off
-  -h, --help               Print help
-```
-
-## VendorID Configuration
-
-Certain AirPods features (Hearing Aid, Customize Transparency Mode, Multi-device connectivity) are only enabled when the connected device identifies as an Apple device.
-
-On Linux, you can change the Bluetooth VendorID by editing `/etc/bluetooth/main.conf`:
-
-```ini
-# Add this line to [General] section
-DeviceID = bluetooth:004C:0000:0000
-```
-
-Then restart the Bluetooth service:
-
-```bash
-sudo systemctl restart bluetooth
-```
-
-> **Caution:** This changes how your machine identifies to *all* Bluetooth devices, not just AirPods. Revert the change if you experience issues with other devices.
-
-## How It Works
-
-### AAP Packet Layout
-
-Three packet families on the L2CAP wire. The first two bytes distinguish them.
-
-**Standard data packet:**
-
-```mermaid
-block-beta
-  columns 7
-  a["04"]:1 b["00"]:1 c["04"]:1 d["00"]:1 e["opcode"]:1 f["00"]:1 g["data …"]:1
-  style a fill:#2e3440,color:#d8dee9
-  style b fill:#2e3440,color:#d8dee9
-  style c fill:#2e3440,color:#d8dee9
-  style d fill:#2e3440,color:#d8dee9
-  style e fill:#5e81ac,color:#eceff4
-  style f fill:#5e81ac,color:#eceff4
-  style g fill:#a3be8c,color:#2e3440
-```
-
-> Bytes 0–3 = `HEADER` &nbsp;│&nbsp; Bytes 4–5 = opcode (LE u16, byte 5 always `00`) &nbsp;│&nbsp; Bytes 6+ = data
-
-**Handshake** (sent by us, 16 bytes):
-
-```mermaid
-block-beta
-  columns 9
-  a["00"]:1 b["00"]:1 c["04"]:1 d["00"]:1 e["01"]:1 f["00"]:1 g["02"]:1 h["00"]:1 i["00 … pad"]:1
-  style a fill:#4c566a,color:#d8dee9
-  style b fill:#4c566a,color:#d8dee9
-  style c fill:#4c566a,color:#d8dee9
-  style d fill:#4c566a,color:#d8dee9
-  style e fill:#88c0d0,color:#2e3440
-  style f fill:#88c0d0,color:#2e3440
-  style g fill:#88c0d0,color:#2e3440
-  style h fill:#88c0d0,color:#2e3440
-  style i fill:#d8dee9,color:#4c566a
-```
-
-**Handshake ACK** (from AirPods):
-
-```mermaid
-block-beta
-  columns 5
-  a["01"]:1 b["00"]:1 c["04"]:1 d["00"]:1 e["…"]:1
-  style a fill:#4c566a,color:#d8dee9
-  style b fill:#4c566a,color:#d8dee9
-  style c fill:#4c566a,color:#d8dee9
-  style d fill:#4c566a,color:#d8dee9
-  style e fill:#d8dee9,color:#4c566a
-```
-
-**Features ACK** (from AirPods, standard header, opcode `0x2B`):
-
-```mermaid
-block-beta
-  columns 7
-  a["04"]:1 b["00"]:1 c["04"]:1 d["00"]:1 e["2B"]:1 f["00"]:1 g["…"]:1
-  style a fill:#2e3440,color:#d8dee9
-  style b fill:#2e3440,color:#d8dee9
-  style c fill:#2e3440,color:#d8dee9
-  style d fill:#2e3440,color:#d8dee9
-  style e fill:#5e81ac,color:#eceff4
-  style f fill:#5e81ac,color:#eceff4
-  style g fill:#d8dee9,color:#4c566a
-```
-
-**Control command** (sub-type of standard data, 11 bytes fixed):
-
-```mermaid
-block-beta
-  columns 11
-  a["04"]:1 b["00"]:1 c["04"]:1 d["00"]:1 e["09"]:1 f["00"]:1 g["id"]:1 h["d1"]:1 i["d2"]:1 j["d3"]:1 k["d4"]:1
-  style a fill:#2e3440,color:#d8dee9
-  style b fill:#2e3440,color:#d8dee9
-  style c fill:#2e3440,color:#d8dee9
-  style d fill:#2e3440,color:#d8dee9
-  style e fill:#5e81ac,color:#eceff4
-  style f fill:#5e81ac,color:#eceff4
-  style g fill:#81a1c1,color:#2e3440
-  style h fill:#a3be8c,color:#2e3440
-  style i fill:#a3be8c,color:#2e3440
-  style j fill:#a3be8c,color:#2e3440
-  style k fill:#a3be8c,color:#2e3440
-```
-
-### Handshake Sequence
-
-Connection to AirPods requires a strict three-step handshake:
-
-```mermaid
-sequenceDiagram
-    participant C as Client (us)
-    participant A as AirPods
-
-    C->>A: HANDSHAKE (00 00 04 00 …)
-    A->>C: Handshake ACK (01 00 04 00 …)
-    C->>A: SET_SPECIFIC_FEATURES (04 00 04 00 4D 00 …)
-    A->>C: Features ACK (04 00 04 00 2B 00 …)
-    C->>A: REQUEST_NOTIFICATIONS (04 00 04 00 0F 00 …)
-
-    loop Receive Loop
-        A->>C: Battery / Ear / Noise / Metadata / …
-    end
-```
-
-After the handshake, the AirPods push battery, ear detection, noise control, and other notifications continuously.
-
-### Control Commands
-
-Control commands use an 11-byte fixed layout:
-
-```rust
-use librepods_core::protocol::control_command::ControlCommand;
-
-// Set noise cancellation mode
-ControlCommand::create(0x0D, &[0x02, 0x00, 0x00, 0x00])
-
-// Enable conversational awareness
-ControlCommand::enabled(0x28)
-
-// Disable conversational awareness
-ControlCommand::disabled(0x28)
-```
-
-### BLE Advertisement Parsing
-
-Decode Apple Proximity Pairing Messages without connecting:
-
-```rust
-use librepods_core::device::ble_advert::parse_advertisement;
-
-// Raw Apple manufacturer data (company ID 0x004C already stripped)
-let data: &[u8] = &[0x07, 0x19, 0x01, 0x24, 0x20, /* ... */];
-
-if let Some(ad) = parse_advertisement(data) {
-    println!("Model: {:?}", ad.model);
-    println!("Left: {:?}%", ad.left_battery);
-    println!("Right: {:?}%", ad.right_battery);
-    println!("Case: {:?}%", ad.case_battery);
-}
-```
-
-## Building & Testing
-
-```bash
-# Build all crates
-cargo build
-
-# Run all tests
-cargo test
-
-# Core only (must pass on any target)
-cargo test -p librepods-core
-
-# Cross-platform sanity check (crate-purity litmus test)
-cargo check -p librepods-core --target aarch64-linux-android
-```
-
-## Troubleshooting
-
-### `Permission denied` when connecting
-
-Bluetooth L2CAP sockets require `CAP_NET_RAW`. Either:
-
-```bash
-# Option A: set capabilities on the binary (recommended)
-sudo setcap cap_net_raw,cap_net_admin+eip ./target/release/librepods-cli
-
-# Option B: run with sudo
-sudo RUST_LOG=info ./target/release/librepods-cli
-```
-
-### `AF_BLUETOOTH not supported`
-
-The Bluetooth kernel module isn't loaded:
-
-```bash
-sudo modprobe bluetooth
-sudo systemctl restart bluetooth
-```
-
-### `No BLE adapter found` (when using `--scan`)
-
-```bash
-# Check adapter is present
-hciconfig -a
-
-# If powered off
-sudo hciconfig hci0 up
-
-# If no adapter shows up, check USB or verify driver
-lsusb | grep -i bluetooth
-dmesg | grep -i bluetooth
-```
-
-### `No audio backend found`
-
-```bash
-# Check what's running
-pactl info 2>/dev/null && echo "PulseAudio OK" || echo "No PulseAudio"
-wpctl status 2>/dev/null && echo "WirePlumber OK" || echo "No WirePlumber"
-
-# Install what's missing
-sudo apt install -y wireplumber        # PipeWire
-# or
-sudo apt install -y pulseaudio-utils   # PulseAudio
-```
-
-### AirPods connect but no data received
-
-Make sure the AirPods service UUID is registered. Try re-pairing:
-
-```bash
-bluetoothctl
-# remove AA:BB:CC:DD:EE:FF
-# scan on
-# pair AA:BB:CC:DD:EE:FF
-# trust AA:BB:CC:DD:EE:FF
-# connect AA:BB:CC:DD:EE:FF
-```
-
-## Development
-
-See the [Rust daemon port and reliability plan](plans/rust-daemon-port.md) for
-the feature parity map, optional BLE design, recovery architecture, test strategy,
-and phased acceptance criteria.
-
-```bash
-# Run with debug logging
-sudo RUST_LOG=debug cargo run -p librepods-cli -- --address AA:BB:CC:DD:EE:FF
-
-# Or set capabilities once and run without sudo
-sudo setcap cap_net_raw,cap_net_admin+eip ./target/debug/librepods-cli
-RUST_LOG=debug ./target/debug/librepods-cli --address AA:BB:CC:DD:EE:FF
-```
-
-## Credits
-
-This project is a Rust rewrite built upon the research and reverse engineering work of the [LibrePods](https://github.com/kavishdevar/librepods) project by [@kavishdevar](https://github.com/kavishdevar).
-
-Special thanks to:
-- [@tyalie](https://github.com/tyalie): first public documentation of the AAP protocol ([AAP-Protocol-Definition](https://github.com/tyalie/AAP-Protocol-Defintion))
-- [@rithvikvibhu](https://github.com/rithvikvibhu) and the Lagrange Point community: hearing aid feature research
-- [@timgromeyer](https://github.com/timgromeyer): first version of the LibrePods Linux app
-- All [LibrePods contributors](https://github.com/kavishdevar/librepods/graphs/contributors) who decoded the protocol
-
----
-
-*AirPods is a trademark of Apple Inc., registered in the U.S. and other countries and regions. All trademarks, logos, and brand names are the property of their respective owners. This project is not affiliated with, endorsed by, or sponsored by Apple Inc.*
+A BLE-capable build still defaults to scanning off. Fetching keys is explicit and
+requires a ready persistent session; keys are stored privately outside public
+status and never printed. Identity is verified before merging advertisements.
+Scanning pauses for connection preparation, recovery and suspend. Connected
+scanning is disabled pending a separate controller coexistence acceptance run.
+Case/lid telemetry may remain unavailable indefinitely without affecting control.
+
+## Architecture and verification
+
+| Crate | Responsibility |
+| --- | --- |
+| `librepods-core` | Pure parsers, encoders, reducer, capabilities and deterministic policies |
+| `librepods-linux` | BlueZ, cancellable L2CAP, optional BLE, sleep and desktop adapters |
+| `librepods-daemon` | Single session owner, command queue, IPC, persistence and policy orchestration |
+| `librepods-cli` | Thin local client and Linux service entry point |
+| `librepods-windows` | Platform library adapters; cross-compiled contracts, explicit unsupported operations |
+
+The persistent service and new CLI runtime currently support Linux. Windows
+library compilation does not establish Windows runtime or hardware parity.
+Other model mappings describe verified protocol capabilities, not equivalent
+hardware acceptance. Head tracking, relay/multipoint, hearing aid/custom
+transparency and high-resolution microphone transport remain experimental and
+are not automatically activated by the service.
+
+See [testing](docs/testing.md), [development evidence](docs/automated-evidence.md),
+and the [port plan](plans/rust-daemon-port.md). Ordinary tests use isolated buses,
+synthetic peers and temporary paths. Hardware-changing runs are separate and
+restore captured settings. Short measurements never count as the required
+24-hour no-BLE soak.
+
+The source is licensed under [AGPL-3.0-only](Cargo.toml). Protocol and behavioral references
+include [LibrePods](https://github.com/kavishdevar/librepods) and the provenance
+records accompanying vendored fixtures and compatibility tests.
