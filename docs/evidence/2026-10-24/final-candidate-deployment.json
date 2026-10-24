@@ -4,7 +4,6 @@
     "source_tree": "bbeae158ab6acd1fff3531e8ff4ec6638da88233",
     "source_state": "clean",
     "features": "no-default-features",
-    "started_utc": "2026-10-24T22:48:35.295883+00:00",
     "lock_sha256": "a07b8ee367ff6160c320c8b6195d85f4e9dcad40a6a2b949662d1f7014bb4134",
     "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
     "ble_backend_absent_from_graph": true,
