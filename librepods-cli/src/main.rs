@@ -299,6 +299,13 @@ async fn run(cli: &Cli) -> Result<(), DaemonError> {
     }
     let operation = cli.operation()?;
     let watch = matches!(operation, Operation::Watch);
+    let operation = match &cli.address {
+        Some(address) => Operation::ForDevice {
+            address: address.clone(),
+            operation: Box::new(operation),
+        },
+        None => operation,
+    };
     let request = Request {
         version: PROTOCOL_VERSION,
         id: 1,

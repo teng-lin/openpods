@@ -26,6 +26,9 @@ pub(crate) struct Telemetry {
     keys: Option<BleKeys>,
     address: String,
     error: Option<DaemonError>,
+    was_enabled: bool,
+    reload_at: Instant,
+    start_at: Instant,
 }
 
 impl Telemetry {
@@ -37,6 +40,9 @@ impl Telemetry {
             keys: None,
             address: String::new(),
             error: None,
+            was_enabled: false,
+            reload_at: origin,
+            start_at: origin,
         }
     }
 
@@ -94,8 +100,15 @@ impl Telemetry {
         enabled: bool,
         allowed: bool,
     ) -> Value {
-        if enabled && self.address != state.bluetooth_address && !state.bluetooth_address.is_empty()
+        let reenabled = enabled && !self.was_enabled;
+        self.was_enabled = enabled;
+        if enabled
+            && !state.bluetooth_address.is_empty()
+            && (self.address != state.bluetooth_address
+                || reenabled
+                || (self.error.is_some() && Instant::now() >= self.reload_at))
         {
+            self.reload_at = Instant::now() + Duration::from_secs(30);
             self.address.clone_from(&state.bluetooth_address);
             match self.store().and_then(|store| store.get(&self.address)) {
                 Ok(keys) => {
@@ -108,7 +121,8 @@ impl Telemetry {
                 }
             }
         }
-        if enabled && self.coordinator.is_none() {
+        if enabled && self.coordinator.is_none() && Instant::now() >= self.start_at {
+            self.start_at = Instant::now() + Duration::from_secs(1);
             match BleCoordinator::start(self.origin) {
                 Ok(coordinator) => self.coordinator = Some(coordinator),
                 Err(error) => self.error = Some(error),
@@ -188,6 +202,38 @@ impl KeyRead {
 mod tests {
     use super::*;
     use librepods_core::protocol::parser::ProximityKey;
+
+    #[cfg(feature = "ble")]
+    #[test]
+    fn enabling_again_reloads_repaired_private_keys_without_fetching_or_restarting() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().expect("directory");
+        let paths = Paths {
+            runtime: root.path().join("run"),
+            state: root.path().join("state"),
+            config: root.path().join("config"),
+            legacy_state: root.path().join("legacy"),
+            legacy_socket: root.path().join("legacy.sock"),
+        };
+        let path = paths.state.join("ble-keys.json");
+        let mut store = KeyStore::load(path.clone()).expect("store");
+        store
+            .save(&BleKeys::new("AA:BB:CC:DD:EE:FF", [1; 16], [2; 16]).expect("keys"))
+            .expect("save");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("public");
+        let mut state = DeviceState::default();
+        state.set_device_identity("AA:BB:CC:DD:EE:FF", "Example");
+        let mut telemetry = Telemetry::new(Instant::now(), Some(paths));
+        let denied = telemetry.poll(&mut state, 0, true, false);
+        assert_eq!(denied["keys_available"], false);
+        assert_eq!(denied["last_error"]["code"], "permission_denied");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("private");
+        telemetry.poll(&mut state, 0, false, false);
+        let repaired = telemetry.poll(&mut state, 0, true, false);
+        assert_eq!(repaired["keys_available"], true);
+        assert!(repaired["last_error"].is_null());
+        assert!(!repaired.to_string().contains("encryption_key"));
+    }
 
     #[test]
     fn key_exchange_requires_both_new_valid_keys_and_ignores_other_packets() {

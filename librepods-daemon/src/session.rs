@@ -36,6 +36,7 @@ const READ_SLICE: Duration = Duration::from_millis(40);
 const AVAILABILITY_POLL_MS: u64 = 1000;
 
 struct Envelope {
+    target_address: Option<String>,
     request: Request,
     deadline: Instant,
     reply: oneshot::Sender<Response>,
@@ -63,8 +64,37 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
-    pub async fn request(&self, request: Request) -> Response {
+    pub async fn request(&self, mut request: Request) -> Response {
         let id = request.id;
+        let target_address = if let Operation::ForDevice { address, operation } = request.operation
+        {
+            request.operation = *operation;
+            if matches!(request.operation, Operation::ForDevice { .. }) {
+                return Response::failed(
+                    id,
+                    DaemonError::new(
+                        ErrorCode::InvalidInput,
+                        "device selection",
+                        "nested device assertions are not supported",
+                    ),
+                );
+            }
+            Some(address)
+        } else {
+            None
+        };
+        if target_address.as_ref().is_some_and(|address| {
+            !address.eq_ignore_ascii_case(&self.status.borrow().device.address)
+        }) {
+            return Response::failed(
+                id,
+                DaemonError::new(
+                    ErrorCode::DeviceUnavailable,
+                    "device selection",
+                    "service owns a different device; start it with the requested address",
+                ),
+            );
+        }
         if matches!(
             request.operation,
             Operation::Status | Operation::Capabilities | Operation::Doctor
@@ -91,7 +121,11 @@ impl SessionHandle {
                 | Operation::MoveStream { .. }
                 | Operation::Unmute
         ) {
-            let address = self.status.borrow().device.address.clone();
+            let (audio_generation, address) = {
+                let status = self.status.borrow();
+                (status.session_generation, status.device.address.clone())
+            };
+            let audio_address = address.clone();
             if !matches!(request.operation, Operation::AudioStatus) {
                 self.manual_overrides
                     .send_modify(|revision| *revision = revision.saturating_add(1));
@@ -101,6 +135,16 @@ impl SessionHandle {
                 self.backend.audio_async(address, request.operation),
             )
             .await;
+            let changed_session = {
+                let status = self.status.borrow();
+                status.session_generation != audio_generation
+                    || status.device.address != audio_address
+            };
+            if matches!(&result, Ok(Ok(_)))
+                && (changed_session || self.stopped.load(Ordering::SeqCst))
+            {
+                return Response::failed(id,DaemonError::new(if readonly_audio {ErrorCode::Cancelled} else {ErrorCode::OutcomeUnknown},"audio","session changed while audio operation was in flight; old result was not published"));
+            }
             return match result {
                 Ok(Ok(value))=>{self.audio_feed.send_replace(value.clone());Response::ok(id,value)},
                 Ok(Err(error))=>Response::failed(id,error),
@@ -111,6 +155,7 @@ impl SessionHandle {
         let dispatched = Arc::new(AtomicBool::new(false));
         let (reply, rx) = oneshot::channel();
         match self.sender.try_send(Envelope {
+            target_address,
             request,
             deadline,
             reply,
@@ -689,6 +734,21 @@ impl Worker {
             return;
         }
         let id = envelope.request.id;
+        if envelope
+            .target_address
+            .as_ref()
+            .is_some_and(|address| !address.eq_ignore_ascii_case(&self.state.bluetooth_address))
+        {
+            let _ = envelope.reply.send(Response::failed(
+                id,
+                DaemonError::new(
+                    ErrorCode::DeviceUnavailable,
+                    "device selection",
+                    "selected device changed before dispatch",
+                ),
+            ));
+            return;
+        }
         let response = match &envelope.request.operation {
             Operation::Status | Operation::Watch => Response::snapshot(id, &self.status),
             Operation::Capabilities => Response::ok(id, self.status.capabilities()),
@@ -751,8 +811,22 @@ impl Worker {
                         ),
                     )
                 } else {
-                    envelope.dispatched.store(true, Ordering::SeqCst);
                     let remaining = envelope.deadline.saturating_duration_since(Instant::now());
+                    if envelope.reply.is_closed() || self.stopped.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    if remaining.is_zero() {
+                        let _ = envelope.reply.send(Response::failed(
+                            id,
+                            DaemonError::new(
+                                ErrorCode::CommandTimeout,
+                                "BLE keys",
+                                "request expired before dispatch",
+                            ),
+                        ));
+                        return;
+                    }
+                    envelope.dispatched.store(true, Ordering::SeqCst);
                     let result = self
                         .connection
                         .as_ref()

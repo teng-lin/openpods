@@ -251,11 +251,38 @@ async fn client_connection(
                 continue;
             }
         };
-        if matches!(request.operation, Operation::Watch) {
+        let watch_target = match &request.operation {
+            Operation::Watch => Some(None),
+            Operation::ForDevice { address, operation }
+                if matches!(operation.as_ref(), Operation::Watch) =>
+            {
+                Some(Some(address.clone()))
+            }
+            _ => None,
+        };
+        if let Some(target) = watch_target {
             let id = request.id;
             let mut snapshots = handle.status.clone();
             loop {
                 let snapshot = snapshots.borrow_and_update().clone();
+                if target
+                    .as_ref()
+                    .is_some_and(|address| !address.eq_ignore_ascii_case(&snapshot.device.address))
+                {
+                    write_response(
+                        &mut writer,
+                        &Response::failed(
+                            id,
+                            DaemonError::new(
+                                ErrorCode::DeviceUnavailable,
+                                "device selection",
+                                "service owns a different device",
+                            ),
+                        ),
+                    )
+                    .await?;
+                    return Ok(());
+                }
                 write_response(&mut writer, &Response::snapshot(id, &snapshot)).await?;
                 let mut probe = [0u8; 1];
                 tokio::select! {
@@ -406,15 +433,7 @@ pub async fn write_response(
 
 pub async fn request(paths: &Paths, request: &Request) -> Result<Response, DaemonError> {
     let duration = Duration::from_millis(request.timeout_ms);
-    let mutation = !matches!(
-        request.operation,
-        Operation::Status
-            | Operation::Watch
-            | Operation::Capabilities
-            | Operation::Doctor
-            | Operation::AudioStatus
-            | Operation::FetchKeys
-    );
+    let mutation = request.operation.is_mutation();
     let mut dispatched = false;
     tokio::time::timeout(duration, async {
         let mut stream = UnixStream::connect(paths.socket())

@@ -34,6 +34,11 @@ fn default_timeout() -> u64 {
     deny_unknown_fields
 )]
 pub enum Operation {
+    /// Assert the selected device at dispatch; never retarget an existing owner.
+    ForDevice {
+        address: String,
+        operation: Box<Operation>,
+    },
     Status,
     Watch,
     Capabilities,
@@ -55,6 +60,21 @@ pub enum Operation {
         output: String,
     },
     Unmute,
+}
+
+impl Operation {
+    pub fn is_mutation(&self) -> bool {
+        match self {
+            Self::ForDevice { operation, .. } => operation.is_mutation(),
+            Self::Status
+            | Self::Watch
+            | Self::Capabilities
+            | Self::Doctor
+            | Self::AudioStatus
+            | Self::FetchKeys => false,
+            _ => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +122,20 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, DaemonError> {
     }
     let request: Request = serde_json::from_slice(bytes)
         .map_err(|e| DaemonError::new(ErrorCode::InvalidInput, "ipc", e.to_string()))?;
+    if let Operation::ForDevice { address, operation } = &request.operation {
+        crate::config::Config {
+            address: Some(address.clone()),
+            ..Default::default()
+        }
+        .validate()?;
+        if matches!(operation.as_ref(), Operation::ForDevice { .. }) {
+            return Err(DaemonError::new(
+                ErrorCode::InvalidInput,
+                "ipc",
+                "nested device assertions are not supported",
+            ));
+        }
+    }
     if request.version != PROTOCOL_VERSION {
         return Err(DaemonError::new(
             ErrorCode::VersionMismatch,
