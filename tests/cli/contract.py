@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import socket
+import signal
+import time
 import subprocess
 import tempfile
 import threading
@@ -25,6 +27,8 @@ class CliContract(unittest.TestCase):
         self.env = {**os.environ, "HOME": str(root), "XDG_RUNTIME_DIR": str(root),
                     "XDG_CONFIG_HOME": str(root / "config"),
                     "XDG_STATE_HOME": str(root / "state"), "RUST_LOG": "off"}
+        self.env["PULSE_SERVER"] = "unix:" + str(root / "no-pulse-server")
+        self.env["PIPEWIRE_REMOTE"] = "librepods-test-no-pipewire"
         self.env["DBUS_SYSTEM_BUS_ADDRESS"] = "unix:path=" + str(root / "no-system-bus")
         self.env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=" + str(root / "no-session-bus")
         (root / "librepods-rs").mkdir(mode=0o700)
@@ -238,6 +242,40 @@ class CliContract(unittest.TestCase):
             self.assertEqual(error["code"], "service_unavailable" if BLE_BUILD else "unsupported")
             if BLE_BUILD:
                 self.assertEqual(error["stage"], "owner lock")
+
+    def test_real_serve_reports_private_bus_failure_and_stops_cleanly_on_sigint(self):
+        server = subprocess.Popen([str(BINARY), "serve"], env=self.env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 4
+            while not self.socket.exists():
+                self.assertIsNone(server.poll(), "service exited before creating native socket")
+                self.assertLess(time.monotonic(), deadline, "service did not start")
+                time.sleep(0.01)
+            while True:
+                result = self.call("status")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                state = json.loads(result.stdout)
+                if (state.get("last_error") or {}).get("code") == "adapter_unavailable":
+                    break
+                self.assertLess(time.monotonic(), deadline, "unavailable private bus was not diagnosed")
+                time.sleep(0.01)
+            self.assertFalse(state["connected"])
+            self.assertFalse(state["ble_enabled"])
+            self.assertEqual(state["ble"]["compiled"], BLE_BUILD)
+            # No system/session bus or audio server points at the user's session.
+            # This exercises production owners under a real unavailable-adapter failure.
+            server.send_signal(signal.SIGINT)
+            stdout, stderr = server.communicate(timeout=4)
+            self.assertEqual(server.returncode, 0, stderr)
+            self.assertEqual(stdout, "")
+            self.assertFalse(self.socket.exists(), "owner socket survived clean process shutdown")
+            state_file = Path(self.env["XDG_STATE_HOME"]) / "librepods-rs/status.json"
+            self.assertFalse(state_file.exists(), "owner status survived clean process shutdown")
+        finally:
+            if server.poll() is None:
+                server.kill()
+                server.communicate(timeout=2)
 
     def test_invalid_compat_verb_is_rejected_before_connecting(self):
         result = self.call("compat", "adaptive:101")
