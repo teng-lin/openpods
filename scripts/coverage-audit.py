@@ -92,7 +92,7 @@ def main():
     parser.add_argument("--report-only", action="store_true")
     args = parser.parse_args()
     base = subprocess.check_output(["git", "rev-parse", "--verify", "--end-of-options", args.base + "^{commit}"], cwd=ROOT, text=True).strip()
-    diff = subprocess.check_output(["git", "diff", "--no-ext-diff", "--no-renames", "--unified=0", base, "--"], cwd=ROOT, text=True)
+    diff = subprocess.check_output(["git", "diff", "--no-ext-diff", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/", "--unified=0", base, "--"], cwd=ROOT, text=True)
     report = audit(args.lcov.read_text(), json.loads(args.test_spans.read_text()), changed_lines(diff))
     report["base_commit"] = base
     report["head_commit"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
