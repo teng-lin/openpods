@@ -11,7 +11,7 @@ use crate::{
 use librepods_core::{
     device::{
         battery::{BatteryStatus, Component},
-        state::ObservationSource,
+        state::{ObservationSource, WearReport},
     },
     policy::{
         audio::{
@@ -273,8 +273,8 @@ struct Coordinator {
     last_recovery: Option<String>,
     ear: EarPolicy,
     ear_mode: ConfigEar,
-    last_wear: Option<(u64, u64)>,
-    last_ca: Option<(u64, u64)>,
+    last_wear: Option<(u64, u64, WearReport)>,
+    last_ca: Option<(u64, u64, u8)>,
     next_players_ms: u64,
     media_history_ready: bool,
     ownership: PauseOwnership,
@@ -549,7 +549,9 @@ impl Coordinator {
             self.ear.reset();
             return;
         }
-        let observed = stamp(snapshot, "wear");
+        let observed = stamp(snapshot, "wear")
+            .zip(snapshot.device.wear)
+            .map(|((generation, time), wear)| (generation, time, wear));
         if observed.is_none() {
             self.ownership.clear();
             self.ear.reset();
@@ -647,7 +649,9 @@ impl Coordinator {
         if !self.config.ca_ducking || !snapshot.connected {
             return;
         }
-        let observed = stamp(snapshot, "ca_event");
+        let observed = stamp(snapshot, "ca_event")
+            .zip(snapshot.device.ca_event)
+            .map(|((generation, time), event)| (generation, time, event));
         if observed.is_none() || observed == self.last_ca {
             return;
         }
@@ -1425,6 +1429,32 @@ mod tests {
         stop.send(true).unwrap();
         task.await.unwrap();
         assert_eq!(*fake.effects.lock().unwrap(), vec!["Pause"]);
+    }
+    #[tokio::test]
+    async fn distinct_reports_with_the_same_millisecond_are_not_dropped() {
+        let fake = Fake::default();
+        let mut c = Coordinator::new(Config {
+            ca_ducking: true,
+            ..Config::default()
+        });
+        let mut s = snapshot(ConfigEar::OneRemoved);
+        wear(&mut s, WearState::InEar, WearState::InEar, 10);
+        s.device.ca_event = Some(1);
+        observe(&mut s, "ca_event", 10);
+        c.step(&s, 10, &fake).await;
+        wear(&mut s, WearState::OutOfEar, WearState::InEar, 10);
+        s.device.ca_event = Some(8);
+        c.step(&s, 11, &fake).await;
+        assert_eq!(
+            fake.audio.lock().unwrap().outputs[0].volume_percent,
+            Some(50.0)
+        );
+        assert!(fake
+            .effects
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|effect| effect == "Pause"));
     }
     #[tokio::test]
     async fn shutdown_cancels_stalled_observation_without_waiting_for_deadline() {
