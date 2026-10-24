@@ -157,6 +157,27 @@ impl AudioRecoveryPolicy {
         AudioAction::ActivateProfile(profile)
     }
 }
+/// Exact PulseAudio channel units in the server's channel-map order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VolumeChannel {
+    pub name: String,
+    pub value: u32,
+}
+pub const MAX_VOLUME_CHANNELS: usize = 32;
+pub const MAX_PULSE_VOLUME: u32 = 0x7fff_ffff;
+
+pub fn valid_channel_volumes(channels: &[VolumeChannel]) -> bool {
+    if channels.is_empty() || channels.len() > MAX_VOLUME_CHANNELS {
+        return false;
+    }
+    let mut names = std::collections::BTreeSet::new();
+    channels.iter().all(|channel| {
+        !channel.name.is_empty()
+            && channel.value <= MAX_PULSE_VOLUME
+            && names.insert(channel.name.as_str())
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VolumeAction {
     pub sink: String,
