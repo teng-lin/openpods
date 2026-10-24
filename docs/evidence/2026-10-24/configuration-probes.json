@@ -1,0 +1,305 @@
+{
+  "scope": "Development diagnostics; requested and observed values are distinct. Repeated notification masks did not trigger configuration reports before reconnect. No normalization claim.",
+  "probes": {
+    "adaptive-settlement-probe.json": {
+      "probe": "adaptive-level 75 after two seconds settlement, unmodified daemon",
+      "original_mode": "Transparency",
+      "original_level": 50,
+      "adaptive": {
+        "exit": 0,
+        "value": "Confirmed"
+      },
+      "write75": {
+        "exit": 1,
+        "value": {
+          "code": "outcome_unknown",
+          "stage": "request",
+          "message": "request deadline elapsed; inspect status before retrying a dispatched mutation",
+          "retryable": false
+        }
+      },
+      "after_probe": {
+        "mode": "Adaptive",
+        "level": [
+          50,
+          0,
+          0,
+          0
+        ]
+      },
+      "restore_mode": {
+        "exit": 1,
+        "value": {
+          "code": "device_unavailable",
+          "stage": "command",
+          "message": "AirPods control connection is not ready",
+          "retryable": false
+        }
+      },
+      "final": "Adaptive"
+    },
+    "adaptive-readback-probe.json": {
+      "probe": "diagnostic interposer adds known nonmutating REQUEST_NOTIFICATIONS after setting write; not release behavior",
+      "original_mode": "Transparency",
+      "original_level": 100,
+      "adaptive": {
+        "exit": 0,
+        "value": "Confirmed",
+        "elapsed_ms": 782.2850739903515
+      },
+      "level51": {
+        "exit": 1,
+        "value": {
+          "code": "outcome_unknown",
+          "stage": "command",
+          "message": "request deadline elapsed; inspect status before retrying a dispatched change",
+          "retryable": false
+        },
+        "elapsed_ms": 5002.57495099504
+      },
+      "level_after": [
+        50,
+        0,
+        0,
+        0
+      ],
+      "restore_level": {
+        "exit": 1,
+        "value": {
+          "code": "outcome_unknown",
+          "stage": "request",
+          "message": "request deadline elapsed; inspect status before retrying a dispatched mutation",
+          "retryable": false
+        },
+        "elapsed_ms": 5003.158335995977
+      },
+      "restore_mode": {
+        "exit": 0,
+        "value": "Confirmed",
+        "elapsed_ms": 974.5011579943821
+      },
+      "final": {
+        "mode": "Transparency",
+        "level": [
+          100,
+          0,
+          0,
+          0
+        ]
+      },
+      "events": [
+        {
+          "event": "readback_probe",
+          "fd": 28,
+          "length": 10,
+          "result": 10,
+          "start_ns": 75823746509768,
+          "end_ns": 75823746511729
+        },
+        {
+          "event": "control_report",
+          "id": 40,
+          "value": [
+            1,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "event": "control_report",
+          "id": 46,
+          "value": [
+            50,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "event": "control_report",
+          "id": 27,
+          "value": [
+            2,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "event": "readback_probe",
+          "fd": 28,
+          "length": 10,
+          "result": 10,
+          "start_ns": 75829877197200,
+          "end_ns": 75829877198835
+        },
+        {
+          "event": "control_report",
+          "id": 40,
+          "value": [
+            1,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "event": "control_report",
+          "id": 46,
+          "value": [
+            100,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "event": "control_report",
+          "id": 27,
+          "value": [
+            2,
+            0,
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    "notification-cycle-probe.json": {
+      "probe": "experimental zero-mask then all-mask notification cycle; restore original recorded level50",
+      "before": {
+        "mode": "Transparency",
+        "level": [
+          100,
+          0,
+          0,
+          0
+        ]
+      },
+      "adaptive": {
+        "exit": 0,
+        "value": "Confirmed"
+      },
+      "set50": {
+        "exit": 1,
+        "value": {
+          "code": "outcome_unknown",
+          "stage": "command",
+          "message": "request deadline elapsed; inspect status before retrying a dispatched change",
+          "retryable": false
+        }
+      },
+      "after": {
+        "mode": "Adaptive",
+        "level": [
+          50,
+          0,
+          0,
+          0
+        ],
+        "generation": 3
+      },
+      "restore_mode": {
+        "exit": 0,
+        "value": "Confirmed"
+      },
+      "events": [
+        {
+          "event": "send",
+          "fd": 28,
+          "length": 11,
+          "result": 11,
+          "start_ns": 76343389718249,
+          "end_ns": 76343389722440
+        },
+        {
+          "event": "send",
+          "fd": 28,
+          "length": 11,
+          "result": 11,
+          "start_ns": 76346282301093,
+          "end_ns": 76346282305239
+        },
+        {
+          "event": "subscription_clear_probe",
+          "fd": 28,
+          "length": 10,
+          "result": 10,
+          "start_ns": 76346282326583,
+          "end_ns": 76346282329574
+        },
+        {
+          "event": "readback_probe",
+          "fd": 28,
+          "length": 10,
+          "result": 10,
+          "start_ns": 76346282330596,
+          "end_ns": 76346282331066
+        },
+        {
+          "event": "send",
+          "fd": 28,
+          "length": 16,
+          "result": 16,
+          "start_ns": 76352285157019,
+          "end_ns": 76352285159135
+        },
+        {
+          "event": "send",
+          "fd": 28,
+          "length": 14,
+          "result": 14,
+          "start_ns": 76352297134077,
+          "end_ns": 76352297135659
+        },
+        {
+          "event": "send",
+          "fd": 28,
+          "length": 10,
+          "result": 10,
+          "start_ns": 76352300077062,
+          "end_ns": 76352300078709
+        },
+        {
+          "event": "control_report",
+          "id": 40,
+          "value": [
+            1,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "event": "control_report",
+          "id": 46,
+          "value": [
+            50,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "event": "control_report",
+          "id": 27,
+          "value": [
+            2,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "event": "send",
+          "fd": 28,
+          "length": 11,
+          "result": 11,
+          "start_ns": 76352406144379,
+          "end_ns": 76352406146943
+        }
+      ]
+    }
+  }
+}

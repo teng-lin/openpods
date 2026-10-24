@@ -1,0 +1,27 @@
+{
+  "native_connected": true,
+  "model": "A3048",
+  "publication_error": null,
+  "same_instance": true,
+  "native_mode": "0o600",
+  "legacy_mode": "0o600",
+  "unit_restrictions": {
+    "NoNewPrivileges": true,
+    "CapabilityBoundingSet": [],
+    "ProtectHome": "read-only",
+    "ReadWritePaths": "native runtime and two explicitly selected private test state leaves"
+  },
+  "cleanup": {
+    "native_removed": true,
+    "legacy_removed": true
+  },
+  "source_build": {
+    "commit": "9d754bcbc32bee0243e530b2a9c37db11b50b308",
+    "tree": "d9a1580e96e78198831a94c7c6af94bbbf54ae15",
+    "status": "",
+    "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "features": "no-default-features",
+    "binary_sha256": "25132ad50e880fd2bfc5fb6117fd1ae4199a13e1422e2debc6d3bd21a2f007d3"
+  },
+  "host_configuration_restored": true
+}

@@ -1,0 +1,204 @@
+{
+  "claim": "real mode transitions only; does not prove audible continuity, case/suspend cycles, or soak",
+  "binary_sha256": "25132ad50e880fd2bfc5fb6117fd1ae4199a13e1422e2debc6d3bd21a2f007d3",
+  "started_utc": "2026-10-24T21:03:08Z",
+  "model": "A3048",
+  "original_mode": "anc",
+  "execute": true,
+  "transitions": [
+    {
+      "elapsed_ms": 811.8982739979401,
+      "from": "anc",
+      "to": "off",
+      "confirmed": true,
+      "outcome": "Confirmed",
+      "audio_selection_preserved": true,
+      "utc": "2026-10-24T21:03:09Z"
+    },
+    {
+      "elapsed_ms": 1466.3391450012568,
+      "from": "off",
+      "to": "anc",
+      "confirmed": true,
+      "outcome": "Confirmed",
+      "audio_selection_preserved": true,
+      "utc": "2026-10-24T21:03:11Z"
+    },
+    {
+      "elapsed_ms": 2150.096046010731,
+      "from": "anc",
+      "to": "transparency",
+      "confirmed": true,
+      "outcome": "Confirmed",
+      "audio_selection_preserved": true,
+      "utc": "2026-10-24T21:03:13Z"
+    },
+    {
+      "elapsed_ms": 1469.7626279958058,
+      "from": "transparency",
+      "to": "off",
+      "confirmed": true,
+      "outcome": "Confirmed",
+      "audio_selection_preserved": true,
+      "utc": "2026-10-24T21:03:15Z"
+    },
+    {
+      "elapsed_ms": 1511.2988680048147,
+      "from": "off",
+      "to": "anc",
+      "confirmed": true,
+      "outcome": "Confirmed",
+      "audio_selection_preserved": true,
+      "utc": "2026-10-24T21:03:17Z"
+    },
+    {
+      "elapsed_ms": 2026.7206669959705,
+      "from": "anc",
+      "to": "transparency",
+      "confirmed": true,
+      "outcome": "Confirmed",
+      "audio_selection_preserved": true,
+      "utc": "2026-10-24T21:03:19Z"
+    },
+    {
+      "elapsed_ms": 1381.8635079951491,
+      "from": "transparency",
+      "to": "off",
+      "confirmed": true,
+      "outcome": "Confirmed",
+      "audio_selection_preserved": true,
+      "utc": "2026-10-24T21:03:20Z"
+    },
+    {
+      "elapsed_ms": 2155.7289469928946,
+      "from": "off",
+      "to": "anc",
+      "confirmed": true,
+      "outcome": "Confirmed",
+      "audio_selection_preserved": true,
+      "utc": "2026-10-24T21:03:23Z"
+    },
+    {
+      "elapsed_ms": 1445.7711650029523,
+      "from": "anc",
+      "to": "transparency",
+      "confirmed": true,
+      "outcome": "Confirmed",
+      "audio_selection_preserved": true,
+      "utc": "2026-10-24T21:03:24Z"
+    },
+    {
+      "elapsed_ms": 1494.3842930078972,
+      "from": "transparency",
+      "to": "off",
+      "confirmed": true,
+      "outcome": "Confirmed",
+      "audio_selection_preserved": true,
+      "utc": "2026-10-24T21:03:26Z"
+    },
+    {
+      "elapsed_ms": 2090.0367209978867,
+      "from": "off",
+      "to": "anc",
+      "confirmed": true,
+      "outcome": "Confirmed",
+      "audio_selection_preserved": true,
+      "utc": "2026-10-24T21:03:28Z"
+    },
+    {
+      "elapsed_ms": 1470.8893950009951,
+      "from": "anc",
+      "to": "transparency",
+      "confirmed": true,
+      "outcome": "Confirmed",
+      "audio_selection_preserved": true,
+      "utc": "2026-10-24T21:03:30Z"
+    },
+    {
+      "elapsed_ms": 1469.935060988064,
+      "from": "transparency",
+      "to": "off",
+      "confirmed": true,
+      "outcome": "Confirmed",
+      "audio_selection_preserved": true,
+      "utc": "2026-10-24T21:03:32Z"
+    },
+    {
+      "elapsed_ms": 2002.3445449915016,
+      "from": "off",
+      "to": "anc",
+      "confirmed": true,
+      "outcome": "Confirmed",
+      "audio_selection_preserved": true,
+      "utc": "2026-10-24T21:03:34Z"
+    },
+    {
+      "elapsed_ms": 1514.7056370042264,
+      "from": "anc",
+      "to": "transparency",
+      "confirmed": true,
+      "outcome": "Confirmed",
+      "audio_selection_preserved": true,
+      "utc": "2026-10-24T21:03:36Z"
+    },
+    {
+      "elapsed_ms": 2087.196872002096,
+      "from": "transparency",
+      "to": "off",
+      "confirmed": true,
+      "outcome": "Confirmed",
+      "audio_selection_preserved": true,
+      "utc": "2026-10-24T21:03:38Z"
+    },
+    {
+      "elapsed_ms": 1513.948427993455,
+      "from": "off",
+      "to": "anc",
+      "confirmed": true,
+      "outcome": "Confirmed",
+      "audio_selection_preserved": true,
+      "utc": "2026-10-24T21:03:40Z"
+    },
+    {
+      "elapsed_ms": 1515.2963120053755,
+      "from": "anc",
+      "to": "transparency",
+      "confirmed": true,
+      "outcome": "Confirmed",
+      "audio_selection_preserved": true,
+      "utc": "2026-10-24T21:03:42Z"
+    },
+    {
+      "elapsed_ms": 2042.5888000027044,
+      "from": "transparency",
+      "to": "off",
+      "confirmed": true,
+      "outcome": "Confirmed",
+      "audio_selection_preserved": true,
+      "utc": "2026-10-24T21:03:44Z"
+    },
+    {
+      "elapsed_ms": 1494.0388009999879,
+      "from": "off",
+      "to": "anc",
+      "confirmed": true,
+      "outcome": "Confirmed",
+      "audio_selection_preserved": true,
+      "utc": "2026-10-24T21:03:45Z"
+    }
+  ],
+  "failures": [],
+  "restoration": "verified",
+  "successful_transitions": 20,
+  "confirmation_p95_ms": 2150.096046010731,
+  "source_build": {
+    "commit": "9d754bcbc32bee0243e530b2a9c37db11b50b308",
+    "tree": "d9a1580e96e78198831a94c7c6af94bbbf54ae15",
+    "status": "",
+    "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "features": "no-default-features",
+    "binary_sha256": "25132ad50e880fd2bfc5fb6117fd1ae4199a13e1422e2debc6d3bd21a2f007d3"
+  },
+  "evidence_scope": "Twenty physical mode changes; profile/default selections only. No audible-continuity, case/suspend, config-confirmation or soak claim.",
+  "initial_two_second_p95_target_met": false
+}

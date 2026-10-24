@@ -1,0 +1,18 @@
+{
+  "kernel": "Linux 7.2.8-9-omarchy x86_64 GNU/Linux",
+  "packages": [
+    "bluez 5.87-2",
+    "pipewire 1:1.6.9-1",
+    "wireplumber 0.5.18-1",
+    "systemd 262.1-1"
+  ],
+  "controller": {
+    "idVendor": "8087",
+    "idProduct": "0033"
+  },
+  "driver": "btusb",
+  "model": "A3048",
+  "firmware_metadata_versions": [
+    "90.3431000025000000.6807"
+  ]
+}

@@ -1,0 +1,94 @@
+{
+  "capture": "local timing interposer; no packet bytes",
+  "source_build": {
+    "commit": "9d754bcbc32bee0243e530b2a9c37db11b50b308",
+    "tree": "d9a1580e96e78198831a94c7c6af94bbbf54ae15",
+    "status": "",
+    "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "features": "no-default-features",
+    "binary_sha256": "25132ad50e880fd2bfc5fb6117fd1ae4199a13e1422e2debc6d3bd21a2f007d3"
+  },
+  "samples": [
+    {
+      "target": "transparency",
+      "outcome": "Confirmed",
+      "total_ms": 797.432616,
+      "send_count": 1,
+      "before_write_ms": 20.677241,
+      "write_ms": 0.003619,
+      "after_write_ms": 776.751756,
+      "last_receive_to_response_ms": 0.817135
+    },
+    {
+      "target": "anc",
+      "outcome": "Confirmed",
+      "total_ms": 1526.662602,
+      "send_count": 1,
+      "before_write_ms": 19.584253,
+      "write_ms": 0.002662,
+      "after_write_ms": 1507.075687,
+      "last_receive_to_response_ms": 0.684076
+    },
+    {
+      "target": "transparency",
+      "outcome": "Confirmed",
+      "total_ms": 2127.452702,
+      "send_count": 1,
+      "before_write_ms": 23.788082,
+      "write_ms": 0.003437,
+      "after_write_ms": 2103.661183,
+      "last_receive_to_response_ms": 0.52869
+    },
+    {
+      "target": "anc",
+      "outcome": "Confirmed",
+      "total_ms": 1525.044678,
+      "send_count": 1,
+      "before_write_ms": 20.725041,
+      "write_ms": 0.002502,
+      "after_write_ms": 1504.317135,
+      "last_receive_to_response_ms": 0.82835
+    },
+    {
+      "target": "transparency",
+      "outcome": "Confirmed",
+      "total_ms": 1484.449177,
+      "send_count": 1,
+      "before_write_ms": 27.387419,
+      "write_ms": 0.00256,
+      "after_write_ms": 1457.059198,
+      "last_receive_to_response_ms": 1.017607
+    },
+    {
+      "target": "anc",
+      "outcome": "Confirmed",
+      "total_ms": 2059.731507,
+      "send_count": 1,
+      "before_write_ms": 22.586194,
+      "write_ms": 0.002924,
+      "after_write_ms": 2037.142389,
+      "last_receive_to_response_ms": 0.526744
+    },
+    {
+      "target": "transparency",
+      "outcome": "Confirmed",
+      "total_ms": 1402.623405,
+      "send_count": 1,
+      "before_write_ms": 10.584332,
+      "write_ms": 0.004071,
+      "after_write_ms": 1392.035002,
+      "last_receive_to_response_ms": 0.592786
+    },
+    {
+      "target": "anc",
+      "outcome": "Confirmed",
+      "total_ms": 2126.228431,
+      "send_count": 1,
+      "before_write_ms": 22.772495,
+      "write_ms": 0.008945,
+      "after_write_ms": 2103.446991,
+      "last_receive_to_response_ms": 0.879013
+    }
+  ],
+  "restored_mode": "NoiseCancellation"
+}
