@@ -45,6 +45,7 @@ struct Shared {
     absent: AtomicBool,
     lose_ack: AtomicBool,
     no_handshake: AtomicBool,
+    slow_audio: AtomicBool,
     connections: AtomicUsize,
     mode: Mutex<Option<NoiseControlMode>>,
     changes: Mutex<Vec<Vec<u8>>>,
@@ -160,6 +161,21 @@ impl Backend for EmulatedBackend {
 
     fn sleeping(&self) -> bool {
         self.0.sleeping.load(Ordering::SeqCst)
+    }
+
+    fn audio_async(
+        &self,
+        address: String,
+        operation: Operation,
+    ) -> librepods_daemon::backend::AudioFuture {
+        let delayed = self.0.slow_audio.load(Ordering::SeqCst);
+        let result = self.audio(&address, &operation);
+        Box::pin(async move {
+            if delayed {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            result
+        })
     }
 
     fn audio(&self, _: &str, operation: &Operation) -> Result<serde_json::Value, DaemonError> {
@@ -685,6 +701,77 @@ async fn disconnected_queued_client_cannot_cause_a_late_mutation() {
         "disconnected queued client caused a write"
     );
     harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancellation_after_write_recovers_without_replaying_the_uncertain_mutation() {
+    let shared = Arc::new(Shared::default());
+    let harness = Harness::start(shared.clone(), Config::default()).await;
+    let initial = harness.ready().await;
+    shared.lose_ack.store(true, Ordering::SeqCst);
+    let mut client = UnixStream::connect(harness.paths.socket())
+        .await
+        .expect("client");
+    let mut bytes = serde_json::to_vec(&Request {
+        version: 1,
+        id: 82,
+        timeout_ms: 1000,
+        operation: Operation::Change(SettingChange::ListeningMode(NoiseControlMode::Transparency)),
+    })
+    .expect("request");
+    bytes.push(b'\n');
+    client.write_all(&bytes).await.expect("request write");
+    wait_for_change_count(&shared, 1).await;
+    drop(client);
+    // Once written, cancellation cannot promise that the change did not apply.
+    // The fake peer applied it but withheld its ACK. Reconnection must observe
+    // the changed mode, never resend the cancelled command.
+    let recovered = harness
+        .wait_for(|snapshot| {
+            snapshot.connected
+                && snapshot.session_generation > initial.session_generation
+                && snapshot.device.listening_mode == Some(NoiseControlMode::Transparency)
+        })
+        .await;
+    let observed = &recovered.device.observations["noise_control"];
+    assert_eq!(observed.generation, recovered.session_generation);
+    assert!(!observed.stale);
+    assert_eq!(
+        shared.changes.lock().expect("changes").len(),
+        1,
+        "cancelled dispatched mutation was replayed"
+    );
+    harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn audio_read_timeout_is_certain_while_audio_mutation_timeout_is_uncertain() {
+    let shared = Arc::new(Shared::default());
+    shared.slow_audio.store(true, Ordering::SeqCst);
+    let session = librepods_daemon::session::Session::spawn(
+        Arc::new(EmulatedBackend(shared)),
+        Config::default(),
+        "audio-timeouts".into(),
+    );
+    for (operation, expected) in [
+        (Operation::AudioStatus, ErrorCode::CommandTimeout),
+        (
+            Operation::SetInput("example-source".into()),
+            ErrorCode::OutcomeUnknown,
+        ),
+    ] {
+        let response = session
+            .handle
+            .request(Request {
+                version: 1,
+                id: 83,
+                timeout_ms: 100,
+                operation,
+            })
+            .await;
+        assert_eq!(response.error.expect("timed-out audio").code, expected);
+    }
+    session.stop();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
