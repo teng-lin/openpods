@@ -1,0 +1,31 @@
+{
+  "build": {
+    "source_commit": "08f24a968ecb200f4bedf5d9b0ff5bcd2de3cbbe",
+    "source_tree": "c305810833cd7243270a010a1fa55a04ca6a66a8",
+    "source_state": "clean",
+    "features": "no-default-features",
+    "started_utc": "2026-10-24T22:48:35.295883+00:00",
+    "lock_sha256": "a07b8ee367ff6160c320c8b6195d85f4e9dcad40a6a2b949662d1f7014bb4134",
+    "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "ble_backend_absent_from_graph": true,
+    "binary_sha256": "96e7bdde8e3bc3de8a335a4817f03f281321505f6726a522ffa241a51558c361",
+    "completed_utc": "2026-10-24T22:48:44.516023+00:00"
+  },
+  "started_utc": "2026-10-24T22:49:29.452690+00:00",
+  "old_stop_seconds": 0.014756279007997364,
+  "pid": 1935818,
+  "native_ready": true,
+  "same_device": true,
+  "compiled_no_ble": true,
+  "runtime_ble_disabled": true,
+  "audio_profile_and_defaults_preserved": true,
+  "unit_restrictions": [
+    "Result=success",
+    "ExecMainStatus=0",
+    "CapabilityBoundingSet=",
+    "ProtectHome=read-only",
+    "NoNewPrivileges=yes"
+  ],
+  "no_preload": true,
+  "binary_matches_running": true
+}

@@ -1,31 +1,39 @@
 # Release acceptance evidence
 
-Status: incomplete; do not merge for release yet. Implementation is committed on
-`daemon-port`; physical reconnect/suspend/audio gates and the 24-hour soak remain
-open. Automated evidence is recorded separately in [automated-evidence.md](automated-evidence.md).
-A final instrumentation run also exposed a queued-client cancellation race under
-investigation; no passing rerun or earlier checkpoint overrides that failure.
+Status: implementation committed on `daemon-port`; first stable release
+acceptance is incomplete. Further manual testing was stopped by the user after
+five successful case cycles. Unattended verification continues: final critical
+coverage and the 24-hour no-BLE soak remain open. Automated evidence is recorded
+separately in [automated-evidence.md](automated-evidence.md).
+
+The final instrumentation run exposed a queued-client cancellation race. The
+kernel peer guard fixed it and passed 200 unchanged regression repetitions.
+A missed suspend/resume edge was also reproduced with a private login1 bus;
+`08f24a9` latches epochs until owner cancellation completes and fences admitted
+requests against that epoch. Both minimal and BLE functional suites pass at the
+subsequent test-only checkpoint; final coverage and additional epoch regressions
+are still being completed.
 
 ## Environment record
 
 | Field | Evidence |
 | --- | --- |
-| Rust commit and tree cleanliness | Pending |
-| Rust compiler and dependency lock hash | Pending |
+| Rust commit and tree cleanliness | [Deployed candidate](evidence/2026-10-24/final-candidate-deployment.json): clean `08f24a9`, exact tree and binary hashes recorded |
+| Rust compiler and dependency lock hash | Rust 1.99.1; lock SHA-256 `a07b8ee367ff6160c320c8b6195d85f4e9dcad40a6a2b949662d1f7014bb4134`; candidate record above |
 | OS/kernel, BlueZ, PipeWire and WirePlumber versions | [Recorded host](evidence/2026-10-24/hardware-environment.json) |
 | Adapter model/driver | Intel USB 8087:0033 / btusb; host record above |
 | AirPods model and firmware | A3048, 90.3431000025000000.6807; host record above |
-| Build features and runtime BLE state | Pending |
-| Original listening mode, CA, one-bud ANC and adaptive level | Pending |
-| Original profile, defaults and stream routes | Pending |
-| Restoration result after each hardware test | Pending |
+| Build features and runtime BLE state | No default features; BLE absent from dependency graph and runtime status; candidate record above |
+| Original listening mode, CA, one-bud ANC and adaptive level | Per-probe initial/final settings in configuration and mode artifacts; each setting probe restored its captured baseline |
+| Original profile, defaults and stream routes | Profile and defaults preserved across candidate deployment; stream-route and capture fault matrix unverified |
+| Restoration result after each hardware test | Per-probe restoration results recorded; no further manual tests after user stop |
 
 ## Gates
 
 | Gate | Required evidence | Status |
 | --- | --- | --- |
-| Automated matrix | Linux/Windows default and BLE variants, Android core compile, fmt/Clippy | Pending |
-| Coverage | Measured JSON, 90% core/80% service line gate, critical transition tests | Pending |
+| Automated matrix | Both Linux workspace variants and 22 CLI checks each passed; fresh Rust-generated fixtures passed actual Model.js; default strict Clippy and fmt passed | Final supplemental tests/cross-platform attestation pending |
+| Coverage | Fresh production run: core 96.90%, service 88.01%; critical changed code 89.66% | Broad gates passed; critical 90% gate still open |
 | Protocol robustness | Corpus replay, fuzz artifacts/regressions, Miri or documented platform limitation | Pending |
 | Native IPC | Concurrent clients, deadline expiry, unknown mutation outcome, stop/restart behavior | Pending |
 | Legacy integration | Rust-generated snapshots accepted by actual Omarchy Model.js | Pending |
