@@ -331,3 +331,116 @@ fn owner_drop_releases_lock_even_while_an_exec_child_inherits_the_open_file_desc
         "explicit owner drop left flock held by an inherited descriptor"
     );
 }
+
+#[test]
+fn file_size_limit_child_probe() {
+    let Some(root) = std::env::var_os("LIBREPODS_WRITE_FAILURE_ROOT") else {
+        return;
+    };
+    let paths = paths(Path::new(&root));
+    let original = Snapshot::new("last-good-owner".into(), &Default::default());
+    atomic_write(
+        &paths.state_file(),
+        &serde_json::to_vec(&original).expect("old snapshot"),
+    )
+    .expect("publish last good snapshot before limit");
+    let old_bytes = fs::read(paths.state_file()).expect("last good bytes");
+    // This child alone ignores SIGXFSZ and lowers its own file-size limit. A
+    // partial regular-file write succeeds before the next write reports EFBIG.
+    // No filesystem is filled and no parent/global resource limit changes.
+    let mut original_limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // Safety: output storage is initialized and valid for getrlimit.
+    assert_eq!(
+        unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut original_limit) },
+        0
+    );
+    let limit = libc::rlimit {
+        rlim_cur: 128,
+        rlim_max: original_limit.rlim_max,
+    };
+    // Safety: SIG_IGN is a valid signal disposition; limit points to initialized
+    // data. Both changes affect only this expendable child process.
+    let original_signal = unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) };
+    assert_ne!(original_signal, libc::SIG_ERR);
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &limit) }, 0);
+    let result = atomic_write(&paths.state_file(), &vec![b'x'; 65536]);
+    // Restore the child soft limit before assertions/exit so LLVM can flush its
+    // complete coverage profile rather than emitting a truncated profraw file.
+    // Safety: the original hard limit was retained, so raising the soft limit
+    // back to its original value requires no privilege or parent modification.
+    unsafe {
+        assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &original_limit), 0);
+        assert_ne!(libc::signal(libc::SIGXFSZ, original_signal), libc::SIG_ERR);
+    }
+    let error = result.expect_err("mid-write file-size failure");
+    assert_eq!(error.stage, "publish write");
+    assert_eq!(
+        error.message,
+        std::io::Error::from_raw_os_error(libc::EFBIG).to_string()
+    );
+    assert_eq!(
+        fs::read(paths.state_file()).expect("old status remains readable"),
+        old_bytes
+    );
+    let names: Vec<_> = fs::read_dir(&paths.state)
+        .expect("state directory")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    assert_eq!(
+        names,
+        vec![std::ffi::OsString::from("status.json")],
+        "mid-write failure leaked an atomic publication temporary"
+    );
+}
+
+#[test]
+fn actual_mid_write_failure_preserves_last_good_status_and_removes_partial_temporary() {
+    let directory = tempfile::tempdir().expect("private test directory");
+    let mut child = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "file_size_limit_child_probe",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("LIBREPODS_WRITE_FAILURE_ROOT", directory.path())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("isolated resource-limit child");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while child.try_wait().expect("child status").is_none() {
+        if std::time::Instant::now() >= deadline {
+            child.kill().expect("terminate stalled write probe");
+            child.wait().expect("reap probe");
+            panic!("mid-write fault probe exceeded its bound");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let output = child.wait_with_output().expect("child output");
+    assert!(
+        output.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn synthetic_disk_full_error_retains_os_cause_without_filling_a_filesystem() {
+    let cause = std::io::Error::from_raw_os_error(libc::ENOSPC);
+    let expected = cause.to_string();
+    let classified = librepods_daemon::DaemonError::io("publish write", cause);
+    assert_eq!(classified.stage, "publish write");
+    assert_eq!(classified.message, expected);
+    let public: librepods_daemon::DaemonError =
+        serde_json::from_slice(&serde_json::to_vec(&classified).expect("public error JSON"))
+            .expect("decoded error");
+    assert_eq!(
+        public.message, expected,
+        "structured error discarded the disk-full cause"
+    );
+}
