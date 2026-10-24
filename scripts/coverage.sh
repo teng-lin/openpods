@@ -4,9 +4,11 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 report="${1:-target/coverage.json}"
-cargo llvm-cov clean --workspace
-# cargo-llvm-cov emits shell-quoted exports for the current workspace/toolchain.
+# Select the exact target first: show-env and clean otherwise use different
+# default directories in cargo-llvm-cov0.9.1, leaving stale local artifacts.
+# cargo-llvm-cov emits shell-quoted exports for the workspace/toolchain.
 eval "$(cargo llvm-cov show-env --sh)"
+cargo llvm-cov clean --workspace
 cargo test --workspace --no-default-features --locked
 cargo test --workspace --no-default-features --features librepods-cli/ble --locked
 cargo build -p librepods-cli --no-default-features --features librepods-cli/ble --locked
