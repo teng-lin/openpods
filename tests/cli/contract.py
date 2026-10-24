@@ -13,6 +13,7 @@ import threading
 import unittest
 
 BINARY = None
+BLE_BUILD = False
 FIXTURES = Path(__file__).resolve().parents[2] / "target/native-fixtures"
 
 
@@ -217,6 +218,27 @@ class CliContract(unittest.TestCase):
             self.assertEqual(error["stage"], "owner lock")
             self.assertFalse(self.socket.exists())
 
+    def test_explicit_address_wraps_native_request_without_retargeting_the_service(self):
+        address = "00:11:22:33:44:55"
+        for args, operation in [(["status"], {"type": "status"}),
+            (["--conversation-awareness", "off"], {"type": "change", "value": {"ConversationalAwareness": False}})]:
+            result, request = self.exchange(["--address", address, *args], self.ok)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(request["operation"], {"type": "for_device", "value": {
+                "address": address, "operation": operation}})
+
+    def test_scan_respects_owner_lock_or_rejects_absent_build_feature_before_hardware(self):
+        lock = self.socket.parent / "owner.lock"
+        with lock.open("w") as owned:
+            lock.chmod(0o600)
+            fcntl.flock(owned, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.call("--scan")
+            self.assertEqual(result.returncode, 1)
+            error = json.loads(result.stderr)
+            self.assertEqual(error["code"], "service_unavailable" if BLE_BUILD else "unsupported")
+            if BLE_BUILD:
+                self.assertEqual(error["stage"], "owner lock")
+
     def test_invalid_compat_verb_is_rejected_before_connecting(self):
         result = self.call("compat", "adaptive:101")
         self.assertEqual(result.returncode, 1)
@@ -226,6 +248,8 @@ class CliContract(unittest.TestCase):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
+    parser.add_argument("--ble-build", action="store_true")
     args, remaining = parser.parse_known_args()
+    BLE_BUILD = args.ble_build
     BINARY = args.binary.resolve(strict=True)
     unittest.main(argv=[__file__, *remaining])

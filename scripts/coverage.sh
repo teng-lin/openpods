@@ -9,6 +9,8 @@ cargo llvm-cov clean --workspace
 eval "$(cargo llvm-cov show-env --sh)"
 cargo test --workspace --no-default-features --locked
 cargo test --workspace --no-default-features --features librepods-cli/ble --locked
+cargo build -p librepods-cli --no-default-features --features librepods-cli/ble --locked
+python3 tests/cli/contract.py "${CARGO_LLVM_COV_TARGET_DIR}/debug/librepods-cli" --ble-build -v
 cargo build -p librepods-cli --no-default-features --locked
 python3 tests/cli/contract.py "${CARGO_LLVM_COV_TARGET_DIR}/debug/librepods-cli" -v
 cargo llvm-cov report --json --output-path "$report"

@@ -56,6 +56,11 @@ struct Shared {
     lose_ack: AtomicBool,
     no_handshake: AtomicBool,
     slow_audio: AtomicBool,
+    hold_audio: AtomicBool,
+    allow_audio_mutation: AtomicBool,
+    audio_ready: tokio::sync::Notify,
+    audio_calls: AtomicUsize,
+    address: Mutex<Option<String>>,
     large_audio: AtomicBool,
     key_reply: AtomicU8,
     key_requests: AtomicUsize,
@@ -164,7 +169,13 @@ impl Backend for EmulatedBackend {
             ));
         }
         Ok(Endpoint {
-            address: ADDRESS.into(),
+            address: self
+                .0
+                .address
+                .lock()
+                .expect("selected address")
+                .clone()
+                .unwrap_or_else(|| ADDRESS.into()),
             name: "Example AirPods".into(),
         })
     }
@@ -191,10 +202,16 @@ impl Backend for EmulatedBackend {
         operation: Operation,
     ) -> librepods_daemon::backend::AudioFuture {
         let delayed = self.0.slow_audio.load(Ordering::SeqCst);
+        let held = self.0.hold_audio.load(Ordering::SeqCst);
+        let shared = self.0.clone();
+        shared.audio_calls.fetch_add(1, Ordering::SeqCst);
         let result = self.audio(&address, &operation);
         Box::pin(async move {
             if delayed {
                 tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            if held {
+                shared.audio_ready.notified().await;
             }
             result
         })
@@ -219,6 +236,9 @@ impl Backend for EmulatedBackend {
                 ..Default::default()
             };
             return Ok(serde_json::to_value(snapshot).expect("synthetic audio graph"));
+        }
+        if self.0.allow_audio_mutation.load(Ordering::SeqCst) {
+            return Ok(serde_json::json!({"marker": "old-session audio result"}));
         }
         if matches!(operation, Operation::AudioStatus) {
             Ok(serde_json::json!({"health":"usable","profile":"a2dp-sink","capture":"external"}))
@@ -1741,4 +1761,290 @@ async fn oversized_audio_graph_returns_a_typed_error_and_never_poisons_native_st
         "oversized audio graph broke AACP control"
     );
     harness.stop().await;
+}
+
+fn for_device(address: &str, operation: Operation) -> Operation {
+    Operation::ForDevice {
+        address: address.into(),
+        operation: Box::new(operation),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn target_device_assertions_reject_wrong_identity_and_allow_matching_confirmed_changes() {
+    let harness = Harness::start(Arc::new(Shared::default()), Config::default()).await;
+    harness.ready().await;
+    for operation in [
+        Operation::Status,
+        Operation::AudioStatus,
+        Operation::Change(SettingChange::ConversationalAwareness(false)),
+    ] {
+        let response = harness
+            .request(400, for_device("66:77:88:99:AA:BB", operation), 1000)
+            .await;
+        assert_eq!(
+            response.error.expect("wrong target").code,
+            ErrorCode::DeviceUnavailable
+        );
+    }
+    assert_eq!(harness.shared.audio_calls.load(Ordering::SeqCst), 0);
+    assert!(harness.shared.changes.lock().expect("changes").is_empty());
+    let matching = harness
+        .request(
+            401,
+            for_device(
+                ADDRESS,
+                Operation::Change(SettingChange::ListeningMode(NoiseControlMode::Transparency)),
+            ),
+            1000,
+        )
+        .await;
+    assert_eq!(matching.result, Some(serde_json::json!("Confirmed")));
+    assert_eq!(harness.shared.changes.lock().expect("changes").len(), 1);
+    let mut client = UnixStream::connect(harness.paths.socket())
+        .await
+        .expect("client");
+    for operation in [
+        for_device("invalid", Operation::Status),
+        for_device(ADDRESS, for_device(ADDRESS, Operation::Status)),
+    ] {
+        let mut bytes = serde_json::to_vec(&Request {
+            version: 1,
+            id: 402,
+            timeout_ms: 1000,
+            operation,
+        })
+        .expect("request");
+        bytes.push(b'\n');
+        client
+            .write_all(&bytes)
+            .await
+            .expect("invalid target request");
+        let response: Response = serde_json::from_slice(
+            &runtime::read_response_frame(&mut client)
+                .await
+                .expect("read")
+                .expect("response"),
+        )
+        .expect("response schema");
+        assert_eq!(
+            response.error.expect("invalid target encoding").code,
+            ErrorCode::InvalidInput
+        );
+    }
+    harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_target_is_rechecked_after_reconnect_selects_a_different_device() {
+    const OTHER: &str = "66:77:88:99:AA:BB";
+    let shared = Arc::new(Shared::default());
+    let harness = Harness::start(shared.clone(), Config::default()).await;
+    harness.ready().await;
+    shared.lose_ack.store(true, Ordering::SeqCst);
+    let paths = harness.paths.clone();
+    let active = tokio::spawn(async move {
+        runtime::request(
+            &paths,
+            &Request {
+                version: 1,
+                id: 410,
+                timeout_ms: 2000,
+                operation: Operation::Change(SettingChange::ListeningMode(
+                    NoiseControlMode::Transparency,
+                )),
+            },
+        )
+        .await
+    });
+    wait_for_change_count(&shared, 1).await;
+    let paths = harness.paths.clone();
+    let reconnect = tokio::spawn(async move {
+        runtime::request(
+            &paths,
+            &Request {
+                version: 1,
+                id: 411,
+                timeout_ms: 2000,
+                operation: Operation::Reconnect,
+            },
+        )
+        .await
+    });
+    harness.wait_for(|snapshot| snapshot.queue_depth >= 2).await;
+    let paths = harness.paths.clone();
+    let queued = tokio::spawn(async move {
+        runtime::request(
+            &paths,
+            &Request {
+                version: 1,
+                id: 412,
+                timeout_ms: 2000,
+                operation: for_device(
+                    ADDRESS,
+                    Operation::Change(SettingChange::ConversationalAwareness(false)),
+                ),
+            },
+        )
+        .await
+    });
+    harness.wait_for(|snapshot| snapshot.queue_depth >= 3).await;
+    *shared.address.lock().expect("new identity") = Some(OTHER.into());
+    shared.lose_ack.store(false, Ordering::SeqCst);
+    shared
+        .peers
+        .lock()
+        .expect("peers")
+        .first()
+        .expect("old peer")
+        .push(packets::build_noise_control(NoiseControlMode::Transparency).to_vec());
+    assert!(active
+        .await
+        .expect("active")
+        .expect("response")
+        .error
+        .is_none());
+    assert!(reconnect
+        .await
+        .expect("reconnect")
+        .expect("response")
+        .error
+        .is_none());
+    assert_eq!(
+        queued
+            .await
+            .expect("targeted client")
+            .expect("response")
+            .error
+            .expect("changed target")
+            .code,
+        ErrorCode::DeviceUnavailable
+    );
+    harness
+        .wait_for(|snapshot| snapshot.connected && snapshot.device.address == OTHER)
+        .await;
+    assert_eq!(
+        shared.changes.lock().expect("changes").len(),
+        1,
+        "queued mutation reached wrong AirPods"
+    );
+    harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn targeted_watch_stops_before_publishing_another_devices_snapshot() {
+    let shared = Arc::new(Shared::default());
+    let harness = Harness::start(shared.clone(), Config::default()).await;
+    harness.ready().await;
+    let mut watcher = UnixStream::connect(harness.paths.socket())
+        .await
+        .expect("watcher");
+    let mut bytes = serde_json::to_vec(&Request {
+        version: 1,
+        id: 420,
+        timeout_ms: 1000,
+        operation: for_device(ADDRESS, Operation::Watch),
+    })
+    .expect("request");
+    bytes.push(b'\n');
+    watcher.write_all(&bytes).await.expect("watch request");
+    let initial: Response = serde_json::from_slice(
+        &runtime::read_response_frame(&mut watcher)
+            .await
+            .expect("read")
+            .expect("snapshot"),
+    )
+    .expect("response schema");
+    assert_eq!(
+        initial.result.expect("snapshot")["device"]["address"],
+        ADDRESS
+    );
+    *shared.address.lock().expect("identity") = Some("66:77:88:99:AA:BB".into());
+    assert!(harness
+        .request(421, Operation::Reconnect, 1000)
+        .await
+        .error
+        .is_none());
+    loop {
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(2),
+            runtime::read_response_frame(&mut watcher),
+        )
+        .await
+        .expect("bounded target watch")
+        .expect("read")
+        .expect("target terminal response");
+        let response: Response = serde_json::from_slice(&bytes).expect("watch response");
+        assert_eq!(response.id, 420);
+        if let Some(error) = response.error {
+            assert_eq!(error.code, ErrorCode::DeviceUnavailable);
+            break;
+        }
+        assert_eq!(
+            response.result.expect("snapshot")["device"]["address"],
+            ADDRESS,
+            "targeted watch exposed another device"
+        );
+    }
+    harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn audio_results_from_a_previous_identity_are_never_published_to_the_new_device() {
+    for (operation, expected) in [
+        (Operation::AudioStatus, ErrorCode::Cancelled),
+        (
+            Operation::SetInput("example-source".into()),
+            ErrorCode::OutcomeUnknown,
+        ),
+    ] {
+        let shared = Arc::new(Shared::default());
+        shared.hold_audio.store(true, Ordering::SeqCst);
+        shared.allow_audio_mutation.store(true, Ordering::SeqCst);
+        let harness = Harness::start(shared.clone(), Config::default()).await;
+        harness.ready().await;
+        let paths = harness.paths.clone();
+        let audio = tokio::spawn(async move {
+            runtime::request(
+                &paths,
+                &Request {
+                    version: 1,
+                    id: 430,
+                    timeout_ms: 2000,
+                    operation: for_device(ADDRESS, operation),
+                },
+            )
+            .await
+        });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while shared.audio_calls.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline, "audio request did not start");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        *shared.address.lock().expect("identity") = Some("66:77:88:99:AA:BB".into());
+        assert!(harness
+            .request(431, Operation::Reconnect, 1000)
+            .await
+            .error
+            .is_none());
+        harness
+            .wait_for(|snapshot| snapshot.connected && snapshot.device.address != ADDRESS)
+            .await;
+        shared.audio_ready.notify_one();
+        assert_eq!(
+            audio
+                .await
+                .expect("audio task")
+                .expect("response")
+                .error
+                .expect("old session result")
+                .code,
+            expected
+        );
+        assert!(
+            harness.ready().await.audio.get("marker").is_none(),
+            "old audio poisoned new session state"
+        );
+        harness.stop().await;
+    }
 }
