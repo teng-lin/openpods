@@ -66,9 +66,27 @@ impl From<PlatformError> for TransportError {
 
 pub fn kind(error: &TransportError) -> Option<ErrorKind> {
     match error {
-        TransportError::Io { source, .. } => source
-            .downcast_ref::<PlatformError>()
-            .map(|error| error.kind),
+        TransportError::Io { source, .. } => {
+            if let Some(error) = source.downcast_ref::<PlatformError>() {
+                return Some(error.kind);
+            }
+            if let Some(error) = source.downcast_ref::<io::Error>() {
+                return Some(PlatformError::io("I/O", io::Error::from(error.kind())).kind);
+            }
+            #[cfg(feature = "ble")]
+            if let Some(error) = source.downcast_ref::<btleplug::Error>() {
+                return Some(match error {
+                    btleplug::Error::PermissionDenied => ErrorKind::PermissionDenied,
+                    btleplug::Error::DeviceNotFound
+                    | btleplug::Error::NotConnected
+                    | btleplug::Error::NoAdapterAvailable => ErrorKind::Unavailable,
+                    btleplug::Error::NotSupported(_) => ErrorKind::Unsupported,
+                    btleplug::Error::TimedOut(_) => ErrorKind::Timeout,
+                    _ => ErrorKind::Io,
+                });
+            }
+            None
+        }
         TransportError::Timeout => Some(ErrorKind::Timeout),
         TransportError::Cancelled => Some(ErrorKind::Cancelled),
         TransportError::Unsupported => Some(ErrorKind::Unsupported),

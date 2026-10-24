@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 use librepods_core::device::ble_advert::BleAdvertData;
 use librepods_core::transport::RawBleAdvertisement;
+#[cfg(any(feature = "ble", test))]
+use librepods_core::transport::TransportError;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ble")]
@@ -61,6 +63,44 @@ pub trait ScanFactory: Send + Sync + 'static {
     fn start(&self) -> Result<Box<dyn ScanSource>, DaemonError>;
 }
 
+/// Native scan errors never contain protocol keys: scanners receive only raw OS advertisements.
+/// Keep a bounded cause chain for diagnosis, preserving machine-readable classification.
+#[cfg(any(feature = "ble", test))]
+fn scan_error(stage: &str, error: TransportError) -> DaemonError {
+    use librepods_linux::error::{kind, ErrorKind};
+    let code = match kind(&error) {
+        Some(ErrorKind::PermissionDenied) => ErrorCode::PermissionDenied,
+        Some(ErrorKind::Timeout) => ErrorCode::CommandTimeout,
+        Some(ErrorKind::Cancelled) => ErrorCode::Cancelled,
+        Some(ErrorKind::Unsupported) => ErrorCode::Unsupported,
+        Some(ErrorKind::InvalidInput) => ErrorCode::InvalidInput,
+        Some(ErrorKind::Truncated) => ErrorCode::MalformedFrame,
+        Some(ErrorKind::Io) => ErrorCode::ServiceUnavailable,
+        _ => ErrorCode::ServiceUnavailable,
+    };
+    let mut causes = vec![error.to_string()];
+    let mut source = std::error::Error::source(&error);
+    for _ in 0..6 {
+        let Some(cause) = source else {
+            break;
+        };
+        causes.push(cause.to_string());
+        source = cause.source();
+    }
+    let message: String = causes
+        .join(": ")
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(1024)
+        .collect();
+    let mut result = DaemonError::new(code, stage, message);
+    result.retryable = matches!(
+        code,
+        ErrorCode::ServiceUnavailable | ErrorCode::CommandTimeout
+    );
+    result
+}
+
 struct NativeFactory;
 
 #[cfg(feature = "ble")]
@@ -69,13 +109,9 @@ struct NativeSource(librepods_linux::ble::BtleplugScanner);
 #[cfg(feature = "ble")]
 impl ScanSource for NativeSource {
     fn next(&mut self, timeout: Duration) -> Result<Option<RawBleAdvertisement>, DaemonError> {
-        self.0.next_advertisement_timeout(timeout).map_err(|_| {
-            DaemonError::transient(
-                ErrorCode::ServiceUnavailable,
-                "BLE scan",
-                "scanner worker is unavailable",
-            )
-        })
+        self.0
+            .next_advertisement_timeout(timeout)
+            .map_err(|error| scan_error("BLE receive", error))
     }
 }
 
@@ -89,13 +125,7 @@ impl ScanFactory for NativeFactory {
                 .map_err(|error| DaemonError::io("BLE coordinator runtime", error))?;
             let scanner = runtime
                 .block_on(librepods_linux::ble::BtleplugScanner::start())
-                .map_err(|_| {
-                    DaemonError::transient(
-                        ErrorCode::ServiceUnavailable,
-                        "BLE scan",
-                        "scan could not start; AACP control is unaffected",
-                    )
-                })?;
+                .map_err(|error| scan_error("BLE startup", error))?;
             Ok(Box::new(NativeSource(scanner)))
         }
         #[cfg(not(feature = "ble"))]
@@ -120,6 +150,8 @@ struct Shared {
     revision: u64,
     stopped: bool,
     health: BleHealth,
+    last_error: Option<DaemonError>,
+    quiescent_revision: u64,
 }
 
 type Control = Arc<(Mutex<Shared>, Condvar)>;
@@ -150,6 +182,8 @@ impl BleCoordinator {
                 revision: 0,
                 stopped: false,
                 health: BleHealth::Disabled,
+                last_error: None,
+                quiescent_revision: 0,
             }),
             Condvar::new(),
         ));
@@ -209,12 +243,73 @@ impl BleCoordinator {
         Ok(())
     }
 
+    /// Disable scanning and wait until the source has stopped and dropped before AACP connects.
+    /// A timeout never grants permission to connect concurrently with an active scan.
+    pub fn pause_for_connection(&self, timeout: Duration) -> Result<(), DaemonError> {
+        let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+            DaemonError::new(
+                ErrorCode::InvalidInput,
+                "BLE pause",
+                "timeout exceeds clock range",
+            )
+        })?;
+        let (lock, wake) = &*self.control;
+        let mut shared = lock.lock().unwrap_or_else(|error| error.into_inner());
+        if shared.stopped {
+            return Err(DaemonError::new(
+                ErrorCode::Cancelled,
+                "BLE pause",
+                "coordinator stopped",
+            ));
+        }
+        if shared.policy.allowed {
+            shared.policy.allowed = false;
+            shared.revision = shared.revision.wrapping_add(1);
+            wake.notify_all();
+        }
+        let revision = shared.revision;
+        loop {
+            if shared.stopped || shared.revision != revision {
+                return Err(DaemonError::new(
+                    ErrorCode::Cancelled,
+                    "BLE pause",
+                    "pause superseded",
+                ));
+            }
+            if shared.quiescent_revision == revision {
+                return Ok(());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(DaemonError::transient(
+                    ErrorCode::CommandTimeout,
+                    "BLE pause",
+                    "scan source has not acknowledged stopping",
+                ));
+            }
+            shared = wake
+                .wait_timeout(shared, remaining)
+                .unwrap_or_else(|error| error.into_inner())
+                .0;
+        }
+    }
+
     pub fn health(&self) -> BleHealth {
         self.control
             .0
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .health
+    }
+
+    /// Authoritative diagnostics remain available even when event consumers lag.
+    pub fn last_error(&self) -> Option<DaemonError> {
+        self.control
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .last_error
+            .clone()
     }
 
     pub fn next_event_timeout(&self, timeout: Duration) -> Result<Option<BleEvent>, DaemonError> {
@@ -301,6 +396,22 @@ fn health(
     });
 }
 
+fn acknowledge_quiescence(control: &Control, revision: u64) {
+    let (lock, wake) = &**control;
+    let mut shared = lock.lock().unwrap_or_else(|error| error.into_inner());
+    if shared.revision == revision {
+        shared.quiescent_revision = revision;
+        wake.notify_all();
+    }
+}
+
+fn record_error(control: &Control, revision: u64, error: DaemonError) {
+    let mut shared = control.0.lock().unwrap_or_else(|error| error.into_inner());
+    if shared.revision == revision && !shared.stopped {
+        shared.last_error = Some(error);
+    }
+}
+
 fn wait(control: &Control, revision: u64, timeout: Option<Duration>) {
     let (lock, wake) = &**control;
     let shared = lock.lock().unwrap_or_else(|error| error.into_inner());
@@ -342,6 +453,7 @@ fn run(
     let mut scanner: Option<Box<dyn ScanSource>> = None;
     let mut active_revision = u64::MAX;
     let mut retry_delay = Duration::from_secs(1);
+    let mut healthy_since = Instant::now();
     loop {
         let (policy, revision, stopped) = state(&control);
         if stopped {
@@ -364,6 +476,7 @@ fn run(
         if let Some(paused) = pause {
             scanner.take();
             health(&control, &sender, revision, policy.generation, paused);
+            acknowledge_quiescence(&control, revision);
             wait(&control, revision, None);
             continue;
         }
@@ -382,7 +495,12 @@ fn run(
                         continue;
                     }
                     scanner = Some(source);
-                    retry_delay = Duration::from_secs(1);
+                    healthy_since = Instant::now();
+                    control
+                        .0
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .last_error = None;
                     health(
                         &control,
                         &sender,
@@ -391,7 +509,9 @@ fn run(
                         BleHealth::Scanning,
                     );
                 }
-                Err(_) => {
+                Err(error) => {
+                    let retryable = error.retryable;
+                    record_error(&control, revision, error);
                     health(
                         &control,
                         &sender,
@@ -399,7 +519,7 @@ fn run(
                         policy.generation,
                         BleHealth::Backoff,
                     );
-                    wait(&control, revision, Some(retry_delay));
+                    wait(&control, revision, retryable.then_some(retry_delay));
                     retry_delay = (retry_delay * 2).min(MAX_BACKOFF);
                     continue;
                 }
@@ -410,6 +530,9 @@ fn run(
         };
         match source.next(READ_SLICE) {
             Ok(Some(raw)) => {
+                if healthy_since.elapsed() >= MAX_BACKOFF {
+                    retry_delay = Duration::from_secs(1);
+                }
                 if state(&control).1 != revision {
                     continue;
                 }
@@ -427,8 +550,14 @@ fn run(
                     });
                 }
             }
-            Ok(None) => {}
-            Err(_) => {
+            Ok(None) => {
+                if healthy_since.elapsed() >= MAX_BACKOFF {
+                    retry_delay = Duration::from_secs(1);
+                }
+            }
+            Err(error) => {
+                let retryable = error.retryable;
+                record_error(&control, revision, error);
                 scanner.take();
                 health(
                     &control,
@@ -437,7 +566,7 @@ fn run(
                     policy.generation,
                     BleHealth::Backoff,
                 );
-                wait(&control, revision, Some(retry_delay));
+                wait(&control, revision, retryable.then_some(retry_delay));
                 retry_delay = (retry_delay * 2).min(MAX_BACKOFF);
             }
         }
@@ -638,5 +767,112 @@ mod tests {
         wait_health(&coordinator, BleHealth::Disabled);
         coordinator.shutdown();
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+    #[test]
+    fn native_error_classification_retains_bounded_os_causes() {
+        for (error, code, retryable) in [
+            (
+                TransportError::PermissionDenied,
+                ErrorCode::PermissionDenied,
+                false,
+            ),
+            (TransportError::Timeout, ErrorCode::CommandTimeout, true),
+            (TransportError::Unsupported, ErrorCode::Unsupported, false),
+            (TransportError::Cancelled, ErrorCode::Cancelled, false),
+            (
+                TransportError::ChannelClosed,
+                ErrorCode::ServiceUnavailable,
+                true,
+            ),
+        ] {
+            let result = scan_error("test scan", error);
+            assert_eq!(result.code, code);
+            assert_eq!(result.retryable, retryable);
+        }
+        let result = scan_error(
+            "test scan",
+            TransportError::with_source(
+                "open manager",
+                std::io::Error::from_raw_os_error(libc::EACCES),
+            ),
+        );
+        assert_eq!(result.code, ErrorCode::PermissionDenied);
+        assert!(result.message.contains("open manager"));
+        assert!(result.message.contains("Permission denied"));
+        let result = scan_error(
+            "test scan",
+            TransportError::new("\n".to_owned() + &"x".repeat(4000)),
+        );
+        assert!(result.message.len() <= 1024);
+        assert!(!result.message.contains('\n'));
+    }
+
+    #[cfg(feature = "ble")]
+    struct DroppingSource(Arc<AtomicUsize>);
+    #[cfg(feature = "ble")]
+    impl ScanSource for DroppingSource {
+        fn next(&mut self, timeout: Duration) -> Result<Option<RawBleAdvertisement>, DaemonError> {
+            std::thread::sleep(timeout.min(Duration::from_millis(5)));
+            Ok(None)
+        }
+    }
+    #[cfg(feature = "ble")]
+    impl Drop for DroppingSource {
+        fn drop(&mut self) {
+            std::thread::sleep(Duration::from_millis(40));
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    #[cfg(feature = "ble")]
+    struct DroppingFactory(Arc<AtomicUsize>);
+    #[cfg(feature = "ble")]
+    impl ScanFactory for DroppingFactory {
+        fn start(&self) -> Result<Box<dyn ScanSource>, DaemonError> {
+            Ok(Box::new(DroppingSource(self.0.clone())))
+        }
+    }
+    #[cfg(feature = "ble")]
+    #[test]
+    fn connection_pause_acknowledges_source_drop_before_permitting_aacp() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut coordinator = BleCoordinator::start_with_factory(
+            Instant::now(),
+            Arc::new(DroppingFactory(drops.clone())),
+        )
+        .expect("coordinator");
+        let keys = BleKeys::new("AA:BB:CC:DD:EE:FF", [1; 16], [2; 16]).expect("keys");
+        coordinator
+            .configure(true, true, 1, Some(keys.clone()))
+            .expect("enable");
+        wait_health(&coordinator, BleHealth::Scanning);
+        assert_eq!(
+            coordinator
+                .pause_for_connection(Duration::ZERO)
+                .expect_err("not yet quiescent")
+                .code,
+            ErrorCode::CommandTimeout
+        );
+        coordinator
+            .pause_for_connection(Duration::from_secs(1))
+            .expect("source stopped");
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "ack must follow native StopDiscovery/drop"
+        );
+        assert_eq!(coordinator.health(), BleHealth::Paused);
+        coordinator
+            .configure(true, true, 1, Some(keys))
+            .expect("resume optional scan");
+        wait_health(&coordinator, BleHealth::Scanning);
+        coordinator.shutdown();
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            coordinator
+                .pause_for_connection(Duration::ZERO)
+                .expect_err("stopped")
+                .code,
+            ErrorCode::Cancelled
+        );
     }
 }

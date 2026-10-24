@@ -115,7 +115,7 @@ impl KeyStore {
         };
         let data = match OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
             .open(&path)
         {
             Ok(file) => {
@@ -142,11 +142,16 @@ impl KeyStore {
                         "key store exceeds size limit",
                     ));
                 }
-                serde_json::from_slice::<KeyFile>(&bytes).map_err(|_| {
+                serde_json::from_slice::<KeyFile>(&bytes).map_err(|error| {
                     DaemonError::new(
                         ErrorCode::InvalidInput,
                         "BLE keys",
-                        "invalid key store encoding",
+                        format!(
+                            "invalid key store encoding at line {}, column {} ({:?})",
+                            error.line(),
+                            error.column(),
+                            error.classify()
+                        ),
                     )
                 })?
             }
@@ -205,7 +210,7 @@ impl KeyStore {
         let bytes = serde_json::to_vec(&next).map_err(|_| {
             DaemonError::new(ErrorCode::Internal, "BLE keys", "cannot encode key store")
         })?;
-        if next.devices.len() > MAX_DEVICES || bytes.len() > MAX_FILE_BYTES {
+        if next.devices.len() > MAX_DEVICES || bytes.len().saturating_add(1) > MAX_FILE_BYTES {
             return Err(DaemonError::new(
                 ErrorCode::InvalidInput,
                 "BLE keys",
@@ -287,5 +292,60 @@ mod tests {
             .get(keys.address())
             .expect("unchanged memory")
             .is_none());
+    }
+    #[test]
+    fn nonregular_key_store_never_blocks_open_and_parser_diagnostics_are_redacted() {
+        let root = tempfile::tempdir().expect("private directory");
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("private parent");
+        let fifo = root.path().join("keys.fifo");
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).expect("fifo name");
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let started = std::time::Instant::now();
+        assert_eq!(
+            KeyStore::load(fifo).err().expect("reject FIFO").code,
+            ErrorCode::PermissionDenied
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        let path = root.path().join("keys.json");
+        crate::storage::atomic_write(
+            &path,
+            br#"{"schema_version":1,"devices":{},"DO_NOT_EXPOSE_SECRET":"KEY-MATERIAL"}"#,
+        )
+        .expect("invalid encoded file");
+        let error = KeyStore::load(path).err().expect("reject unknown fields");
+        assert!(error.message.contains("line"));
+        assert!(!error.message.contains("KEY-MATERIAL"));
+        assert!(!error.message.contains("DO_NOT_EXPOSE_SECRET"));
+    }
+
+    #[test]
+    fn oversized_and_noncanonical_key_stores_are_rejected_without_payloads() {
+        let root = tempfile::tempdir().expect("private directory");
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("private parent");
+        let path = root.path().join("keys.json");
+        crate::storage::atomic_write(&path, &vec![b'x'; MAX_FILE_BYTES + 1]).expect("large file");
+        assert_eq!(
+            KeyStore::load(path.clone()).err().expect("oversize").code,
+            ErrorCode::InvalidInput
+        );
+        let file = KeyFile {
+            schema_version: 1,
+            devices: BTreeMap::from([(
+                "aa:bb:cc:dd:ee:ff".into(),
+                StoredKeys {
+                    irk: [1; 16],
+                    encryption_key: [2; 16],
+                },
+            )]),
+        };
+        crate::storage::atomic_write(&path, &serde_json::to_vec(&file).expect("encode fixture"))
+            .expect("bad identity");
+        assert_eq!(
+            KeyStore::load(path).err().expect("noncanonical").code,
+            ErrorCode::InvalidInput
+        );
     }
 }
