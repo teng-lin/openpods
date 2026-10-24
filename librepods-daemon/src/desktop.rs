@@ -239,6 +239,7 @@ struct Coordinator {
     ear_mode: ConfigEar,
     last_wear: Option<(u64, u64)>,
     last_ca: Option<(u64, u64)>,
+    next_players_ms: u64,
     ownership: PauseOwnership,
     ducking: DuckingPolicy,
     ducked_volume: Option<(String, u8)>,
@@ -263,6 +264,7 @@ impl Coordinator {
             last_recovery: None,
             last_wear: None,
             last_ca: None,
+            next_players_ms: 0,
             ownership: PauseOwnership::default(),
             ducking: DuckingPolicy::default(),
             ducked_volume: None,
@@ -351,6 +353,16 @@ impl Coordinator {
         };
         if self.last_error.is_some() {
             return;
+        }
+        if self.ownership.has_owned() && now >= self.next_players_ms {
+            self.next_players_ms = now.saturating_add(1000);
+            match adapter.players().await {
+                Ok(players) => self.ownership.observe(&players_for_policy(&players)),
+                Err(error) => {
+                    self.ownership.clear();
+                    self.last_error = Some(format!("MPRIS ownership: {}", error.code()));
+                }
+            }
         }
         self.routing(snapshot, &audio, adapter).await;
         self.audio_recovery(snapshot, &audio, now, adapter).await;
@@ -461,7 +473,7 @@ impl Coordinator {
             .outputs
             .iter()
             .any(|node| node.selected_device && Some(&node.name) == audio.default_output.as_ref());
-        if !active {
+        if !active || !audio.capture_known || audio.capture_active {
             self.ownership.clear();
             self.ear.reset();
             return;
@@ -508,10 +520,11 @@ impl Coordinator {
                 return;
             }
         };
-        if !current
-            .outputs
-            .iter()
-            .any(|node| node.selected_device && Some(&node.name) == current.default_output.as_ref())
+        if !current.capture_known
+            || current.capture_active
+            || !current.outputs.iter().any(|node| {
+                node.selected_device && Some(&node.name) == current.default_output.as_ref()
+            })
         {
             self.ownership.clear();
             self.ear.reset();
@@ -1049,6 +1062,46 @@ mod tests {
             c.last_recovery.as_deref(),
             Some("profile_activation_requested")
         );
+    }
+    #[tokio::test]
+    async fn ownership_is_invalidated_by_manual_playback_between_ear_reports() {
+        let fake = Fake::default();
+        let mut c = Coordinator::new(Config::default());
+        let mut s = snapshot(ConfigEar::OneRemoved);
+        wear(&mut s, WearState::InEar, WearState::InEar, 0);
+        c.step(&s, 0, &fake).await;
+        wear(&mut s, WearState::OutOfEar, WearState::InEar, 1);
+        c.step(&s, 1, &fake).await;
+        fake.players.lock().unwrap()[0].playback_status = "Playing".into();
+        c.step(&s, 1001, &fake).await;
+        fake.players.lock().unwrap()[0].playback_status = "Paused".into();
+        wear(&mut s, WearState::InEar, WearState::InEar, 1002);
+        c.step(&s, 1002, &fake).await;
+        assert_eq!(*fake.effects.lock().unwrap(), vec!["Pause"]);
+    }
+    #[tokio::test]
+    async fn capture_live_or_unknown_blocks_ear_and_route_actions() {
+        for known in [false, true] {
+            let fake = Fake::default();
+            {
+                let mut audio = fake.audio.lock().unwrap();
+                audio.capture_known = known;
+                audio.capture_active = known;
+            }
+            let mut c = Coordinator::new(Config::default());
+            let mut s = snapshot(ConfigEar::OneRemoved);
+            wear(&mut s, WearState::InEar, WearState::InEar, 0);
+            c.step(&s, 0, &fake).await;
+            wear(&mut s, WearState::OutOfEar, WearState::InEar, 1);
+            c.step(&s, 1, &fake).await;
+            fake.audio.lock().unwrap().default_output = Some("speakers".into());
+            let mut c = Coordinator::new(Config {
+                auto_route: true,
+                ..Config::default()
+            });
+            c.step(&s, 0, &fake).await;
+            assert!(fake.effects.lock().unwrap().is_empty());
+        }
     }
     #[tokio::test]
     async fn shutdown_cancels_stalled_observation_without_waiting_for_deadline() {
