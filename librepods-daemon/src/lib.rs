@@ -22,3 +22,6 @@ pub mod snapshot;
 pub mod storage;
 
 pub use error::{DaemonError, ErrorCode};
+
+#[cfg(target_os = "linux")]
+pub mod desktop;

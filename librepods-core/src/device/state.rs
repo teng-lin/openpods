@@ -250,6 +250,8 @@ pub struct DeviceState {
     pub wear: Option<WearReport>,
     #[serde(default)]
     pub lid_state: LidState,
+    #[serde(default)]
+    pub ca_event: Option<u8>,
     pub device_name: String,
     pub model_number: String,
     pub manufacturer: String,
@@ -306,6 +308,7 @@ impl Default for DeviceState {
             observations: BTreeMap::new(),
             wear: None,
             lid_state: LidState::Unknown,
+            ca_event: None,
             device_name: String::new(),
             model_number: String::new(),
             manufacturer: String::new(),
@@ -359,6 +362,7 @@ impl DeviceState {
         self.noise_control_reported = false;
         self.ear_detection_reported = false;
         self.wear = None;
+        self.ca_event = None;
         self.primary_in_ear = false;
         self.secondary_in_ear = false;
         self.revision = self.revision.saturating_add(1);
@@ -373,6 +377,7 @@ impl DeviceState {
         self.noise_control_reported = false;
         self.ear_detection_reported = false;
         self.wear = None;
+        self.ca_event = None;
         for observation in self.observations.values_mut() {
             observation.stale = true;
         }
@@ -670,8 +675,11 @@ impl DeviceState {
                     fields.push(format!("control.{id:02x}"));
                 }
             }
-            ParsedPacket::ConversationalAwareness { .. }
-            | ParsedPacket::HeadTracking(_)
+            ParsedPacket::ConversationalAwareness { status } => {
+                self.ca_event = Some(*status);
+                fields.push("ca_event".into());
+            }
+            ParsedPacket::HeadTracking(_)
             | ParsedPacket::HandshakeAck
             | ParsedPacket::FeaturesAck => {}
         }
@@ -885,11 +893,12 @@ mod reducer_tests {
             ParsedPacket::HandshakeAck,
             ParsedPacket::FeaturesAck,
             ParsedPacket::Unknown(vec![]),
-            ParsedPacket::ConversationalAwareness { status: 1 },
             ParsedPacket::HeadTracking(vec![]),
         ] {
             assert!(!state.apply_packet(&packet, 1, 9));
         }
+        assert!(state.apply_packet(&ParsedPacket::ConversationalAwareness { status: 1 }, 1, 9));
+        assert_eq!(state.ca_event, Some(1));
         let revision = state.revision;
         state.set_device_identity("00:00:00:00:00:02", "Other");
         assert!(state.revision > revision);

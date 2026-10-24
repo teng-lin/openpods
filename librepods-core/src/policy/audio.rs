@@ -164,6 +164,17 @@ pub struct DuckingPolicy {
     owned: Option<(String, u8, u8)>,
 }
 impl DuckingPolicy {
+    /// Upstream AirPodsService treats 1/2 as speech and 6/8/9 as restoration.
+    pub fn on_event(&mut self, event: u8, sink: &str, volume: u8) -> Option<VolumeAction> {
+        match event {
+            1 | 2 => self.speech_started(sink, volume),
+            6 | 8 | 9 => self.speech_stopped(sink, volume),
+            _ => None,
+        }
+    }
+    pub fn is_ducking(&self) -> bool {
+        self.owned.is_some()
+    }
     pub fn speech_started(&mut self, sink: &str, volume: u8) -> Option<VolumeAction> {
         if self.owned.is_some() || volume > 100 {
             return None;
@@ -285,6 +296,21 @@ mod tests {
         );
         policy.manual_override();
         assert_eq!(policy.observe(&snapshot, 2, 9000), AudioAction::None);
+    }
+    #[test]
+    fn conversational_event_mapping_preserves_unknown_events() {
+        let mut policy = DuckingPolicy::default();
+        assert!(policy.on_event(0xff, "pods", 50).is_none());
+        assert!(!policy.is_ducking());
+        assert_eq!(policy.on_event(1, "pods", 50).unwrap().percent, 10);
+        assert!(policy.is_ducking());
+        assert!(policy.on_event(2, "pods", 10).is_none());
+        assert_eq!(policy.on_event(6, "pods", 10).unwrap().percent, 50);
+        assert!(!policy.is_ducking());
+        policy.on_event(2, "pods", 50);
+        assert_eq!(policy.on_event(8, "pods", 10).unwrap().percent, 50);
+        policy.on_event(1, "pods", 50);
+        assert_eq!(policy.on_event(9, "pods", 10).unwrap().percent, 50);
     }
     #[test]
     fn ducking_restores_only_its_own_volume_on_the_same_sink() {
