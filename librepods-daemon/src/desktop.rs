@@ -24,7 +24,9 @@ use librepods_core::{
     },
     transport::TransportError,
 };
-use librepods_linux::desktop::{self, AudioAction, AudioSnapshot, PlayerAction, PlayerSnapshot};
+use librepods_linux::desktop::{
+    self, AudioAction, AudioSnapshot, PlayerAction, PlayerEvent, PlayerMonitor, PlayerSnapshot,
+};
 use serde_json::{json, Value};
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 use tokio::sync::watch;
@@ -33,6 +35,16 @@ type AdapterFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, TransportError
 
 /// Tests replace this boundary rather than touch the user's live audio session.
 pub trait DesktopAdapter: Send + Sync {
+    fn player_events_ready(&self) -> bool {
+        true
+    }
+    fn try_player_event(&self) -> Option<PlayerEvent> {
+        None
+    }
+    fn next_player_event(&self) -> Pin<Box<dyn Future<Output = Option<PlayerEvent>> + Send + '_>> {
+        Box::pin(std::future::pending())
+    }
+
     fn audio_snapshot<'a>(&'a self, address: &'a str) -> AdapterFuture<'a, AudioSnapshot>;
     fn audio_action<'a>(&'a self, address: &'a str, action: AudioAction) -> AdapterFuture<'a, ()>;
     fn players(&self) -> AdapterFuture<'_, Vec<PlayerSnapshot>>;
@@ -43,8 +55,27 @@ pub trait DesktopAdapter: Send + Sync {
     ) -> AdapterFuture<'a, PlayerSnapshot>;
     fn notify<'a>(&'a self, summary: &'a str, body: &'a str) -> AdapterFuture<'a, ()>;
 }
-struct SystemDesktop;
+struct SystemDesktop {
+    players: Option<PlayerMonitor>,
+}
 impl DesktopAdapter for SystemDesktop {
+    fn player_events_ready(&self) -> bool {
+        self.players.as_ref().is_some_and(PlayerMonitor::is_ready)
+    }
+    fn try_player_event(&self) -> Option<PlayerEvent> {
+        self.players
+            .as_ref()
+            .and_then(PlayerMonitor::try_next_event)
+    }
+    fn next_player_event(&self) -> Pin<Box<dyn Future<Output = Option<PlayerEvent>> + Send + '_>> {
+        Box::pin(async {
+            match &self.players {
+                Some(players) => players.next_event().await,
+                None => std::future::pending().await,
+            }
+        })
+    }
+
     fn audio_snapshot<'a>(&'a self, address: &'a str) -> AdapterFuture<'a, AudioSnapshot> {
         Box::pin(desktop::audio_snapshot(address))
     }
@@ -79,7 +110,9 @@ pub async fn run(
         audio_updates,
         manual_overrides,
         shutdown,
-        Arc::new(SystemDesktop),
+        Arc::new(SystemDesktop {
+            players: PlayerMonitor::start().ok(),
+        }),
     )
     .await;
 }
@@ -97,6 +130,7 @@ pub async fn run_with_adapter(
     let mut interval = tokio::time::interval(Duration::from_millis(250));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut first = true;
+    let mut events_open = true;
     loop {
         if *shutdown.borrow() {
             break;
@@ -106,11 +140,13 @@ pub async fn run_with_adapter(
                 biased;
                 result=shutdown.changed()=>{if result.is_err()||*shutdown.borrow(){break;}},
                 result=manual_overrides.changed()=>{if result.is_err(){break;} coordinator.manual_override();},
+                event=adapter.next_player_event(), if events_open=>{if event.is_none(){events_open=false;}coordinator.player_event(event);},
                 result=status.changed()=>{if result.is_err(){break;}},
                 _=interval.tick()=>{},
             }
         }
         first = false;
+        coordinator.drain_player_events(adapter.as_ref());
         let snapshot = status.borrow_and_update().clone();
         let now = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         let mut status_changed = false;
@@ -240,6 +276,7 @@ struct Coordinator {
     last_wear: Option<(u64, u64)>,
     last_ca: Option<(u64, u64)>,
     next_players_ms: u64,
+    media_history_ready: bool,
     ownership: PauseOwnership,
     ducking: DuckingPolicy,
     ducked_volume: Option<(String, u8)>,
@@ -265,6 +302,7 @@ impl Coordinator {
             last_wear: None,
             last_ca: None,
             next_players_ms: 0,
+            media_history_ready: false,
             ownership: PauseOwnership::default(),
             ducking: DuckingPolicy::default(),
             ducked_volume: None,
@@ -273,6 +311,37 @@ impl Coordinator {
             route_attempted: false,
             yielded: false,
         }
+    }
+    fn player_event(&mut self, event: Option<PlayerEvent>) {
+        match event {
+            Some(PlayerEvent::Playback {
+                bus_name,
+                owner,
+                playback_status,
+            }) => {
+                let state = match playback_status.as_str() {
+                    "Paused" => PlaybackState::Paused,
+                    "Playing" => PlaybackState::Playing,
+                    "Stopped" => PlaybackState::Stopped,
+                    _ => PlaybackState::Unknown,
+                };
+                self.ownership.observe_playback(&bus_name, &owner, state);
+            }
+            Some(PlayerEvent::Invalidate { .. }) | None => {
+                self.ownership.clear();
+                self.ear.reset();
+            }
+        }
+    }
+    fn drain_player_events(&mut self, adapter: &dyn DesktopAdapter) {
+        // The adapter bounds its queue. Overflow produces invalidation rather than lost history.
+        for _ in 0..65 {
+            let Some(event) = adapter.try_player_event() else {
+                return;
+            };
+            self.player_event(Some(event));
+        }
+        self.ownership.clear();
     }
     fn cancel_uncertain_effects(&mut self) {
         self.ownership.clear();
@@ -289,7 +358,7 @@ impl Coordinator {
     fn presentation(&self) -> Value {
         match &self.audio {
             Some(audio) => {
-                json!({"health":if self.last_error.is_some(){"degraded".into()}else{format!("{:?}",policy_audio(audio).health())},"server_name":audio.server_name,"profile":audio.profile,"profiles":audio.profiles,"default_output":audio.default_output,"default_input":audio.default_input,"outputs":audio.outputs,"inputs":audio.inputs,"playback_streams":audio.playback_streams,"recording_streams":audio.recording_streams,"capture_active":audio.capture_active,"capture_known":audio.capture_known,"routing_policy":if self.config.auto_route{"follow_device"}else{"observe"},"audio_recovery":self.config.audio_recovery&&!self.yielded,"automation_yielded":self.yielded,"last_recovery":self.last_recovery,"last_error":self.last_error})
+                json!({"health":if self.last_error.is_some(){"degraded".into()}else{format!("{:?}",policy_audio(audio).health())},"server_name":audio.server_name,"profile":audio.profile,"profiles":audio.profiles,"default_output":audio.default_output,"default_input":audio.default_input,"outputs":audio.outputs,"inputs":audio.inputs,"playback_streams":audio.playback_streams,"recording_streams":audio.recording_streams,"capture_active":audio.capture_active,"capture_known":audio.capture_known,"media_history_ready":self.media_history_ready,"routing_policy":if self.config.auto_route{"follow_device"}else{"observe"},"audio_recovery":self.config.audio_recovery&&!self.yielded,"automation_yielded":self.yielded,"last_recovery":self.last_recovery,"last_error":self.last_error})
             }
             None => {
                 json!({"health":if self.last_error.is_some(){"unavailable"}else{"not_observed"},"last_error":self.last_error})
@@ -297,6 +366,7 @@ impl Coordinator {
         }
     }
     async fn step(&mut self, snapshot: &Snapshot, now: u64, adapter: &dyn DesktopAdapter) {
+        self.media_history_ready = adapter.player_events_ready();
         if self.address != snapshot.device.address {
             self.cancel_uncertain_effects();
             self.address = snapshot.device.address.clone();
@@ -464,7 +534,8 @@ impl Coordinator {
         now: u64,
         adapter: &dyn DesktopAdapter,
     ) {
-        if !snapshot.connected || self.ear_mode == ConfigEar::Off {
+        if !snapshot.connected || self.ear_mode == ConfigEar::Off || !adapter.player_events_ready()
+        {
             self.ownership.clear();
             self.ear.reset();
             return;
@@ -538,6 +609,7 @@ impl Coordinator {
                 return;
             }
         };
+        self.drain_player_events(adapter);
         self.ownership.observe(&players_for_policy(&players));
         let targets = match action {
             EarAction::Pause => self.ownership.request_pause(&players_for_policy(&players)),
@@ -726,12 +798,21 @@ mod tests {
     use super::*;
     use librepods_core::device::state::{DeviceState, ObservationMeta, WearReport, WearState};
     use librepods_linux::desktop::{AudioNode, AudioProfile};
-    use std::sync::Mutex;
+    use std::{
+        collections::VecDeque,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Mutex,
+        },
+    };
 
     struct Fake {
         audio: Mutex<AudioSnapshot>,
         players: Mutex<Vec<PlayerSnapshot>>,
         effects: Mutex<Vec<String>>,
+        events: Mutex<VecDeque<PlayerEvent>>,
+        event_notify: tokio::sync::Notify,
+        ready: AtomicBool,
         fail_audio: bool,
         fail_effect: bool,
         stall: bool,
@@ -772,13 +853,42 @@ mod tests {
                     can_play: true,
                 }]),
                 effects: Mutex::new(Vec::new()),
+                events: Mutex::new(VecDeque::new()),
+                event_notify: tokio::sync::Notify::new(),
+                ready: AtomicBool::new(true),
                 fail_audio: false,
                 fail_effect: false,
                 stall: false,
             }
         }
     }
+    impl Fake {
+        fn emit(&self, event: PlayerEvent) {
+            self.events.lock().unwrap().push_back(event);
+            self.event_notify.notify_one();
+        }
+    }
     impl DesktopAdapter for Fake {
+        fn player_events_ready(&self) -> bool {
+            self.ready.load(Ordering::Acquire)
+        }
+        fn try_player_event(&self) -> Option<PlayerEvent> {
+            self.events.lock().unwrap().pop_front()
+        }
+        fn next_player_event(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = Option<PlayerEvent>> + Send + '_>> {
+            Box::pin(async {
+                loop {
+                    let notified = self.event_notify.notified();
+                    if let Some(event) = self.try_player_event() {
+                        return Some(event);
+                    }
+                    notified.await;
+                }
+            })
+        }
+
         fn audio_snapshot<'a>(&'a self, _: &'a str) -> AdapterFuture<'a, AudioSnapshot> {
             Box::pin(async move {
                 if self.stall {
@@ -1102,6 +1212,219 @@ mod tests {
             c.step(&s, 0, &fake).await;
             assert!(fake.effects.lock().unwrap().is_empty());
         }
+    }
+    #[tokio::test]
+    async fn failed_volume_route_and_recovery_effects_only_degrade_audio() {
+        let fake = Fake {
+            fail_effect: true,
+            ..Fake::default()
+        };
+        let mut c = Coordinator::new(Config {
+            ca_ducking: true,
+            ..Config::default()
+        });
+        let mut s = snapshot(ConfigEar::Off);
+        s.device.ca_event = Some(1);
+        observe(&mut s, "ca_event", 0);
+        c.step(&s, 0, &fake).await;
+        assert!(c.last_error.as_ref().unwrap().starts_with("CA volume:"));
+        assert!(c.ducked_volume.is_none());
+        assert!(!c.ducking.is_ducking());
+        fake.audio.lock().unwrap().default_output = Some("speakers".into());
+        let mut c = Coordinator::new(Config {
+            auto_route: true,
+            ..Config::default()
+        });
+        c.step(&s, 0, &fake).await;
+        assert!(c
+            .last_error
+            .as_ref()
+            .unwrap()
+            .starts_with("automatic routing:"));
+        assert!(c.route.is_none());
+        fake.audio.lock().unwrap().default_output = Some("pods".into());
+        let mut c = Coordinator::new(Config {
+            audio_recovery: true,
+            ..Config::default()
+        });
+        c.step(&s, 0, &fake).await;
+        fake.audio.lock().unwrap().profile = Some("off".into());
+        c.step(&s, 1000, &fake).await;
+        c.step(&s, 1500, &fake).await;
+        assert_eq!(c.last_recovery.as_deref(), Some("failed"));
+        assert!(s.connected);
+    }
+    #[tokio::test]
+    async fn invalid_volume_unknown_ca_and_changed_output_never_overwrite_user() {
+        let fake = Fake::default();
+        let mut c = Coordinator::new(Config {
+            ca_ducking: true,
+            ..Config::default()
+        });
+        let mut s = snapshot(ConfigEar::Off);
+        s.device.ca_event = Some(255);
+        observe(&mut s, "ca_event", 0);
+        c.step(&s, 0, &fake).await;
+        fake.audio.lock().unwrap().outputs[0].volume_percent = None;
+        s.device.ca_event = Some(1);
+        observe(&mut s, "ca_event", 1);
+        c.step(&s, 1, &fake).await;
+        assert!(fake.effects.lock().unwrap().is_empty());
+        fake.audio.lock().unwrap().outputs[0].volume_percent = Some(50.0);
+        observe(&mut s, "ca_event", 2);
+        c.step(&s, 2, &fake).await;
+        fake.audio.lock().unwrap().default_output = Some("speakers".into());
+        s.device.ca_event = Some(8);
+        observe(&mut s, "ca_event", 3);
+        c.step(&s, 3, &fake).await;
+        assert_eq!(fake.effects.lock().unwrap().len(), 1);
+        assert!(!c.ducking.is_ducking());
+        c.shutdown(&fake).await;
+        assert_eq!(fake.effects.lock().unwrap().len(), 1);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn coordinator_loop_publishes_changes_and_yields_to_manual_override() {
+        let (status_sender, status) = watch::channel(snapshot(ConfigEar::Off));
+        let (audio, mut audio_view) = watch::channel(Value::Null);
+        let (override_sender, overrides) = watch::channel(0);
+        let (stop, shutdown) = watch::channel(false);
+        let task = tokio::spawn(run_with_adapter(
+            Config::default(),
+            status,
+            audio,
+            overrides,
+            shutdown,
+            Arc::new(Fake::default()),
+        ));
+        audio_view.changed().await.unwrap();
+        assert_eq!(audio_view.borrow()["health"], "Healthy");
+        override_sender.send(1).unwrap();
+        audio_view.changed().await.unwrap();
+        assert_eq!(audio_view.borrow()["automation_yielded"], true);
+        status_sender.send_modify(|snapshot| {
+            snapshot.session_generation = 2;
+            snapshot.device.address = "".into();
+        });
+        tokio::task::yield_now().await;
+        stop.send(true).unwrap();
+        task.await.unwrap();
+    }
+    #[tokio::test(start_paused = true)]
+    async fn coordinator_loop_bounds_stalled_effects_and_survives_status_replacement() {
+        let (status_sender, status) = watch::channel(snapshot(ConfigEar::Off));
+        let (audio, mut audio_view) = watch::channel(Value::Null);
+        let (_override_sender, overrides) = watch::channel(0);
+        let (stop, shutdown) = watch::channel(false);
+        let task = tokio::spawn(run_with_adapter(
+            Config::default(),
+            status,
+            audio,
+            overrides,
+            shutdown,
+            Arc::new(Fake {
+                stall: true,
+                ..Fake::default()
+            }),
+        ));
+        tokio::task::yield_now().await;
+        status_sender.send_modify(|snapshot| snapshot.session_generation = 2);
+        tokio::task::yield_now().await;
+        audio_view.changed().await.unwrap();
+        assert_eq!(audio_view.borrow_and_update()["health"], "not_observed");
+        tokio::time::advance(Duration::from_secs(4)).await;
+        audio_view.changed().await.unwrap();
+        assert_eq!(
+            audio_view.borrow()["last_error"],
+            "desktop operation timed out"
+        );
+        stop.send(true).unwrap();
+        task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn queued_manual_play_then_pause_invalidates_ownership_before_resume() {
+        for invalidate in [false, true] {
+            let fake = Fake::default();
+            let mut c = Coordinator::new(Config::default());
+            let mut s = snapshot(ConfigEar::OneRemoved);
+            wear(&mut s, WearState::InEar, WearState::InEar, 0);
+            c.step(&s, 0, &fake).await;
+            wear(&mut s, WearState::OutOfEar, WearState::InEar, 1);
+            c.step(&s, 1, &fake).await;
+            if invalidate {
+                fake.emit(PlayerEvent::Invalidate {
+                    reason: "user bus lost",
+                });
+            } else {
+                for status in ["Playing", "Paused"] {
+                    fake.emit(PlayerEvent::Playback {
+                        bus_name: "player".into(),
+                        owner: ":1.2".into(),
+                        playback_status: status.into(),
+                    });
+                }
+            }
+            wear(&mut s, WearState::InEar, WearState::InEar, 2);
+            c.step(&s, 2, &fake).await;
+            assert_eq!(*fake.effects.lock().unwrap(), vec!["Pause"]);
+        }
+    }
+    #[tokio::test]
+    async fn unavailable_playback_history_suppresses_automation_until_a_new_baseline() {
+        let fake = Fake::default();
+        fake.ready.store(false, Ordering::Release);
+        let mut c = Coordinator::new(Config::default());
+        let mut s = snapshot(ConfigEar::OneRemoved);
+        wear(&mut s, WearState::InEar, WearState::InEar, 0);
+        c.step(&s, 0, &fake).await;
+        wear(&mut s, WearState::OutOfEar, WearState::InEar, 1);
+        c.step(&s, 1, &fake).await;
+        fake.ready.store(true, Ordering::Release);
+        wear(&mut s, WearState::InEar, WearState::InEar, 2);
+        c.step(&s, 2, &fake).await;
+        assert!(fake.effects.lock().unwrap().is_empty());
+        wear(&mut s, WearState::OutOfEar, WearState::InEar, 3);
+        c.step(&s, 3, &fake).await;
+        assert_eq!(*fake.effects.lock().unwrap(), vec!["Pause"]);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn loop_processes_ordered_history_before_simultaneous_ear_insert() {
+        let fake = Arc::new(Fake::default());
+        let mut s = snapshot(ConfigEar::OneRemoved);
+        wear(&mut s, WearState::InEar, WearState::InEar, 0);
+        let (status_sender, status) = watch::channel(s.clone());
+        let (audio, mut view) = watch::channel(Value::Null);
+        let (_overrides, overrides) = watch::channel(0);
+        let (stop, shutdown) = watch::channel(false);
+        let task = tokio::spawn(run_with_adapter(
+            Config::default(),
+            status,
+            audio,
+            overrides,
+            shutdown,
+            fake.clone(),
+        ));
+        view.changed().await.unwrap();
+        wear(&mut s, WearState::OutOfEar, WearState::InEar, 1);
+        status_sender.send(s.clone()).unwrap();
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(*fake.effects.lock().unwrap(), vec!["Pause"]);
+        for status in ["Playing", "Paused"] {
+            fake.emit(PlayerEvent::Playback {
+                bus_name: "player".into(),
+                owner: ":1.2".into(),
+                playback_status: status.into(),
+            });
+        }
+        wear(&mut s, WearState::InEar, WearState::InEar, 2);
+        status_sender.send(s).unwrap();
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        stop.send(true).unwrap();
+        task.await.unwrap();
+        assert_eq!(*fake.effects.lock().unwrap(), vec!["Pause"]);
     }
     #[tokio::test]
     async fn shutdown_cancels_stalled_observation_without_waiting_for_deadline() {
