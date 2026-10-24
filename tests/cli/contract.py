@@ -12,6 +12,7 @@ import threading
 import unittest
 
 BINARY = None
+FIXTURES = Path(__file__).resolve().parents[2] / "target/native-fixtures"
 
 
 class CliContract(unittest.TestCase):
@@ -87,6 +88,30 @@ class CliContract(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(request["operation"], expected)
                 self.socket.unlink()
+
+    def test_watch_consumes_actual_serializer_snapshots(self):
+        snapshots = [json.loads((FIXTURES / name).read_text())
+                     for name in ["pro2.json", "disconnected.json"]]
+        def frames(request):
+            return b"".join(json.dumps({"version": 1, "id": request["id"],
+                "result": snapshot, "error": None}).encode() + b"\n"
+                for snapshot in snapshots)
+        result, request = self.exchange(["--status"], frames)
+        self.assertEqual(request["operation"], {"type": "watch"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([json.loads(line) for line in result.stdout.splitlines()], snapshots)
+        self.assertTrue(snapshots[0]["connected"])
+        self.assertFalse(snapshots[1]["connected"])
+        self.assertTrue(snapshots[1]["device"]["observations"]["battery.left"]["stale"])
+
+    def test_compat_status_matches_actual_legacy_serializer(self):
+        snapshot = json.loads((FIXTURES / "pro2.json").read_text())
+        expected = json.loads((FIXTURES.parent / "compat-fixtures/pro2.json").read_text())
+        result, request = self.exchange(["compat", "status"], lambda req: {
+            "version": 1, "id": req["id"], "result": snapshot, "error": None})
+        self.assertEqual(request["operation"], {"type": "status"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), expected)
 
     def test_remote_error_is_structured_and_nonzero(self):
         error = {"code": "unsupported", "stage": "audio", "message": "no backend",

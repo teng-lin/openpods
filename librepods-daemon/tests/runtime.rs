@@ -918,8 +918,23 @@ fn actual_serializer_generates_legacy_consumer_fixtures() {
         serde_json::to_vec_pretty(&connected.legacy()).expect("connected JSON"),
     )
     .expect("connected fixture");
+    let native = output
+        .parent()
+        .expect("target directory")
+        .join("native-fixtures");
+    std::fs::create_dir_all(&native).expect("native fixture directory");
+    std::fs::write(
+        native.join("pro2.json"),
+        serde_json::to_vec_pretty(&connected).expect("native JSON"),
+    )
+    .expect("native connected fixture");
     state.end_session(1);
     let disconnected = Snapshot::new("fixture-instance".into(), &state);
+    std::fs::write(
+        native.join("disconnected.json"),
+        serde_json::to_vec_pretty(&disconnected).expect("native JSON"),
+    )
+    .expect("native disconnected fixture");
     std::fs::write(
         output.join("disconnected.json"),
         serde_json::to_vec_pretty(&disconnected.legacy()).expect("disconnected JSON"),
