@@ -162,7 +162,7 @@ pub struct VolumeAction {
     pub sink: String,
     pub percent: u8,
 }
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct DuckingPolicy {
     owned: Option<(String, u8, u8)>,
 }

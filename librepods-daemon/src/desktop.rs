@@ -166,6 +166,7 @@ pub async fn run_with_adapter(
             None => coordinator.manual_override(),
             Some(Err(_)) => {
                 coordinator.cancel_uncertain_effects();
+                coordinator.request_volume_restore();
                 coordinator.last_error = Some("desktop operation timed out".into());
             }
             Some(Ok(())) => {}
@@ -259,6 +260,11 @@ fn policy_audio(audio: &AudioSnapshot) -> PolicyAudio {
     }
 }
 
+struct OwnedDucking {
+    address: String,
+    sink: String,
+    target: u8,
+}
 struct RouteOwnership {
     previous: String,
     selected: String,
@@ -279,7 +285,9 @@ struct Coordinator {
     media_history_ready: bool,
     ownership: PauseOwnership,
     ducking: DuckingPolicy,
-    ducked_volume: Option<(String, u8)>,
+    ducked_volume: Option<OwnedDucking>,
+    restore_pending: bool,
+    next_restore_ms: u64,
     latches: [LowBatteryLatch; 4],
     recovery: AudioRecoveryPolicy,
     route: Option<RouteOwnership>,
@@ -306,6 +314,8 @@ impl Coordinator {
             ownership: PauseOwnership::default(),
             ducking: DuckingPolicy::default(),
             ducked_volume: None,
+            restore_pending: false,
+            next_restore_ms: 0,
             latches: std::array::from_fn(|_| LowBatteryLatch::default()),
             route: None,
             route_attempted: false,
@@ -346,11 +356,21 @@ impl Coordinator {
     fn cancel_uncertain_effects(&mut self) {
         self.ownership.clear();
         self.ear.reset();
+    }
+    fn request_volume_restore(&mut self) {
+        if self.ducked_volume.is_some() && !self.restore_pending {
+            self.restore_pending = true;
+            self.next_restore_ms = 0;
+        }
+    }
+    fn clear_volume_ownership(&mut self) {
         self.ducking.cancel();
         self.ducked_volume = None;
+        self.restore_pending = false;
     }
     fn manual_override(&mut self) {
         self.cancel_uncertain_effects();
+        self.request_volume_restore();
         self.recovery.manual_override();
         self.route = None;
         self.yielded = true;
@@ -358,7 +378,7 @@ impl Coordinator {
     fn presentation(&self) -> Value {
         match &self.audio {
             Some(audio) => {
-                json!({"health":if self.last_error.is_some(){"degraded".into()}else{format!("{:?}",policy_audio(audio).health())},"server_name":audio.server_name,"profile":audio.profile,"profiles":audio.profiles,"default_output":audio.default_output,"default_input":audio.default_input,"outputs":audio.outputs,"inputs":audio.inputs,"playback_streams":audio.playback_streams,"recording_streams":audio.recording_streams,"capture_active":audio.capture_active,"capture_known":audio.capture_known,"media_history_ready":self.media_history_ready,"routing_policy":if self.config.auto_route{"follow_device"}else{"observe"},"audio_recovery":self.config.audio_recovery&&!self.yielded,"automation_yielded":self.yielded,"last_recovery":self.last_recovery,"last_error":self.last_error})
+                json!({"health":if self.last_error.is_some(){"degraded".into()}else{format!("{:?}",policy_audio(audio).health())},"server_name":audio.server_name,"profile":audio.profile,"profiles":audio.profiles,"default_output":audio.default_output,"default_input":audio.default_input,"outputs":audio.outputs,"inputs":audio.inputs,"playback_streams":audio.playback_streams,"recording_streams":audio.recording_streams,"capture_active":audio.capture_active,"capture_known":audio.capture_known,"media_history_ready":self.media_history_ready,"volume_restore_pending":self.restore_pending,"routing_policy":if self.config.auto_route{"follow_device"}else{"observe"},"audio_recovery":self.config.audio_recovery&&!self.yielded,"automation_yielded":self.yielded,"last_recovery":self.last_recovery,"last_error":self.last_error})
             }
             None => {
                 json!({"health":if self.last_error.is_some(){"unavailable"}else{"not_observed"},"last_error":self.last_error})
@@ -367,6 +387,13 @@ impl Coordinator {
     }
     async fn step(&mut self, snapshot: &Snapshot, now: u64, adapter: &dyn DesktopAdapter) {
         self.media_history_ready = adapter.player_events_ready();
+        if self.address != snapshot.device.address
+            || self.generation != snapshot.session_generation
+            || !snapshot.connected
+        {
+            self.request_volume_restore();
+        }
+        self.restore_owned_volume(now, adapter, false).await;
         if self.address != snapshot.device.address {
             self.cancel_uncertain_effects();
             self.address = snapshot.device.address.clone();
@@ -413,6 +440,7 @@ impl Coordinator {
                 }
                 Err(error) => {
                     self.cancel_uncertain_effects();
+                    self.request_volume_restore();
                     self.last_error = Some(format!("audio observation: {}", error.code()));
                     return;
                 }
@@ -437,7 +465,7 @@ impl Coordinator {
         self.routing(snapshot, &audio, adapter).await;
         self.audio_recovery(snapshot, &audio, now, adapter).await;
         self.wear(snapshot, &audio, now, adapter).await;
-        self.ca(snapshot, &audio, adapter).await;
+        self.ca(snapshot, &audio, now, adapter).await;
     }
     async fn routing(
         &mut self,
@@ -503,7 +531,11 @@ impl Coordinator {
         adapter: &dyn DesktopAdapter,
     ) {
         let facts = policy_audio(audio);
-        if facts.profile_available && facts.sink.is_some() && !facts.profile_has_source {
+        if facts.profile_available
+            && facts.profile_has_sink
+            && facts.sink.is_some()
+            && !facts.profile_has_source
+        {
             if let Some(profile) = &facts.profile {
                 self.recovery.recovered(profile);
             }
@@ -656,10 +688,72 @@ impl Coordinator {
         }
         self.ownership.observe(&players_for_policy(&players));
     }
+    async fn restore_owned_volume(&mut self, now: u64, adapter: &dyn DesktopAdapter, force: bool) {
+        if !self.restore_pending || (!force && now < self.next_restore_ms) {
+            return;
+        }
+        self.next_restore_ms = now.saturating_add(1000);
+        let Some(owned) = &self.ducked_volume else {
+            self.restore_pending = false;
+            return;
+        };
+        let current = match adapter.audio_snapshot(&owned.address).await {
+            Ok(current) => current,
+            Err(error) => {
+                self.last_error = Some(format!("CA restore check: {}", error.code()));
+                return;
+            }
+        };
+        // Restoration is an automatic volume mutation too. Wait until capture is known idle.
+        if !current.capture_known || current.capture_active {
+            return;
+        }
+        let Some(output) = current.outputs.iter().find(|node| {
+            node.name == owned.sink && Some(&node.name) == current.default_output.as_ref()
+        }) else {
+            self.clear_volume_ownership();
+            return;
+        };
+        let Some(volume) = output
+            .volume_percent
+            .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 100.0)
+            .map(|value| value.round() as u8)
+        else {
+            return;
+        };
+        if volume != owned.target {
+            self.clear_volume_ownership();
+            return;
+        }
+        // Planning restoration consumes the pure state; retain it until the effect is confirmed.
+        let mut proposal = self.ducking.clone();
+        let Some(action) = proposal.speech_stopped(&owned.sink, volume) else {
+            self.clear_volume_ownership();
+            return;
+        };
+        match adapter
+            .audio_action(
+                &owned.address,
+                AudioAction::SetVolume {
+                    name: action.sink,
+                    input: false,
+                    percent: action.percent,
+                },
+            )
+            .await
+        {
+            Ok(()) => {
+                self.clear_volume_ownership();
+                self.next_audio_ms = 0;
+            }
+            Err(error) => self.last_error = Some(format!("CA restoration: {}", error.code())),
+        }
+    }
     async fn ca(
         &mut self,
         snapshot: &Snapshot,
         _audio: &AudioSnapshot,
+        now: u64,
         adapter: &dyn DesktopAdapter,
     ) {
         if !self.config.ca_ducking || !snapshot.connected {
@@ -671,63 +765,72 @@ impl Coordinator {
         if observed.is_none() || observed == self.last_ca {
             return;
         }
-        self.last_ca = observed;
-        // Refresh before restoration so a cached ducked value cannot overwrite manual volume.
         let current = match adapter.audio_snapshot(&self.address).await {
-            Ok(snapshot) => snapshot,
-            Err(_) => {
-                self.ducking.cancel();
-                self.ducked_volume = None;
+            Ok(current) => current,
+            Err(error) => {
+                self.request_volume_restore();
+                self.last_error = Some(format!("CA observation: {}", error.code()));
                 return;
             }
         };
         let Some(output) = current.outputs.iter().find(|node| {
             node.selected_device && Some(&node.name) == current.default_output.as_ref()
         }) else {
-            self.ducking.cancel();
-            self.ducked_volume = None;
+            self.clear_volume_ownership();
+            self.last_ca = observed;
             return;
         };
-        let Some(current_volume) = output
+        let Some(volume) = output
             .volume_percent
             .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 100.0)
             .map(|value| value.round() as u8)
         else {
+            self.request_volume_restore();
+            self.last_ca = observed;
             return;
         };
+        let prior = self.ducking.clone();
         if let Some(event) = snapshot.device.ca_event {
-            if let Some(action) = self.ducking.on_event(event, &output.name, current_volume) {
-                let name = action.sink.clone();
-                let percent = action.percent;
-                match adapter
-                    .audio_action(
-                        &self.address,
-                        AudioAction::SetVolume {
-                            name: name.clone(),
-                            input: false,
-                            percent,
-                        },
-                    )
-                    .await
-                {
-                    Ok(()) => {
-                        self.ducked_volume = if self.ducking.is_ducking() {
-                            Some((name, percent))
-                        } else {
-                            None
-                        };
-                        self.next_audio_ms = 0;
-                    }
-                    Err(error) => {
-                        self.ducking.cancel();
-                        self.ducked_volume = None;
-                        self.last_error = Some(format!("CA volume: {}", error.code()));
+            if let Some(action) = self.ducking.on_event(event, &output.name, volume) {
+                let restoring = !self.ducking.is_ducking();
+                if restoring {
+                    self.ducking = prior;
+                    self.request_volume_restore();
+                    self.restore_owned_volume(now, adapter, true).await;
+                } else if !current.capture_known || current.capture_active {
+                    // No start effect was dispatched, so no new ownership was acquired.
+                    self.ducking = prior;
+                } else {
+                    // Even an error/cancellation may occur after the write. Keep the exact
+                    // candidate and verify its current value before any later restoration.
+                    self.ducked_volume = Some(OwnedDucking {
+                        address: self.address.clone(),
+                        sink: action.sink.clone(),
+                        target: action.percent,
+                    });
+                    match adapter
+                        .audio_action(
+                            &self.address,
+                            AudioAction::SetVolume {
+                                name: action.sink,
+                                input: false,
+                                percent: action.percent,
+                            },
+                        )
+                        .await
+                    {
+                        Ok(()) => self.next_audio_ms = 0,
+                        Err(error) => {
+                            self.request_volume_restore();
+                            self.last_error = Some(format!("CA volume: {}", error.code()));
+                        }
                     }
                 }
             } else if !self.ducking.is_ducking() {
-                self.ducked_volume = None;
+                self.clear_volume_ownership();
             }
         }
+        self.last_ca = observed;
     }
     async fn notifications(&mut self, snapshot: &Snapshot, adapter: &dyn DesktopAdapter) {
         if !self.config.low_battery_notifications {
@@ -775,41 +878,14 @@ impl Coordinator {
         }
     }
     async fn shutdown(&mut self, adapter: &dyn DesktopAdapter) {
-        if let Some((sink, _)) = &self.ducked_volume {
-            if let Ok(Ok(current)) = tokio::time::timeout(
-                Duration::from_millis(500),
-                adapter.audio_snapshot(&self.address),
-            )
-            .await
-            {
-                if let Some(output) = current.outputs.iter().find(|node| {
-                    &node.name == sink && Some(&node.name) == current.default_output.as_ref()
-                }) {
-                    if let Some(volume) = output
-                        .volume_percent
-                        .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 100.0)
-                    {
-                        if let Some(action) =
-                            self.ducking.speech_stopped(sink, volume.round() as u8)
-                        {
-                            let _ = tokio::time::timeout(
-                                Duration::from_millis(500),
-                                adapter.audio_action(
-                                    &self.address,
-                                    AudioAction::SetVolume {
-                                        name: action.sink,
-                                        input: false,
-                                        percent: action.percent,
-                                    },
-                                ),
-                            )
-                            .await;
-                        }
-                    }
-                }
-            }
-        }
+        self.request_volume_restore();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(1),
+            self.restore_owned_volume(0, adapter, true),
+        )
+        .await;
         self.cancel_uncertain_effects();
+        self.clear_volume_ownership();
     }
 }
 
@@ -834,7 +910,8 @@ mod tests {
         event_notify: tokio::sync::Notify,
         ready: AtomicBool,
         fail_audio: bool,
-        fail_effect: bool,
+        fail_effect: AtomicBool,
+        fail_after_effect: AtomicBool,
         stall: bool,
     }
     impl Default for Fake {
@@ -877,7 +954,8 @@ mod tests {
                 event_notify: tokio::sync::Notify::new(),
                 ready: AtomicBool::new(true),
                 fail_audio: false,
-                fail_effect: false,
+                fail_effect: AtomicBool::new(false),
+                fail_after_effect: AtomicBool::new(false),
                 stall: false,
             }
         }
@@ -924,7 +1002,7 @@ mod tests {
         fn audio_action<'a>(&'a self, _: &'a str, action: AudioAction) -> AdapterFuture<'a, ()> {
             Box::pin(async move {
                 self.effects.lock().unwrap().push(format!("{action:?}"));
-                if self.fail_effect {
+                if self.fail_effect.load(Ordering::SeqCst) {
                     return Err(TransportError::PermissionDenied);
                 }
                 let mut audio = self.audio.lock().unwrap();
@@ -941,7 +1019,11 @@ mod tests {
                     }
                     _ => panic!("unexpected action"),
                 }
-                Ok(())
+                if self.fail_after_effect.load(Ordering::SeqCst) {
+                    Err(TransportError::Timeout)
+                } else {
+                    Ok(())
+                }
             })
         }
         fn players(&self) -> AdapterFuture<'_, Vec<PlayerSnapshot>> {
@@ -954,7 +1036,7 @@ mod tests {
         ) -> AdapterFuture<'a, PlayerSnapshot> {
             Box::pin(async move {
                 self.effects.lock().unwrap().push(format!("{action:?}"));
-                if self.fail_effect {
+                if self.fail_effect.load(Ordering::SeqCst) {
                     return Err(TransportError::Timeout);
                 }
                 let mut players = self.players.lock().unwrap();
@@ -973,7 +1055,7 @@ mod tests {
         fn notify<'a>(&'a self, _: &'a str, body: &'a str) -> AdapterFuture<'a, ()> {
             Box::pin(async move {
                 self.effects.lock().unwrap().push(body.into());
-                if self.fail_effect {
+                if self.fail_effect.load(Ordering::SeqCst) {
                     Err(TransportError::Timeout)
                 } else {
                     Ok(())
@@ -1066,7 +1148,7 @@ mod tests {
     #[tokio::test]
     async fn stale_wear_unknown_wear_wrong_output_and_failed_pause_never_resume() {
         let fake = Fake {
-            fail_effect: true,
+            fail_effect: AtomicBool::new(true),
             ..Fake::default()
         };
         let mut c = Coordinator::new(Config::default());
@@ -1236,7 +1318,7 @@ mod tests {
     #[tokio::test]
     async fn failed_volume_route_and_recovery_effects_only_degrade_audio() {
         let fake = Fake {
-            fail_effect: true,
+            fail_effect: AtomicBool::new(true),
             ..Fake::default()
         };
         let mut c = Coordinator::new(Config {
@@ -1248,6 +1330,7 @@ mod tests {
         observe(&mut s, "ca_event", 0);
         c.step(&s, 0, &fake).await;
         assert!(c.last_error.as_ref().unwrap().starts_with("CA volume:"));
+        c.restore_owned_volume(1, &fake, true).await;
         assert!(c.ducked_volume.is_none());
         assert!(!c.ducking.is_ducking());
         fake.audio.lock().unwrap().default_output = Some("speakers".into());
@@ -1487,6 +1570,149 @@ mod tests {
         c.step(&s, 1500, &fake).await;
         assert!(fake.effects.lock().unwrap().is_empty());
         assert!(c.audio.as_ref().unwrap().capture_active);
+    }
+    #[tokio::test]
+    async fn control_generation_change_restores_confirmed_ducking_before_losing_ownership() {
+        let fake = Fake::default();
+        let mut c = Coordinator::new(Config {
+            ca_ducking: true,
+            ..Config::default()
+        });
+        let mut s = snapshot(ConfigEar::Off);
+        s.device.ca_event = Some(1);
+        observe(&mut s, "ca_event", 0);
+        c.step(&s, 0, &fake).await;
+        assert_eq!(
+            fake.audio.lock().unwrap().outputs[0].volume_percent,
+            Some(10.0)
+        );
+        s.session_generation = 2;
+        s.device.ca_event = None;
+        s.device.observations.clear();
+        c.step(&s, 1, &fake).await;
+        assert_eq!(
+            fake.audio.lock().unwrap().outputs[0].volume_percent,
+            Some(50.0)
+        );
+    }
+    #[tokio::test]
+    async fn available_broken_profile_with_a_stale_sink_does_not_reset_repair_settlement() {
+        let fake = Fake::default();
+        let mut c = Coordinator::new(Config {
+            audio_recovery: true,
+            ..Config::default()
+        });
+        let s = snapshot(ConfigEar::Off);
+        c.step(&s, 0, &fake).await;
+        {
+            let mut audio = fake.audio.lock().unwrap();
+            audio.profile = Some("broken".into());
+            audio.profiles.push(AudioProfile {
+                name: "broken".into(),
+                available: true,
+                sinks: 0,
+                sources: 0,
+            });
+        }
+        c.step(&s, 1000, &fake).await;
+        c.step(&s, 1500, &fake).await;
+        assert_eq!(fake.audio.lock().unwrap().profile.as_deref(), Some("aac"));
+    }
+    #[tokio::test]
+    async fn read_cancellation_preserves_ducking_and_failed_restoration_retries_conditionally() {
+        let fake = Fake::default();
+        let mut c = Coordinator::new(Config {
+            ca_ducking: true,
+            ..Config::default()
+        });
+        let mut s = snapshot(ConfigEar::Off);
+        s.device.ca_event = Some(1);
+        observe(&mut s, "ca_event", 0);
+        c.step(&s, 0, &fake).await;
+        c.cancel_uncertain_effects();
+        assert!(c.ducked_volume.is_some());
+        fake.fail_effect.store(true, Ordering::SeqCst);
+        s.device.ca_event = Some(8);
+        observe(&mut s, "ca_event", 1);
+        c.step(&s, 1, &fake).await;
+        assert_eq!(
+            fake.audio.lock().unwrap().outputs[0].volume_percent,
+            Some(10.0)
+        );
+        assert!(c.restore_pending);
+        fake.fail_effect.store(false, Ordering::SeqCst);
+        c.step(&s, 1001, &fake).await;
+        assert_eq!(
+            fake.audio.lock().unwrap().outputs[0].volume_percent,
+            Some(50.0)
+        );
+        assert!(!c.restore_pending);
+    }
+    #[tokio::test]
+    async fn uncertain_volume_write_is_read_back_and_never_overwrites_a_later_manual_volume() {
+        for manual in [false, true] {
+            let fake = Fake::default();
+            fake.fail_after_effect.store(true, Ordering::SeqCst);
+            let mut c = Coordinator::new(Config {
+                ca_ducking: true,
+                ..Config::default()
+            });
+            let mut s = snapshot(ConfigEar::Off);
+            s.device.ca_event = Some(1);
+            observe(&mut s, "ca_event", 0);
+            c.step(&s, 0, &fake).await;
+            assert_eq!(
+                fake.audio.lock().unwrap().outputs[0].volume_percent,
+                Some(10.0)
+            );
+            assert!(c.restore_pending);
+            fake.fail_after_effect.store(false, Ordering::SeqCst);
+            if manual {
+                fake.audio.lock().unwrap().outputs[0].volume_percent = Some(35.0);
+            }
+            c.step(&s, 1, &fake).await;
+            assert_eq!(
+                fake.audio.lock().unwrap().outputs[0].volume_percent,
+                Some(if manual { 35.0 } else { 50.0 })
+            );
+            assert!(c.ducked_volume.is_none());
+        }
+    }
+    #[tokio::test]
+    async fn manual_policy_override_defers_owned_restoration_until_capture_is_known_idle() {
+        for known in [false, true] {
+            let fake = Fake::default();
+            let mut c = Coordinator::new(Config {
+                ca_ducking: true,
+                ..Config::default()
+            });
+            let mut s = snapshot(ConfigEar::Off);
+            s.device.ca_event = Some(1);
+            observe(&mut s, "ca_event", 0);
+            c.step(&s, 0, &fake).await;
+            {
+                let mut audio = fake.audio.lock().unwrap();
+                audio.capture_known = known;
+                audio.capture_active = known;
+            }
+            c.manual_override();
+            c.step(&s, 1, &fake).await;
+            assert_eq!(
+                fake.audio.lock().unwrap().outputs[0].volume_percent,
+                Some(10.0)
+            );
+            assert!(c.restore_pending);
+            {
+                let mut audio = fake.audio.lock().unwrap();
+                audio.capture_known = true;
+                audio.capture_active = false;
+            }
+            c.step(&s, 1001, &fake).await;
+            assert_eq!(
+                fake.audio.lock().unwrap().outputs[0].volume_percent,
+                Some(50.0)
+            );
+        }
     }
     #[tokio::test]
     async fn shutdown_cancels_stalled_observation_without_waiting_for_deadline() {
