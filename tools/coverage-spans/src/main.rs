@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Identify test-only syntax; never classify production functions by their names.
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -98,32 +98,63 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         }
     }
 }
+fn collect_sources(root: &Path, paths: &mut BTreeSet<PathBuf>) -> std::io::Result<()> {
+    for entry in fs::read_dir(root)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_sources(&path, paths)?;
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            paths.insert(path);
+        }
+    }
+    Ok(())
+}
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let report: serde_json::Value = serde_json::from_slice(&fs::read(
         std::env::args()
             .nth(1)
             .ok_or("expected LLVM JSON report path")?,
     )?)?;
-    let mut ranges = BTreeMap::<String, Vec<[usize; 2]>>::new();
-    let mut external = Vec::new();
+    let mut paths = BTreeSet::new();
+    let mut roots = BTreeSet::new();
     for data in report["data"].as_array().ok_or("missing data")? {
         for file in data["files"].as_array().ok_or("missing files")? {
             let name = file["filename"].as_str().ok_or("missing filename")?;
             if !name.ends_with(".rs") {
                 continue;
             }
-            let path = Path::new(name);
-            let source = fs::read_to_string(path)?;
-            let syntax = syn::parse_file(&source)?;
-            let mut collector = Collector {
-                path,
-                ranges: Vec::new(),
-                external: Vec::new(),
-            };
-            collector.visit_file(&syntax);
-            ranges.insert(name.to_owned(), collector.ranges);
-            external.extend(collector.external);
+            let path = PathBuf::from(name);
+            if let Some(root) = path
+                .ancestors()
+                .find(|p| p.file_name().is_some_and(|n| n == "src"))
+            {
+                roots.insert(root.to_owned());
+            }
+            paths.insert(path);
         }
+    }
+    // Module-only lib.rs files may have no instrumented lines, so LLVM omits
+    // them. Parse the source roots too: their cfg(test) declarations establish
+    // that external helpers such as test_bus.rs contain no production code.
+    for root in roots {
+        collect_sources(&root, &mut paths)?;
+    }
+    let mut ranges = BTreeMap::<String, Vec<[usize; 2]>>::new();
+    let mut external = Vec::new();
+    for path in paths {
+        let source = fs::read_to_string(&path)?;
+        let syntax = syn::parse_file(&source)?;
+        let mut collector = Collector {
+            path: &path,
+            ranges: Vec::new(),
+            external: Vec::new(),
+        };
+        collector.visit_file(&syntax);
+        ranges.insert(
+            path.to_str().ok_or("non-UTF8 path")?.to_owned(),
+            collector.ranges,
+        );
+        external.extend(collector.external);
     }
     for path in external {
         let canonical = path.canonicalize()?;
