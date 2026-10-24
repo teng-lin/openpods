@@ -262,12 +262,13 @@ impl PendingChange {
     }
 
     pub fn mark_sent(&mut self, generation: u64, now_ms: u64) -> CommandAction {
+        if self.phase == Phase::Dispatch {
+            // The write already succeeded even if its completion reached the deadline.
+            self.phase = Phase::Confirmation;
+        }
         let action = self.tick(generation, now_ms);
         if action != CommandAction::Wait {
             return action;
-        }
-        if self.phase == Phase::Dispatch {
-            self.phase = Phase::Confirmation;
         }
         CommandAction::Wait
     }
@@ -290,6 +291,9 @@ impl PendingChange {
     }
 
     pub fn cancel(&mut self) -> CommandAction {
+        if let Phase::Complete(outcome) = self.phase {
+            return CommandAction::Complete(outcome);
+        }
         self.finish(if self.phase == Phase::Confirmation {
             CommandOutcome::OutcomeUnknown
         } else {
@@ -298,6 +302,9 @@ impl PendingChange {
     }
 
     pub fn supersede(&mut self) -> CommandAction {
+        if let Phase::Complete(outcome) = self.phase {
+            return CommandAction::Complete(outcome);
+        }
         self.finish(if self.phase == Phase::Confirmation {
             CommandOutcome::OutcomeUnknown
         } else {
@@ -455,7 +462,7 @@ mod tests {
         );
         assert_eq!(
             pending.mark_sent(1, 100),
-            CommandAction::Complete(CommandOutcome::TimedOut)
+            CommandAction::Complete(CommandOutcome::OutcomeUnknown)
         );
     }
     #[test]

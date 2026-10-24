@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::device::battery::BatteryInfo;
+use crate::device::ble_advert::{BleAdvertData, LidState};
 use crate::protocol::control_command::{ControlCommand, ControlCommandId};
 use crate::protocol::parser::{ParsedPacket, ProximityKeyType};
 
@@ -247,6 +248,8 @@ pub struct DeviceState {
     pub observations: BTreeMap<String, ObservationMeta>,
     #[serde(default)]
     pub wear: Option<WearReport>,
+    #[serde(default)]
+    pub lid_state: LidState,
     pub device_name: String,
     pub model_number: String,
     pub manufacturer: String,
@@ -302,6 +305,7 @@ impl Default for DeviceState {
             connected: false,
             observations: BTreeMap::new(),
             wear: None,
+            lid_state: LidState::Unknown,
             device_name: String::new(),
             model_number: String::new(),
             manufacturer: String::new(),
@@ -379,6 +383,166 @@ impl DeviceState {
         self.observations
             .get(field)
             .is_some_and(|meta| !meta.stale && meta.generation == self.session_generation)
+    }
+
+    fn accepts_ble(&self, field: &str, now_ms: u64, aacp_fresh_for_ms: u64) -> bool {
+        let Some(previous) = self.observations.get(field) else {
+            return true;
+        };
+        if previous.observed_at_ms > now_ms {
+            return false;
+        }
+        previous.stale
+            || previous.source != ObservationSource::Aacp
+            || now_ms.saturating_sub(previous.observed_at_ms) > aacp_fresh_for_ms
+    }
+
+    /// Caller must resolve the advertisement identity before invoking this reducer.
+    /// BLE telemetry never changes AACP readiness or command-confirmation state.
+    pub fn apply_verified_ble(
+        &mut self,
+        advert: &BleAdvertData,
+        generation: u64,
+        observed_at_ms: u64,
+        aacp_fresh_for_ms: u64,
+    ) -> bool {
+        use crate::device::battery::{BatteryState, BatteryStatus, Component};
+        if generation != self.session_generation {
+            return false;
+        }
+        let mut patch = BatteryInfo::default();
+        let left = advert.encrypted_left_battery.or(advert.left_battery);
+        let right = advert.encrypted_right_battery.or(advert.right_battery);
+        let case = advert
+            .encrypted_case_battery
+            .or(advert.case_battery)
+            .filter(|level| *level != 0 || advert.one_pod_in_case || advert.both_pods_in_case);
+        let readings = if self.capabilities().headset
+            || (self.model == AirPodsModel::Unknown && advert.model.capabilities().headset)
+        {
+            vec![(
+                Component::Headset,
+                left.or(right),
+                advert
+                    .encrypted_left_charging
+                    .unwrap_or(advert.left_charging),
+            )]
+        } else {
+            vec![
+                (
+                    Component::Left,
+                    left,
+                    advert
+                        .encrypted_left_charging
+                        .unwrap_or(advert.left_charging),
+                ),
+                (
+                    Component::Right,
+                    right,
+                    advert
+                        .encrypted_right_charging
+                        .unwrap_or(advert.right_charging),
+                ),
+                (
+                    Component::Case,
+                    case,
+                    advert
+                        .encrypted_case_charging
+                        .unwrap_or(advert.case_charging),
+                ),
+            ]
+        };
+        let mut fields = Vec::new();
+        for (component, level, charging) in readings {
+            let field = format!("battery.{}", component.name().to_lowercase());
+            if let Some(level) = level.filter(|value| *value <= 100) {
+                if !self.accepts_ble(&field, observed_at_ms, aacp_fresh_for_ms) {
+                    continue;
+                }
+                let value = BatteryState {
+                    level,
+                    status: if charging {
+                        BatteryStatus::Charging
+                    } else {
+                        BatteryStatus::Discharging
+                    },
+                };
+                match component {
+                    Component::Headset => patch.headset = value,
+                    Component::Left => patch.left = value,
+                    Component::Right => patch.right = value,
+                    Component::Case => patch.case_ = value,
+                }
+                patch.present.push(component);
+                fields.push(field);
+            }
+        }
+        patch.primary_pod = if advert.primary_left {
+            Component::Left
+        } else {
+            Component::Right
+        };
+        self.battery.merge(&patch);
+        if self.accepts_ble("wear", observed_at_ms, aacp_fresh_for_ms) {
+            let left = if advert.both_pods_in_case {
+                WearState::InCase
+            } else if advert.left_in_ear {
+                WearState::InEar
+            } else {
+                WearState::OutOfEar
+            };
+            let right = if advert.both_pods_in_case {
+                WearState::InCase
+            } else if advert.right_in_ear {
+                WearState::InEar
+            } else {
+                WearState::OutOfEar
+            };
+            self.wear = Some(if advert.primary_left {
+                WearReport {
+                    primary: left,
+                    secondary: right,
+                }
+            } else {
+                WearReport {
+                    primary: right,
+                    secondary: left,
+                }
+            });
+            self.primary_in_ear = self
+                .wear
+                .is_some_and(|wear| wear.primary == WearState::InEar);
+            self.secondary_in_ear = self
+                .wear
+                .is_some_and(|wear| wear.secondary == WearState::InEar);
+            fields.push("wear".into());
+        }
+        if advert.lid_state != LidState::Unknown
+            && self.accepts_ble("lid", observed_at_ms, aacp_fresh_for_ms)
+        {
+            self.lid_state = advert.lid_state;
+            fields.push("lid".into());
+        }
+        if advert.model != AirPodsModel::Unknown && self.model == AirPodsModel::Unknown {
+            self.model = advert.model;
+            fields.push("model".into());
+        }
+        if fields.is_empty() {
+            return false;
+        }
+        for field in fields {
+            self.observations.insert(
+                field,
+                ObservationMeta {
+                    generation,
+                    observed_at_ms,
+                    source: ObservationSource::Ble,
+                    stale: false,
+                },
+            );
+        }
+        self.revision = self.revision.saturating_add(1);
+        true
     }
 
     /// The only reducer for device notifications; platform effects stay with the caller.
@@ -788,5 +952,94 @@ mod reducer_tests {
         };
         assert!(state.any_pod_in_ear());
         assert!(state.both_pods_in_ear());
+    }
+}
+
+#[cfg(test)]
+mod ble_reducer_tests {
+    use super::*;
+    use crate::device::battery::{BatteryStatus, Component};
+    use crate::device::ble_advert::parse_advertisement;
+    fn advert() -> BleAdvertData {
+        let raw = [7, 25, 1, 0x24, 0x20, 0x20, 0x65, 0x08, 0, 0, 4];
+        parse_advertisement(&raw).expect("proximity fixture")
+    }
+    #[test]
+    fn verified_ble_enriches_disconnected_state_without_readying_control() {
+        let mut state = DeviceState::default();
+        state.begin_session(1);
+        state.end_session(1);
+        let mut advert = advert();
+        advert.left_in_ear = true;
+        advert.right_in_ear = false;
+        advert.primary_left = true;
+        advert.lid_state = LidState::Open;
+        assert!(state.apply_verified_ble(&advert, 1, 10, 5000));
+        assert!(!state.connected);
+        assert!(!state.noise_control_reported);
+        assert!(!state.ear_detection_reported);
+        assert_eq!(state.battery.left.level, 50);
+        assert_eq!(state.battery.right.level, 60);
+        assert_eq!(state.battery.case_.level, 80);
+        assert_eq!(state.battery.primary_side(), Some(Component::Left));
+        assert_eq!(state.wear.expect("wear").primary, WearState::InEar);
+        assert_eq!(state.lid_state, LidState::Open);
+        assert_eq!(
+            state.observations["battery.left"].source,
+            ObservationSource::Ble
+        );
+        assert!(!state.apply_verified_ble(&advert, 0, 11, 5000));
+    }
+    #[test]
+    fn newer_connected_aacp_wins_and_stale_ble_cannot_overwrite() {
+        let mut state = DeviceState::default();
+        state.begin_session(1);
+        let parsed = crate::protocol::parser::parse(&[4, 0, 4, 0, 4, 0, 1, 4, 1, 99, 2, 1])
+            .expect("battery");
+        state.apply_packet(&parsed, 1, 100);
+        state.apply_packet(
+            &ParsedPacket::EarStatus {
+                primary: WearState::InEar,
+                secondary: WearState::InEar,
+            },
+            1,
+            100,
+        );
+        let mut advert = advert();
+        advert.left_in_ear = false;
+        advert.case_battery = None;
+        advert.right_battery = None;
+        advert.encrypted_left_battery = Some(20);
+        state.apply_verified_ble(&advert, 1, 101, 5000);
+        assert_eq!(state.battery.left.level, 99);
+        assert_eq!(state.wear.expect("wear").primary, WearState::InEar);
+        state.apply_verified_ble(&advert, 1, 5101, 5000);
+        assert_eq!(state.battery.left.level, 20);
+        advert.encrypted_left_battery = Some(10);
+        assert!(!state.apply_verified_ble(&advert, 1, 5000, 5000));
+        assert_eq!(state.battery.left.level, 20);
+        advert.encrypted_left_battery = Some(255);
+        state.apply_verified_ble(&advert, 1, 5200, 5000);
+        assert_eq!(state.battery.left.level, 20);
+    }
+    #[test]
+    fn unknown_case_zero_and_headset_source_are_not_misrepresented() {
+        let mut state = DeviceState::default();
+        state.begin_session(1);
+        let mut advert = advert();
+        advert.case_battery = Some(0);
+        advert.both_pods_in_case = false;
+        advert.one_pod_in_case = false;
+        state.apply_verified_ble(&advert, 1, 1, 100);
+        assert!(!state.battery.present.contains(&Component::Case));
+        advert.both_pods_in_case = true;
+        state.apply_verified_ble(&advert, 1, 2, 100);
+        assert_eq!(state.battery.case_.status, BatteryStatus::Discharging);
+        assert_eq!(state.wear.expect("case").primary, WearState::InCase);
+        state.model = AirPodsModel::AirPodsMaxUsbc;
+        advert.primary_left = false;
+        advert.encrypted_left_battery = Some(42);
+        state.apply_verified_ble(&advert, 1, 3, 100);
+        assert_eq!(state.battery.headset.level, 42);
     }
 }

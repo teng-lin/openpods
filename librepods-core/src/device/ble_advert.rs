@@ -61,16 +61,18 @@ impl ConnectionState {
 }
 
 /// Lid state of the AirPods case.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LidState {
     Open,
     Closed,
+    #[default]
     Unknown,
 }
 
 /// Decoded AirPods BLE advertisement data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BleAdvertData {
+    pub primary_left: bool,
     pub paired: bool,
     pub model_id: u16,
     pub model: AirPodsModel,
@@ -226,6 +228,7 @@ pub fn parse_advertisement(data: &[u8]) -> Option<BleAdvertData> {
     let connection_state = ConnectionState::from_byte(data[10]);
 
     let advert = BleAdvertData {
+        primary_left,
         paired,
         model_id,
         model,
@@ -297,6 +300,8 @@ pub fn decrypt_battery(
     advert.encrypted_right_battery = (rl <= 100).then_some(rl);
     advert.encrypted_left_charging = (ll <= 100).then_some(lc);
     advert.encrypted_right_charging = (rl <= 100).then_some(rc);
+    advert.encrypted_case_battery = None;
+    advert.encrypted_case_charging = None;
 
     // Case battery: 0xFF or (charging && level==127) means unavailable
     let raw = decrypted[3];
@@ -323,6 +328,25 @@ pub fn verify_rpa(irk: &[u8; 16], address: &[u8; 6]) -> bool {
     let mut block = aes::Block::from(plain);
     cipher.encrypt_block(&mut block);
     block[13..] == address[3..]
+}
+
+/// Decode the verified full proximity message without exposing wire layout to adapters.
+#[cfg(feature = "ble")]
+pub fn decode_verified_advertisement(
+    data: &[u8],
+    irk: &[u8; 16],
+    enc_key: &[u8; 16],
+    address: &[u8; 6],
+) -> Option<BleAdvertData> {
+    // Observed proximity message: 07 19, nine clear bytes, then one encrypted block.
+    if data.len() != 27 || data[1] != 25 || !verify_rpa(irk, address) {
+        return None;
+    }
+    let mut advert = parse_advertisement(data)?;
+    let payload = <&[u8; 16]>::try_from(&data[11..]).ok()?;
+    let primary_left = advert.primary_left;
+    decrypt_battery(&mut advert, payload, enc_key, primary_left);
+    Some(advert)
 }
 
 #[cfg(test)]
@@ -366,5 +390,123 @@ mod tests {
     fn skip_non_proximity() {
         let data = [0x01; 11]; // wrong type byte
         assert!(parse_advertisement(&data).is_none());
+    }
+}
+
+#[cfg(test)]
+mod value_regressions {
+    use super::*;
+    #[test]
+    fn all_connection_values_round_trip_and_invalid_battery_nibbles_are_unknown() {
+        for byte in 0..=255 {
+            assert_eq!(ConnectionState::from_byte(byte).as_byte(), byte);
+        }
+        let packet = [7, 25, 1, 0x24, 0x20, 0x20, 0xed, 0x0c, 0, 0, 0];
+        let advert = parse_advertisement(&packet).expect("supported shape");
+        assert!(advert.left_battery.is_none());
+        assert!(advert.right_battery.is_none());
+        assert!(advert.case_battery.is_none());
+        for status in [0, 0x20, 0x40, 0x60, 0x74] {
+            let mut packet = [7, 25, 1, 0x24, 0x20, status, 0x65, 0x78, 0, 0, 4];
+            assert!(parse_advertisement(&packet).is_some());
+            packet[8] = 8;
+            assert!(parse_advertisement(&packet).is_some());
+        }
+    }
+    #[cfg(feature = "ble")]
+    #[test]
+    fn identity_resolution_matches_bluetooth_ah_vector_and_rejects_foreign_address() {
+        // Bluetooth ah example: k=ec0234a357c8ad05341010a60a397d9b, r=708194, hash=0dfbaa.
+        let mut irk = [
+            0xec, 0x02, 0x34, 0xa3, 0x57, 0xc8, 0xad, 0x05, 0x34, 0x10, 0x10, 0xa6, 0x0a, 0x39,
+            0x7d, 0x9b,
+        ];
+        irk.reverse();
+        assert!(verify_rpa(&irk, &[0x70, 0x81, 0x94, 0x0d, 0xfb, 0xaa]));
+        assert!(!verify_rpa(&irk, &[0x70, 0x81, 0x94, 0x0d, 0xfb, 0xab]));
+        assert!(!verify_rpa(&irk, &[0x30, 0x81, 0x94, 0x0d, 0xfb, 0xaa]));
+    }
+    #[cfg(feature = "ble")]
+    #[test]
+    fn encrypted_readings_validate_percentages_and_clear_unavailable_case_values() {
+        use aes::{
+            cipher::{BlockEncrypt, KeyInit},
+            Aes128,
+        };
+        let key = [9; 16];
+        let cipher = Aes128::new((&key).into());
+        let mut advert =
+            parse_advertisement(&[7, 25, 1, 0x24, 0x20, 0x20, 0x65, 8, 0, 0, 4]).expect("fixture");
+        let mut plain = [0; 16];
+        plain[1] = 0x80 | 42;
+        plain[2] = 50;
+        plain[3] = 60;
+        let mut block = aes::Block::from(plain);
+        cipher.encrypt_block(&mut block);
+        decrypt_battery(&mut advert, block.as_ref(), &key, true);
+        assert_eq!(advert.encrypted_left_battery, Some(42));
+        assert_eq!(advert.encrypted_right_battery, Some(50));
+        assert_eq!(advert.encrypted_case_battery, Some(60));
+        assert_eq!(advert.encrypted_left_charging, Some(true));
+        decrypt_battery(&mut advert, block.as_ref(), &key, false);
+        assert_eq!(advert.encrypted_left_battery, Some(50));
+        plain[1] = 127;
+        plain[2] = 126;
+        plain[3] = 255;
+        let mut block = aes::Block::from(plain);
+        cipher.encrypt_block(&mut block);
+        decrypt_battery(&mut advert, block.as_ref(), &key, true);
+        assert_eq!(advert.encrypted_left_battery, None);
+        assert_eq!(advert.encrypted_right_battery, None);
+        assert_eq!(advert.encrypted_case_battery, None);
+        plain[3] = 0;
+        let mut block = aes::Block::from(plain);
+        cipher.encrypt_block(&mut block);
+        decrypt_battery(&mut advert, block.as_ref(), &key, true);
+        assert_eq!(advert.encrypted_case_battery, None);
+        advert.one_pod_in_case = true;
+        decrypt_battery(&mut advert, block.as_ref(), &key, true);
+        assert_eq!(advert.encrypted_case_battery, Some(0));
+    }
+}
+
+#[cfg(all(test, feature = "ble"))]
+mod verified_decode_tests {
+    use super::*;
+    use aes::{
+        cipher::{BlockEncrypt, KeyInit},
+        Aes128,
+    };
+    #[test]
+    fn full_decoder_requires_resolved_identity_and_complete_payload() {
+        let mut irk = [
+            0xec, 0x02, 0x34, 0xa3, 0x57, 0xc8, 0xad, 0x05, 0x34, 0x10, 0x10, 0xa6, 0x0a, 0x39,
+            0x7d, 0x9b,
+        ];
+        irk.reverse();
+        let address = [0x70, 0x81, 0x94, 0x0d, 0xfb, 0xaa];
+        let key = [9; 16];
+        let cipher = Aes128::new((&key).into());
+        let mut plain = [0; 16];
+        plain[1] = 42;
+        plain[2] = 80;
+        plain[3] = 90;
+        let mut encrypted = aes::Block::from(plain);
+        cipher.encrypt_block(&mut encrypted);
+        let mut frame = vec![7, 25, 1, 0x24, 0x20, 0x20, 0x65, 8, 0, 0, 4];
+        frame.extend_from_slice(encrypted.as_ref());
+        assert_eq!(
+            decode_verified_advertisement(&frame, &irk, &key, &address)
+                .expect("verified")
+                .encrypted_left_battery,
+            Some(42)
+        );
+        assert!(decode_verified_advertisement(&frame[..26], &irk, &key, &address).is_none());
+        assert!(decode_verified_advertisement(&frame, &[0; 16], &key, &address).is_none());
+        frame[1] = 24;
+        assert!(decode_verified_advertisement(&frame, &irk, &key, &address).is_none());
+        frame[1] = 25;
+        frame[0] = 8;
+        assert!(decode_verified_advertisement(&frame, &irk, &key, &address).is_none());
     }
 }
