@@ -1,8 +1,11 @@
 # Release acceptance evidence
 
-Status: implementation committed on `daemon-port`; first stable release
-acceptance is incomplete. Further manual testing was stopped by the user after
-five successful case cycles. Unattended verification continues: the 24-hour no-BLE soak remains open. Automated evidence is recorded
+Status: user approved merging the reviewed implementation into `master` before
+the remaining acceptance work finishes. First stable release acceptance is
+incomplete; this integration is not a completed hardware/stability certification. Further manual testing was stopped by the user after
+five successful case cycles. The 24-hour no-BLE soak started at 2026-10-24 23:07:44 UTC and remains in
+progress. The user explicitly requested merging now and handling bugs in follow-up
+work. It is not a prerequisite for this approved integration. Automated evidence is recorded
 separately in [automated-evidence.md](automated-evidence.md).
 
 The final instrumentation run exposed a queued-client cancellation race. The
@@ -30,7 +33,7 @@ subsequent test-only checkpoint; all three coverage gates and the additional epo
 
 | Gate | Required evidence | Status |
 | --- | --- | --- |
-| Automated matrix | Both Linux workspace variants and 22 CLI checks each passed; fresh Rust-generated fixtures passed actual Model.js; default strict Clippy and fmt passed | Linux functional/lint, cross-platform lint/compile and panel checks passed; scheduled stress/property audit additions pending |
+| Automated matrix | Both Linux workspace variants and 22 CLI checks each passed; fresh Rust-generated fixtures passed actual Model.js; default strict Clippy and fmt passed | Linux functional/lint, cross-platform lint/compile, panel checks and generated event suites passed; scheduled stress configured and locally smoke-tested |
 | Coverage | [Clean f920fe3 record](evidence/2026-10-24/production-coverage.json): core 96.90%, service 88.96%; critical changed code 90.44% | All three gates passed |
 | Protocol robustness | Corpus replay, fuzz artifacts/regressions, Miri or documented platform limitation | Pending |
 | Native IPC | Concurrent clients, deadline expiry, unknown mutation outcome, stop/restart behavior | Pending |
@@ -95,7 +98,9 @@ A completed 600-second diagnostic on the earlier `33e181f` application checkpoin
 measured 0.1733% CPU of one core, p95 local status latency 3.378 ms and maximum
 RSS 11644 KiB. RSS increased from its first sample; this is a warm-up diagnostic,
 not the required 24-hour stability proof. [Redacted diagnostic summary](evidence/2026-10-24/idle-diagnostic.json);
-raw private samples are in `target/idle-33e181f/`. The final 24-hour run has not started; the exact `f920fe3` executable is warming up.
+raw private samples are in `target/idle-33e181f/`. The final 24-hour run began at 2026-10-24 23:07:44 UTC against the exact
+`f920fe3` executable; it is not complete. Its local evidence directory is
+`target/soak-f920fe3/`.
 
 The user explicitly stopped manual testing after [5 successful physical
 case/reconnect cycles](evidence/2026-10-24/case-reconnect-smoke.json). These
@@ -118,3 +123,24 @@ The selected device, listening mode, profile and defaults were preserved. These
 are control-channel checks; they do not count as physical case/suspend cycles
 or audible continuity proof. They occurred during the final candidate warm-up
 diagnostic and are recorded so its workload is explicit.
+
+## Approved integration and follow-up acceptance
+
+The user stopped manual testing after five case cycles, then explicitly directed
+merging now with bugs handled in follow-up work. This changes the integration
+timing; it does not turn the incomplete acceptance rows into passes. No release
+tag or remote push is part of this integration.
+
+The [final warm-up diagnostic](evidence/2026-10-24/final-warmup.json) completed
+600.016 seconds with 121 samples and no errors: daemon CPU 0.283% of one core,
+p95 local status latency 12.321 ms and peak RSS 11964 KiB. The longer unit
+accounting window, including child helpers and three controlled reconnects,
+measured 0.623% of one core. RSS increased during warm-up; only the unfinished
+24-hour run can establish the requested stability evidence.
+
+Generated command-event tests cover 8192 deterministic traces per build across
+four controls, with terminal/no-replay, uncertainty, deadline and fresh-evidence
+invariants. Core suites pass with BLE absent/enabled. The separate
+[scheduled stress job](../.github/workflows/stress.yml) repeats cancellation and
+critical actor tests outside ordinary PR runs. Its exact local script passed
+bounded minimal/BLE smoke runs; GitHub CI itself has not run here.

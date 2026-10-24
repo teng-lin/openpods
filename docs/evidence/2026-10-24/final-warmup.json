@@ -1,0 +1,42 @@
+{
+  "elapsed_seconds": 600.0155029809976,
+  "samples": 121,
+  "failures": [],
+  "status_latency_p95_ms": 12.320832000114024,
+  "cpu_percent_one_core": 0.2833260126703491,
+  "rss_max_kib": 11964,
+  "rss_first_kib": 10808,
+  "rss_last_kib": 11964,
+  "release_duration_met": false,
+  "integrity": {
+    "baseline_binary_identity_verified": true,
+    "binary_identity_verified": true,
+    "source_metadata_complete": true,
+    "compiled_no_ble_proven": true,
+    "journal_volume": {
+      "unit": "librepods-rs.service",
+      "entries_observed": 0,
+      "bytes_observed": 0,
+      "entry_limit": 10000,
+      "byte_limit": 1048576,
+      "truncated": false,
+      "timed_out": false,
+      "exit_code": 0,
+      "complete": true
+    },
+    "release_evidence_complete": true
+  },
+  "release_soak_passed": false,
+  "memory_growth_review_required": true,
+  "unit_cpu": {
+    "scope": "entire systemd unit including child helpers",
+    "elapsed_seconds": 688.0773749069922,
+    "cpu_percent_one_core": 0.6225374000386233,
+    "cpu_under_one_percent": true,
+    "duration_at_least_ten_minutes": true,
+    "workload_note": "Warm-up diagnostic includes three explicit AACP-only reconnects; no physical case or suspend actions."
+  },
+  "source_commit": "f920fe3c539a995b288f1ccbab7cea95f9625a2a",
+  "binary_sha256": "aafbfd7ceea47331da998e336654eaacd8bd58bf62f422b5dac1f27fe886d3a5",
+  "workload_note": "Ten-minute warm-up diagnostic included three automatic AACP-only reconnects; not a 24-hour stability result."
+}

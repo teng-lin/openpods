@@ -153,3 +153,19 @@ Windows linking, runtime or hardware acceptance. Android default/BLE pure-core
 checks passed at the unchanged production core. Final source/version logs are
 in `/home/blackmyth/.cache/librepods-platform-*-final-f920fe3.log`; the actual
 Model.js accepted three freshly Rust-generated status fixtures.
+
+## Generated event traces and scheduled stress
+
+External `librepods-core/tests/command_sequences.rs` adds three generated suites:
+512 fixed seeds across four controls, 8192 lifecycle traces per feature build,
+and a 32-event terminal suffix for each trace. An independent evidence oracle
+checks at-most-one write, fresh confirmation, deadline rejection and written
+outcome uncertainty. Both core feature variants and strict test Clippy pass;
+the production source and deployed release executable are unchanged.
+
+`.github/workflows/stress.yml` schedules a separate minimal/BLE Linux matrix.
+Each job bounds 100 isolated cancellation repetitions and 10 critical actor
+subsets with command/job deadlines and retained failure logs. The exact embedded
+script passed local smoke overrides of two cancellations and one full subset
+per variant; injected timeout handling returned 124 with diagnostics retained.
+YAML and shell syntax checks pass. GitHub-hosted execution is not claimed.
