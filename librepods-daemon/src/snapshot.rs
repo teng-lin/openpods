@@ -57,9 +57,9 @@ impl Snapshot {
             schema_version: 1,
             daemon_instance: instance,
             revision: 0,
-            session_generation: 0,
+            session_generation: state.session_generation,
             lifecycle: "waiting_for_adapter".into(),
-            connected: false,
+            connected: state.connected,
             updated_unix_ms: 0,
             observed_monotonic_ms: 0,
             device: DeviceStatus::from(state),
@@ -79,9 +79,14 @@ impl Snapshot {
     pub fn legacy(&self) -> Value {
         let d = &self.device;
         let capabilities = self.capabilities();
-        let pod = |reading: BatteryState, in_ear: Option<bool>| {
+        let fresh = |field: &str| {
+            d.observations.get(field).is_some_and(|observation| {
+                !observation.stale && observation.generation == self.session_generation
+            })
+        };
+        let pod = |reading: BatteryState, in_ear: Option<bool>, field: &str| {
             json!({
-            "available":available(reading),"level":reading.level,
+            "available":available(reading) && fresh(field),"level":reading.level,
             "charging":matches!(reading.status,BatteryStatus::Charging),
             "in_ear":in_ear.unwrap_or(false)})
         };
@@ -100,11 +105,11 @@ impl Snapshot {
             "supports_conversational_awareness":capabilities["conversational_awareness"],
             "supports_one_bud_anc":capabilities["one_bud_anc"],
             "noise_mode":d.listening_mode.map(|m|i32::from(m.as_byte())-1).unwrap_or(-1),
-            "left":pod(d.battery.left,match d.battery.primary_side() {Some(librepods_core::device::battery::Component::Left)=>d.primary_in_ear,Some(librepods_core::device::battery::Component::Right)=>d.secondary_in_ear,_=>None}),
-            "right":pod(d.battery.right,match d.battery.primary_side() {Some(librepods_core::device::battery::Component::Left)=>d.secondary_in_ear,Some(librepods_core::device::battery::Component::Right)=>d.primary_in_ear,_=>None}),
-            "case":{"available":available(d.battery.case_),"level":d.battery.case_.level,
+            "left":pod(d.battery.left,match d.battery.primary_side() {Some(librepods_core::device::battery::Component::Left)=>d.primary_in_ear,Some(librepods_core::device::battery::Component::Right)=>d.secondary_in_ear,_=>None},"battery.left"),
+            "right":pod(d.battery.right,match d.battery.primary_side() {Some(librepods_core::device::battery::Component::Left)=>d.secondary_in_ear,Some(librepods_core::device::battery::Component::Right)=>d.primary_in_ear,_=>None},"battery.right"),
+            "case":{"available":available(d.battery.case_) && fresh("battery.case"),"level":d.battery.case_.level,
                 "charging":matches!(d.battery.case_.status,BatteryStatus::Charging)},
-            "headset":{"available":available(d.battery.headset),"level":d.battery.headset.level,"charging":matches!(d.battery.headset.status,BatteryStatus::Charging)},
+            "headset":{"available":available(d.battery.headset) && fresh("battery.headset"),"level":d.battery.headset.level,"charging":matches!(d.battery.headset.status,BatteryStatus::Charging)},
             "one_bud_anc_mode":toggle(0x1B),"conversational_awareness":toggle(0x28),
             "adaptive_noise_level":d.reported_controls.get(&0x2E).map(|d|d[0]).unwrap_or(50),
             "ear_detection_behavior":match self.ear_policy {EarPolicy::OneRemoved=>0,EarPolicy::BothRemoved=>1,EarPolicy::Off=>2},
@@ -157,6 +162,21 @@ impl From<&DeviceState> for DeviceStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_battery_does_not_present_stale_cached_readings_as_available() {
+        let mut state = DeviceState::default();
+        state.begin_session(7);
+        let packet = librepods_core::protocol::parser::parse(&[4, 0, 4, 0, 4, 0, 1, 4, 1, 0, 2, 1])
+            .expect("battery");
+        state.apply_packet(&packet, 7, 10);
+        let fresh = Snapshot::new("test".into(), &state);
+        assert_eq!(fresh.legacy()["left"]["available"], true);
+        assert_eq!(fresh.legacy()["left"]["level"], 0);
+        state.end_session(7);
+        let stale = Snapshot::new("test".into(), &state);
+        assert_eq!(stale.device.battery.left.level, 0);
+        assert_eq!(stale.legacy()["left"]["available"], false);
+    }
     #[test]
     fn public_status_never_exposes_keys_or_invents_connected_measurements() {
         let state = DeviceState {
