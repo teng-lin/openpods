@@ -39,6 +39,12 @@ pub struct Snapshot {
     pub session_generation: u64,
     pub lifecycle: String,
     pub connected: bool,
+    /// Readiness of the selected device's adapter, independent of AACP.
+    #[serde(default)]
+    pub adapter_ready: bool,
+    /// Last reconciled BlueZ link state; `connected` denotes AACP readiness.
+    #[serde(default)]
+    pub bluez_connected: bool,
     pub updated_unix_ms: u64,
     pub observed_monotonic_ms: u64,
     /// Receipt times in wall-clock milliseconds, retained through disconnects.
@@ -66,6 +72,8 @@ impl Snapshot {
             session_generation: state.session_generation,
             lifecycle: "waiting_for_adapter".into(),
             connected: state.connected,
+            adapter_ready: false,
+            bluez_connected: false,
             updated_unix_ms: 0,
             observed_monotonic_ms: 0,
             observation_unix_ms: BTreeMap::new(),
