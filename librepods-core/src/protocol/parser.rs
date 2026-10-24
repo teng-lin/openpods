@@ -258,7 +258,7 @@ fn parse_control_command(packet: &[u8]) -> Result<ParsedPacket, ParseError> {
 }
 
 /// Parse device metadata: null-terminated strings for name, model number,
-/// manufacturer.
+/// manufacturer. Later firmware/serial/encrypted fields are opaque and discarded.
 ///
 /// Layout: `04 00 04 00 1D [6 skip bytes] name\0 model\0 manufacturer\0`
 fn parse_metadata(packet: &[u8]) -> Result<ParsedPacket, ParseError> {
@@ -292,9 +292,8 @@ fn parse_metadata(packet: &[u8]) -> Result<ParsedPacket, ParseError> {
             "three terminated strings required".into(),
         ));
     }
-    if data[start..].iter().any(|byte| *byte != 0) {
-        return Ok(ParsedPacket::Unknown(packet.to_vec()));
-    }
+    // Real metadata continues with serials, firmware and binary extensions. The
+    // outer frame bound still applies; do not retain these private opaque fields.
 
     Ok(ParsedPacket::Metadata {
         name: strings[0].clone(),

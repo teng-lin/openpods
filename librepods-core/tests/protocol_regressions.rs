@@ -53,7 +53,7 @@ fn parsers_reject_truncated_and_malformed_known_packets() {
     metadata.extend_from_slice(b"Name\0Model\0Apple\0extension");
     assert!(matches!(
         parser::parse(&metadata),
-        Ok(ParsedPacket::Unknown(_))
+        Ok(ParsedPacket::Metadata { .. })
     ));
 }
 
@@ -210,4 +210,47 @@ fn arbitrary_and_structured_frames_never_panic_or_allocate_from_untrusted_counts
             let _ = parser::parse(&bytes);
         }
     }
+}
+
+#[test]
+fn full_metadata_extensions_do_not_hide_verified_identity_or_retain_serials() {
+    let fixture = include_str!("fixtures/metadata_extended.hex");
+    let hex = fixture
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .collect::<String>();
+    let packet = hex
+        .as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect::<Vec<_>>();
+    let identity_end = packet[11..]
+        .iter()
+        .enumerate()
+        .filter(|(_, byte)| **byte == 0)
+        .nth(2)
+        .unwrap()
+        .0
+        + 12;
+    for end in 0..identity_end {
+        assert!(parser::parse(&packet[..end]).is_err());
+    }
+    for end in identity_end..=packet.len() {
+        assert!(matches!(
+            parser::parse(&packet[..end]),
+            Ok(ParsedPacket::Metadata { .. })
+        ));
+    }
+    let parsed = parser::parse(&packet).unwrap();
+    assert!(
+        matches!(&parsed,ParsedPacket::Metadata{name,model_number,manufacturer} if name=="Example AirPods Pro"&&model_number=="A3048"&&manufacturer=="Apple Inc.")
+    );
+    assert!(!format!("{parsed:?}").contains("REDACTED"));
+    let mut state = librepods_core::device::state::DeviceState::default();
+    state.begin_session(1);
+    assert!(state.apply_packet(&parsed, 1, 0));
+    assert!(state.fresh("metadata"));
+    assert!(state.model.capabilities().noise_control);
 }
