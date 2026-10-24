@@ -50,7 +50,9 @@ changing its settings:
 ```bash
 python3 scripts/soak.py --pid DAEMON_PID \
   --binary /absolute/path/to/librepods-cli \
-  --output /private/path/to/new-soak-directory
+  --output /private/path/to/new-soak-directory \
+  --source-commit EXACT_COMMIT --source-tree-hash EXACT_TREE \
+  --source-tree-state clean --unit librepods-rs.service
 ```
 
 The default duration is 86,400 seconds. The runner samples the same process start
@@ -58,3 +60,15 @@ identity, CPU, RSS and native status latency, checks that BLE is explicitly off,
 and keeps summary/JSONL evidence. Shorter diagnostic runs are allowed but cannot
 claim the release-duration gate. Review RSS growth as well as peak memory.
 Snapshots in evidence must be redacted before sharing; never retain BLE keys.
+
+The runner hashes `/proc/PID/exe` and the requested executable and rejects a
+mismatch or any subsequent process/binary replacement. It records the actual
+executable identity and daemon instance, and requires every status sample to
+prove both runtime BLE disabled and BLE support absent from the build.
+
+Source commit/tree metadata describes the declared build input; it is not a
+cryptographic build attestation. Unknown or dirty source metadata cannot satisfy
+the release soak result. The optional `--unit` collects only bounded journal
+volume counts for the measured time window; it retains no journal content.
+Truncated, timed-out or absent journal evidence also prevents a complete release
+soak claim. A shorter diagnostic run can still produce useful samples.

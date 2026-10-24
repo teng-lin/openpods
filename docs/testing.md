@@ -29,13 +29,14 @@ integration check.
 
 ```bash
 cargo install cargo-llvm-cov --version 0.9.1 --locked
-cargo llvm-cov --workspace --no-default-features --locked --json --output-path target/coverage.json
-python3 scripts/check-coverage.py target/coverage.json
+scripts/coverage.sh target/coverage.json
 ```
 
 The checker counts uncovered production source in core, CLI, Linux adapters and
-daemon. It excludes generated and non-host platform code by path, not arbitrary
-functions. The release gate is 90% core and 80% service line coverage. Keep branch
+daemon. LLVM LCOV per-line counters include uncovered production paths. Parsed
+Rust test-only spans are removed, including inline tests and external test
+helpers; production functions remain in the denominator. Generated and non-host
+platform code are outside the measured host application groups. The release gate is 90% core and 80% service line coverage. Keep branch
 and changed-line evidence where available; a line percentage cannot establish
 that race, recovery and error transitions work.
 
