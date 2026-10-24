@@ -31,8 +31,8 @@ investigation; no passing rerun or earlier checkpoint overrides that failure.
 | Legacy integration | Rust-generated snapshots accepted by actual Omarchy Model.js | Pending |
 | Package restrictions | [Native and compatibility unit](evidence/2026-10-24/hardware-unit-smoke.json); [staged uninstall/reinstall](evidence/2026-10-24/package-uninstall-reinstall.json), original config preserved, no root/capabilities | Passed for staged units at recorded binaries; final deployment pending |
 | Mode/settings | [20 mode transitions](evidence/2026-10-24/hardware-mode-cycles.json); [CA](evidence/2026-10-24/configuration-ca-readback.json); [Adaptive, one-bud ANC and levels 0/50/100](evidence/2026-10-24/configuration-settings-readback.json), with restoration | Hardware checks passed at their recorded binaries; final source reconciliation pending |
-| Reconnect | At least 20 case/reconnect cycles, control-only drop, adapter/BlueZ restart | Pending |
-| Suspend | At least 10 real suspend/resume cycles, including queued-command handling | Pending |
+| Reconnect | [5 actual case cycles](evidence/2026-10-24/case-reconnect-smoke.json); original requirement 20 plus control-only drop and adapter/BlueZ restart | Partial; further manual testing stopped by user |
+| Suspend | At least 10 real suspend/resume cycles, including queued-command handling | Unverified; manual testing stopped by user |
 | Audio | Playback continuity, profile-off/node recreation/mute/wrong route, server restart, user override | Pending |
 | Capture | External mic preserved; explicit AirPods capture profile choice and restoration | Pending |
 | No-BLE telemetry | Case unavailable vs genuine zero, partial earbud reports, no BLE dependency/runtime task | Pending |
@@ -91,7 +91,13 @@ RSS 11644 KiB. RSS increased from its first sample; this is a warm-up diagnostic
 not the required 24-hour stability proof. [Redacted diagnostic summary](evidence/2026-10-24/idle-diagnostic.json);
 raw private samples are in `target/idle-33e181f/`. The final 24-hour run has not started.
 
-Physical work still required: 20 case/reconnect cycles, adapter/BlueZ restart,
+The user explicitly stopped manual testing after [5 successful physical
+case/reconnect cycles](evidence/2026-10-24/case-reconnect-smoke.json). These
+cycles restored fresh metadata automatically without an explicit Bluetooth
+connect. Further manual testing is deferred at the user's request; the original
+20-cycle gate is incomplete.
+
+Unverified release checks: the remaining case/reconnect cycles, adapter/BlueZ restart,
 10 suspend/resume cycles (including queued work), continuous playback listening,
 profile-off and node recreation, pinned-stream/mute/zero-volume conditions,
 audio-server restart, and explicit capture selection/restoration. Synthetic

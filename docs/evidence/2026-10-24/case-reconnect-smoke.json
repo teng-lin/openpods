@@ -1,0 +1,94 @@
+{
+  "metadata": {
+    "started_utc": "2026-10-24T22:31:01.540647+00:00",
+    "binary_sha256": "aa9f923e0e0b4b0923b84a14611218633ba52eb31f993bebdf8a1bca4103f013",
+    "declared_build_source": "2fd82fe365df212e43a74b87b101e4eff75b55ff",
+    "initial_generation": 1,
+    "physical_protocol": "User explicitly guided to put both pods in case, close, reopen, rewear; disconnect/reconnect observations count only with physical participation.",
+    "required_cycles": 20
+  },
+  "cycles": [
+    {
+      "number": 1,
+      "disconnect": {
+        "utc": "2026-10-24T22:31:01.553848+00:00",
+        "elapsed_seconds": 0.013206001996877603,
+        "old_generation": 1
+      },
+      "reconnected_utc": "2026-10-24T22:32:11.965780+00:00",
+      "new_generation": 7,
+      "elapsed_disconnect_to_ready_seconds": 70.41193894499156,
+      "bluez_connected": true
+    },
+    {
+      "number": 2,
+      "disconnect": {
+        "utc": "2026-10-24T22:35:45.558325+00:00",
+        "elapsed_seconds": 284.01768640799855,
+        "old_generation": 7
+      },
+      "reconnected_utc": "2026-10-24T22:35:59.237911+00:00",
+      "new_generation": 13,
+      "elapsed_disconnect_to_ready_seconds": 13.679584935991443,
+      "bluez_connected": true
+    },
+    {
+      "number": 3,
+      "disconnect": {
+        "utc": "2026-10-24T22:36:28.686004+00:00",
+        "elapsed_seconds": 327.1453640559921,
+        "old_generation": 13
+      },
+      "reconnected_utc": "2026-10-24T22:36:46.422224+00:00",
+      "new_generation": 19,
+      "elapsed_disconnect_to_ready_seconds": 17.7362194340094,
+      "bluez_connected": true
+    },
+    {
+      "number": 4,
+      "disconnect": {
+        "utc": "2026-10-24T22:37:04.918246+00:00",
+        "elapsed_seconds": 363.37760577099107,
+        "old_generation": 19
+      },
+      "reconnected_utc": "2026-10-24T22:37:26.187622+00:00",
+      "new_generation": 25,
+      "elapsed_disconnect_to_ready_seconds": 21.269375716001377,
+      "bluez_connected": true
+    },
+    {
+      "number": 5,
+      "disconnect": {
+        "utc": "2026-10-24T22:37:42.890800+00:00",
+        "elapsed_seconds": 401.3501597419963,
+        "old_generation": 25
+      },
+      "reconnected_utc": "2026-10-24T22:38:00.603878+00:00",
+      "new_generation": 31,
+      "elapsed_disconnect_to_ready_seconds": 17.713078000000678,
+      "bluez_connected": true
+    }
+  ],
+  "summary": {
+    "stopped_utc": "2026-10-24T22:38:34.473054+00:00",
+    "completed_cycles": 5,
+    "required_by_original_plan": 20,
+    "extended_gate_passed": false,
+    "reason": "User explicitly stopped manual testing; extended acceptance remains incomplete.",
+    "last_observed_state": {
+      "utc": "2026-10-24T22:38:00.603815+00:00",
+      "elapsed_seconds": 419.06318198099325,
+      "connected": true,
+      "bluez_connected": true,
+      "lifecycle": "ready",
+      "session_generation": 31,
+      "adapter_ready": true,
+      "queue_depth": 0,
+      "metadata_stale": false
+    },
+    "limits": [
+      "No claim of20casecycles or full release acceptance.",
+      "Physical disconnects were user-assisted; no inferred audible continuity."
+    ]
+  }
+}
