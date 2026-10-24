@@ -86,6 +86,8 @@ impl Paths {
     }
     pub fn save_config(&self, config: &Config) -> Result<(), DaemonError> {
         config.validate()?;
+        // Refuse to overwrite a config that was replaced with an unsupported schema.
+        let _ = self.load_config()?;
         let bytes = serde_json::to_vec_pretty(config)
             .map_err(|e| DaemonError::new(ErrorCode::Internal, "config", e.to_string()))?;
         atomic_write(&self.config, &bytes)
@@ -211,7 +213,7 @@ impl OwnerGuard {
                     "unexpected file occupies the socket path",
                 ));
             }
-            if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+            if socket_occupied(&socket)? {
                 return Err(DaemonError::new(
                     ErrorCode::ServiceUnavailable,
                     "socket",
@@ -254,7 +256,19 @@ impl Drop for OwnerGuard {
                 let _ = fs::remove_file(&self.socket);
             }
         }
-        if let Ok(bytes) = fs::read(&self.state) {
+        if let Ok(file) = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&self.state)
+        {
+            let mut bytes = Vec::new();
+            if file
+                .take(crate::ipc::MAX_FRAME as u64 + 1)
+                .read_to_end(&mut bytes)
+                .is_err()
+            {
+                return;
+            }
             if serde_json::from_slice::<Snapshot>(&bytes)
                 .is_ok_and(|s| s.daemon_instance == self.instance)
             {
@@ -267,6 +281,58 @@ impl Drop for OwnerGuard {
 pub fn restrict_socket(path: &Path) -> Result<(), DaemonError> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
         .map_err(|e| DaemonError::io("socket permissions", e))
+}
+
+fn socket_occupied(path: &Path) -> Result<bool, DaemonError> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = path.as_os_str().as_bytes();
+    // Safety: sockaddr_un is a plain C value; zeroed padding and path are valid.
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if bytes.len() >= address.sun_path.len() || bytes.contains(&0) {
+        return Err(DaemonError::new(
+            ErrorCode::InvalidInput,
+            "socket",
+            "invalid Unix socket path",
+        ));
+    }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (destination, source) in address.sun_path.iter_mut().zip(bytes) {
+        *destination = *source as libc::c_char;
+    }
+    // Safety: socket creates an unconnected descriptor without borrowing memory.
+    let raw = unsafe {
+        libc::socket(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+            0,
+        )
+    };
+    if raw < 0 {
+        return Err(DaemonError::io(
+            "socket probe",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    // Safety: raw was created above and has no other owner.
+    let socket = unsafe { OwnedFd::from_raw_fd(raw) };
+    // Safety: the pointer references an initialized sockaddr_un of this size.
+    let result = unsafe {
+        libc::connect(
+            socket.as_raw_fd(),
+            (&address as *const libc::sockaddr_un).cast(),
+            std::mem::size_of_val(&address) as libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::EINPROGRESS | libc::EALREADY | libc::EAGAIN) => Ok(true),
+        Some(libc::ECONNREFUSED | libc::ENOENT) => Ok(false),
+        _ => Err(DaemonError::io("socket probe", error)),
+    }
 }
 
 #[cfg(test)]

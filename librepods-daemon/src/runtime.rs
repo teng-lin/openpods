@@ -67,7 +67,20 @@ pub async fn run(
     let listener = UnixListener::bind(paths.socket()).map_err(|e| DaemonError::io("listen", e))?;
     restrict_socket(&paths.socket())?;
     owner.record_socket()?;
-    let session = Session::spawn(backend, config.clone(), instance);
+    let desktop_enabled = backend.desktop_enabled();
+    let session = Session::spawn_persistent(backend, config.clone(), instance, paths.clone());
+    let (desktop_stop, desktop_shutdown) = tokio::sync::watch::channel(false);
+    let desktop = if desktop_enabled {
+        Some(tokio::spawn(crate::desktop::run(
+            config.clone(),
+            session.handle.status.clone(),
+            session.handle.audio_feed.clone(),
+            session.handle.manual_overrides.subscribe(),
+            desktop_shutdown,
+        )))
+    } else {
+        None
+    };
     let mut publication = session.handle.status.clone();
     let publisher_paths = paths.clone();
     let publication_health = session.handle.publication_health.clone();
@@ -150,6 +163,16 @@ pub async fn run(
     }
     clients.abort_all();
     while clients.join_next().await.is_some() {}
+    desktop_stop.send_replace(true);
+    if let Some(mut desktop) = desktop {
+        if tokio::time::timeout(Duration::from_secs(1), &mut desktop)
+            .await
+            .is_err()
+        {
+            desktop.abort();
+            let _ = desktop.await;
+        }
+    }
     session.handle.stop();
     // The platform close operation wakes pending reads before joining the owner.
     tokio::task::spawn_blocking(move || session.stop())
@@ -180,8 +203,8 @@ fn publication_instance(paths: &Paths) -> String {
 async fn client_connection(
     stream: UnixStream,
     handle: SessionHandle,
-    paths: Paths,
-    mut config: Config,
+    _paths: Paths,
+    _config: Config,
 ) -> Result<(), DaemonError> {
     let (mut reader, mut writer) = stream.into_split();
     let mut buffered = Vec::new();
@@ -224,13 +247,6 @@ async fn client_connection(
                     changed=snapshots.changed()=>{if changed.is_err(){return Ok(());}},
                     _=reader.read(&mut probe)=>return Ok(()),
                 }
-            }
-        }
-        if let Operation::EarPolicy(policy) = request.operation {
-            config.ear_policy = policy;
-            if let Err(error) = paths.save_config(&config) {
-                write_response(&mut writer, &Response::failed(request.id, error)).await?;
-                continue;
             }
         }
         let pending = handle.request(request);

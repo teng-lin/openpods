@@ -71,6 +71,7 @@ impl SessionHandle {
             };
         }
         let duration = Duration::from_millis(request.timeout_ms);
+        let readonly_audio = matches!(request.operation, Operation::AudioStatus);
         if matches!(
             request.operation,
             Operation::AudioStatus
@@ -93,7 +94,7 @@ impl SessionHandle {
             return match result {
                 Ok(Ok(value))=>{self.audio_feed.send_replace(value.clone());Response::ok(id,value)},
                 Ok(Err(error))=>Response::failed(id,error),
-                Err(_)=>Response::failed(id,DaemonError::new(ErrorCode::OutcomeUnknown,"audio","audio operation deadline elapsed; inspect status before retrying a mutation")),
+                Err(_)=>Response::failed(id,DaemonError::new(if readonly_audio{ErrorCode::CommandTimeout}else{ErrorCode::OutcomeUnknown},"audio","audio operation deadline elapsed; inspect status before retrying a mutation")),
             };
         }
         let deadline = Instant::now() + duration;
@@ -166,6 +167,22 @@ pub struct Session {
 
 impl Session {
     pub fn spawn(backend: Arc<dyn Backend>, config: Config, instance: String) -> Self {
+        Self::spawn_inner(backend, config, instance, None)
+    }
+    pub fn spawn_persistent(
+        backend: Arc<dyn Backend>,
+        config: Config,
+        instance: String,
+        paths: crate::storage::Paths,
+    ) -> Self {
+        Self::spawn_inner(backend, config, instance, Some(paths))
+    }
+    fn spawn_inner(
+        backend: Arc<dyn Backend>,
+        config: Config,
+        instance: String,
+        paths: Option<crate::storage::Paths>,
+    ) -> Self {
         let (sender, receiver) = mpsc::sync_channel(QUEUE_LIMIT);
         let state = DeviceState::default();
         let mut status = Snapshot::new(instance, &state);
@@ -190,6 +207,7 @@ impl Session {
             Worker {
                 backend,
                 config,
+                paths,
                 state,
                 status,
                 status_tx,
@@ -235,6 +253,7 @@ impl Drop for Session {
 struct Worker {
     backend: Arc<dyn Backend>,
     config: Config,
+    paths: Option<crate::storage::Paths>,
     state: DeviceState,
     status: Snapshot,
     status_tx: watch::Sender<Snapshot>,
@@ -548,7 +567,15 @@ impl Worker {
             }
             Operation::EarPolicy(policy) => {
                 envelope.dispatched.store(true, Ordering::SeqCst);
-                self.config.ear_policy = *policy;
+                let mut config = self.config.clone();
+                config.ear_policy = *policy;
+                if let Some(paths) = &self.paths {
+                    if let Err(error) = paths.save_config(&config) {
+                        let _ = envelope.reply.send(Response::failed(id, error));
+                        return;
+                    }
+                }
+                self.config = config;
                 self.status.ear_policy = *policy;
                 self.publish();
                 Response::ok(id, serde_json::json!({"ear_policy":policy}))

@@ -7,14 +7,15 @@
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use librepods_core::device::state::NoiseControlMode;
 use librepods_core::protocol::settings::SettingChange;
-use librepods_daemon::{
-    config::EarPolicy,
-    ipc::{Operation, Request, Response, PROTOCOL_VERSION},
-    DaemonError, ErrorCode,
-};
+#[cfg(target_os = "linux")]
+use librepods_daemon::ipc::{Request, Response, PROTOCOL_VERSION};
+use librepods_daemon::{config::EarPolicy, ipc::Operation, DaemonError, ErrorCode};
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 mod status;
 
 #[derive(Parser)]
@@ -253,6 +254,12 @@ async fn run(cli: &Cli) -> Result<(), DaemonError> {
     if let Some(address) = &cli.address {
         config.address = Some(address.clone());
     }
+    if cli.no_media {
+        config.ear_policy = EarPolicy::Off;
+        config.ca_ducking = false;
+        config.audio_recovery = false;
+        config.auto_route = false;
+    }
     config.validate()?;
     if let Some(Command::Serve { ble }) = &cli.command {
         if cli.direct {
@@ -348,10 +355,12 @@ async fn run(cli: &Cli) -> Result<(), DaemonError> {
 }
 
 #[cfg(not(target_os = "linux"))]
-async fn run(_cli: &Cli) -> Result<(), DaemonError> {
+async fn run(cli: &Cli) -> Result<(), DaemonError> {
+    let _ = cli.operation()?;
     Err(DaemonError::new(ErrorCode::Unsupported,"service","persistent service is currently supported on Linux; Windows transport builds remain validated separately"))
 }
 
+#[cfg(target_os = "linux")]
 fn show_snapshot(
     cli: &Cli,
     snapshot: &librepods_daemon::snapshot::Snapshot,
@@ -368,12 +377,13 @@ fn show_snapshot(
         );
     } else {
         display
-            .update(&snapshot.device)
+            .update(snapshot)
             .map_err(|e| DaemonError::io("terminal", e))?;
     }
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn show_response(cli: &Cli, response: Response) -> Result<(), DaemonError> {
     if let Some(error) = response.error {
         return Err(error);
@@ -420,7 +430,7 @@ async fn scan() -> Result<(), DaemonError> {
         }
     }
 }
-#[cfg(not(all(target_os = "linux", feature = "ble")))]
+#[cfg(all(target_os = "linux", not(feature = "ble")))]
 async fn scan() -> Result<(), DaemonError> {
     Err(DaemonError::new(
         ErrorCode::Unsupported,

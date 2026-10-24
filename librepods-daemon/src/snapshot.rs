@@ -144,7 +144,7 @@ impl From<&DeviceState> for DeviceStatus {
             reported_controls: state.reported_controls.clone(),
             wear: state.wear,
             observations: state.observations.clone(),
-            ca_event: None,
+            ca_event: state.ca_event,
             lid_state: match state.lid_state {
                 librepods_core::device::ble_advert::LidState::Open => Some(0),
                 librepods_core::device::ble_advert::LidState::Closed => Some(1),

@@ -24,8 +24,22 @@ impl Display {
         }
     }
 
-    pub fn update(&mut self, state: &DeviceStatus) -> io::Result<()> {
-        let next = render(state);
+    pub fn update(&mut self, snapshot: &librepods_daemon::snapshot::Snapshot) -> io::Result<()> {
+        let mut next = render(&snapshot.device);
+        if let Some(line) = next.find('\n') {
+            next.insert_str(
+                line + 1,
+                &format!(
+                    "Connection: {} (AACP {})\n",
+                    snapshot.lifecycle,
+                    if snapshot.connected {
+                        "ready"
+                    } else {
+                        "not ready"
+                    }
+                ),
+            );
+        }
         if next != self.previous {
             let mut stdout = io::stdout().lock();
             if self.terminal {
@@ -57,6 +71,16 @@ fn battery(reading: BatteryState) -> String {
     }
 }
 
+fn observed_battery(state: &DeviceStatus, component: &str, reading: BatteryState) -> String {
+    match state.observations.get(&format!("battery.{component}")) {
+        Some(observation) if observation.stale => {
+            format!("{} (last reported; stale)", battery(reading))
+        }
+        Some(_) => battery(reading),
+        None => "Unavailable".into(),
+    }
+}
+
 fn label(id: u8) -> String {
     match ControlCommandId::from_byte(id) {
         Some(ControlCommandId::Ssl) => "SSL (raw)".into(),
@@ -84,9 +108,18 @@ pub fn render(state: &DeviceStatus) -> String {
         ("Model", text(&state.model_number)),
         ("Manufacturer", text(&state.manufacturer)),
         ("Bluetooth address", text(&state.address)),
-        ("Left battery", battery(state.battery.left)),
-        ("Right battery", battery(state.battery.right)),
-        ("Case battery", battery(state.battery.case_)),
+        (
+            "Left battery",
+            observed_battery(state, "left", state.battery.left),
+        ),
+        (
+            "Right battery",
+            observed_battery(state, "right", state.battery.right),
+        ),
+        (
+            "Case battery",
+            observed_battery(state, "case", state.battery.case_),
+        ),
         (
             "Listening mode",
             state

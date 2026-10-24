@@ -34,6 +34,9 @@ pub trait Backend: Send + Sync {
         false
     }
     fn cancel(&self) {}
+    fn desktop_enabled(&self) -> bool {
+        false
+    }
     fn audio(
         &self,
         _address: &str,
@@ -65,7 +68,6 @@ impl SessionTransport for librepods_linux::l2cap::L2capLinux {
 
 pub struct LinuxBackend {
     sleep: std::sync::Mutex<Option<librepods_linux::sleep::SleepMonitor>>,
-    sleeping: std::sync::atomic::AtomicBool,
     monitor: Option<librepods_linux::bluez_monitor::BluezMonitor>,
     connecting: std::sync::Mutex<Option<librepods_linux::l2cap::Cancellation>>,
     cancelled: std::sync::atomic::AtomicBool,
@@ -74,7 +76,6 @@ impl Default for LinuxBackend {
     fn default() -> Self {
         Self {
             sleep: std::sync::Mutex::new(librepods_linux::sleep::SleepMonitor::start().ok()),
-            sleeping: std::sync::atomic::AtomicBool::new(false),
             monitor: librepods_linux::bluez_monitor::BluezMonitor::start().ok(),
             connecting: std::sync::Mutex::new(None),
             cancelled: std::sync::atomic::AtomicBool::new(false),
@@ -83,6 +84,9 @@ impl Default for LinuxBackend {
 }
 
 impl Backend for LinuxBackend {
+    fn desktop_enabled(&self) -> bool {
+        true
+    }
     fn cancel(&self) {
         self.cancelled
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -93,15 +97,11 @@ impl Backend for LinuxBackend {
         }
     }
     fn sleeping(&self) -> bool {
-        if let Ok(monitor) = self.sleep.lock() {
-            if let Some(monitor) = monitor.as_ref() {
-                while let Ok(Some(sleeping)) = monitor.next_event_timeout(Duration::ZERO) {
-                    self.sleeping
-                        .store(sleeping, std::sync::atomic::Ordering::SeqCst);
-                }
-            }
-        }
-        self.sleeping.load(std::sync::atomic::Ordering::SeqCst)
+        self.sleep
+            .lock()
+            .ok()
+            .and_then(|monitor| monitor.as_ref().map(|monitor| monitor.is_sleeping()))
+            .unwrap_or(false)
     }
     fn discover(&self, address: Option<&str>) -> Result<Endpoint, DaemonError> {
         let snapshot = self
