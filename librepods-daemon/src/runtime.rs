@@ -68,7 +68,8 @@ pub async fn run(
     restrict_socket(&paths.socket())?;
     owner.record_socket()?;
     let desktop_enabled = backend.desktop_enabled();
-    let session = Session::spawn_persistent(backend, config.clone(), instance, paths.clone());
+    let session =
+        Session::spawn_persistent(backend, config.clone(), instance.clone(), paths.clone());
     let (desktop_stop, desktop_shutdown) = tokio::sync::watch::channel(false);
     let desktop = if desktop_enabled {
         Some(tokio::spawn(crate::desktop::run(
@@ -85,9 +86,13 @@ pub async fn run(
     let publisher_paths = paths.clone();
     let publication_health = session.handle.publication_health.clone();
     let legacy = config.legacy_compatibility;
+    let (publisher_stop, mut publisher_shutdown) = tokio::sync::watch::channel(false);
     let publisher = tokio::spawn(async move {
         let mut previous = Vec::new();
         loop {
+            if *publisher_shutdown.borrow() {
+                break;
+            }
             let snapshot = publication.borrow_and_update().clone();
             let bytes = match serde_json::to_vec(&snapshot) {
                 Ok(bytes) => bytes,
@@ -135,22 +140,22 @@ pub async fn run(
                 }
             }
             if publication_health.borrow().is_some() {
-                tokio::select! {changed=publication.changed()=>{if changed.is_err(){break;}},_=tokio::time::sleep(Duration::from_secs(1))=>{}}
-            } else if publication.changed().await.is_err() {
-                break;
+                tokio::select! {changed=publication.changed()=>{if changed.is_err(){break;}},_=publisher_shutdown.changed()=>break,_=tokio::time::sleep(Duration::from_secs(1))=>{}}
+            } else {
+                tokio::select! {changed=publication.changed()=>{if changed.is_err(){break;}},_=publisher_shutdown.changed()=>break}
             }
         }
     });
     let permits = Arc::new(Semaphore::new(32));
     let mut clients = tokio::task::JoinSet::new();
     tokio::pin!(shutdown);
-    loop {
+    let outcome = loop {
         tokio::select! {
-            _=&mut shutdown=>break,
+            _=&mut shutdown=>break Ok(()),
             Some(_)=clients.join_next(),if !clients.is_empty()=>{},
             result=listener.accept()=>{
-                let (stream,_)=result.map_err(|e|DaemonError::io("accept",e))?;
-                let credentials=stream.peer_cred().map_err(|e|DaemonError::io("peer credentials",e))?;
+                let (stream,_) = match result { Ok(accepted)=>accepted, Err(error)=>break Err(DaemonError::io("accept", error)) };
+                let Ok(credentials)=stream.peer_cred() else {continue;};
                 // Safety: getuid has no preconditions.
                 if credentials.uid()!=unsafe{libc::getuid()}{continue;}
                 let Ok(permit)=permits.clone().try_acquire_owned() else {continue;};
@@ -160,10 +165,12 @@ pub async fn run(
                 clients.spawn(async move {let _permit=permit;let _=client_connection(stream,handle,paths,config).await;});
             },
         }
-    }
+    };
     clients.abort_all();
     while clients.join_next().await.is_some() {}
     desktop_stop.send_replace(true);
+    session.handle.stop();
+    let session_stop = tokio::task::spawn_blocking(move || session.stop());
     if let Some(mut desktop) = desktop {
         if tokio::time::timeout(Duration::from_secs(1), &mut desktop)
             .await
@@ -173,31 +180,23 @@ pub async fn run(
             let _ = desktop.await;
         }
     }
-    session.handle.stop();
-    // The platform close operation wakes pending reads before joining the owner.
-    tokio::task::spawn_blocking(move || session.stop())
+    // Both owners begin cancellation together; desktop cleanup does not delay AACP shutdown.
+    session_stop
         .await
         .map_err(|e| DaemonError::new(ErrorCode::Internal, "shutdown", e.to_string()))?;
-    publisher.abort();
+    // Wait for any atomic write already in flight before removing owned artifacts.
+    publisher_stop.send_replace(true);
     let _ = publisher.await;
     if legacy {
         if let Ok(bytes) = std::fs::read(&paths.legacy_state) {
-            if serde_json::from_slice::<serde_json::Value>(&bytes).is_ok_and(|v| {
-                v["daemon_instance"].as_str() == Some(publication_instance(&paths).as_str())
-            }) {
+            if serde_json::from_slice::<serde_json::Value>(&bytes)
+                .is_ok_and(|v| v["daemon_instance"].as_str() == Some(instance.as_str()))
+            {
                 let _ = std::fs::remove_file(&paths.legacy_state);
             }
         }
     }
-    Ok(())
-}
-
-fn publication_instance(paths: &Paths) -> String {
-    std::fs::read(paths.state_file())
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Snapshot>(&bytes).ok())
-        .map(|s| s.daemon_instance)
-        .unwrap_or_default()
+    outcome
 }
 
 async fn client_connection(
