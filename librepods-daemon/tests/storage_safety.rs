@@ -444,3 +444,70 @@ fn synthetic_disk_full_error_retains_os_cause_without_filling_a_filesystem() {
         "structured error discarded the disk-full cause"
     );
 }
+
+#[test]
+fn owner_refuses_a_live_unlocked_socket_and_reclaims_only_a_dead_socket() {
+    use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
+    let directory = tempfile::tempdir().unwrap();
+    let paths = paths(directory.path());
+    fs::create_dir_all(&paths.runtime).unwrap();
+    fs::set_permissions(&paths.runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    let listener = UnixListener::bind(paths.socket()).unwrap();
+    let original_inode = fs::metadata(paths.socket()).unwrap().ino();
+    let error = match OwnerGuard::acquire(&paths, "new-owner") {
+        Ok(_) => panic!("an unlocked live listener must still prevent takeover"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, ErrorCode::ServiceUnavailable);
+    assert_eq!(fs::metadata(paths.socket()).unwrap().ino(), original_inode);
+    // Shut down the socket itself before dropping the descriptor: parallel
+    // process fixtures can briefly inherit a CLOEXEC fd before exec closes it.
+    // Safety: listener owns a valid Unix socket descriptor throughout this call.
+    assert_eq!(
+        unsafe { libc::shutdown(listener.as_raw_fd(), libc::SHUT_RDWR) },
+        0
+    );
+    drop(listener);
+    let mut guard = OwnerGuard::acquire(&paths, "replacement").unwrap();
+    assert!(!paths.socket().exists(), "dead socket was not reclaimed");
+    // Recording an unrelated replacement must fail and must not grant cleanup
+    // ownership of that regular file.
+    fs::write(paths.socket(), b"foreign replacement").unwrap();
+    assert_eq!(
+        guard.record_socket().unwrap_err().code,
+        ErrorCode::PermissionDenied
+    );
+    drop(guard);
+    assert_eq!(fs::read(paths.socket()).unwrap(), b"foreign replacement");
+}
+
+#[test]
+fn invalid_existing_publications_and_legacy_owner_are_preserved() {
+    use librepods_daemon::storage::{publish_legacy, read_private_json};
+    let directory = tempfile::tempdir().unwrap();
+    let paths = paths(directory.path());
+    fs::create_dir_all(paths.legacy_state.parent().unwrap()).unwrap();
+    for bytes in [
+        b"broken JSON".to_vec(),
+        vec![b' '; librepods_daemon::ipc::MAX_RESPONSE_FRAME + 1],
+    ] {
+        atomic_write(&paths.legacy_state, &bytes).unwrap();
+        assert_eq!(
+            read_private_json(&paths.legacy_state).unwrap_err().code,
+            ErrorCode::InvalidInput
+        );
+        assert!(publish_legacy(&paths, "new", b"{}").is_err());
+        assert_eq!(fs::read(&paths.legacy_state).unwrap(), bytes);
+    }
+    fs::remove_file(&paths.legacy_state).unwrap();
+    fs::write(&paths.legacy_socket, b"foreign owner marker").unwrap();
+    assert_eq!(
+        publish_legacy(&paths, "new", b"{}").unwrap_err().code,
+        ErrorCode::ServiceUnavailable
+    );
+    assert!(!paths.legacy_state.exists());
+    assert_eq!(
+        fs::read(&paths.legacy_socket).unwrap(),
+        b"foreign owner marker"
+    );
+}

@@ -324,6 +324,31 @@ class CliContract(unittest.TestCase):
         self.assertEqual(json.loads(result.stderr)["code"], "invalid_input")
         self.assertFalse(self.socket.exists())
 
+    def test_invalid_or_missing_session_directories_fail_before_ipc(self):
+        baseline = self.env.copy()
+        for key in ["XDG_RUNTIME_DIR", "HOME"]:
+            with self.subTest(missing=key):
+                self.env = baseline.copy()
+                del self.env[key]
+                result = self.call("status")
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(json.loads(result.stderr)["code"], "invalid_input")
+        for key in ["XDG_RUNTIME_DIR", "XDG_STATE_HOME", "XDG_CONFIG_HOME"]:
+            with self.subTest(relative=key):
+                self.env = baseline.copy()
+                self.env[key] = "relative-session-directory"
+                result = self.call("status")
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(json.loads(result.stderr)["code"], "invalid_input")
+        self.env = baseline.copy()
+        del self.env["XDG_STATE_HOME"]
+        del self.env["XDG_CONFIG_HOME"]
+        result, request = self.exchange(["status"], self.ok)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(request["operation"], {"type": "status"})
+        self.assertFalse((Path(self.env["HOME"]) / ".config").exists(),
+                         "read-only client must not create fallback config")
+
     def test_invalid_compat_verb_is_rejected_before_connecting(self):
         result = self.call("compat", "adaptive:101")
         self.assertEqual(result.returncode, 1)
