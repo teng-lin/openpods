@@ -19,6 +19,10 @@ pub trait SessionTransport: Send + Sync {
     fn close(&self);
 }
 
+pub type AudioFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<serde_json::Value, DaemonError>> + Send>,
+>;
+
 pub trait Backend: Send + Sync {
     fn discover(&self, address: Option<&str>) -> Result<Endpoint, DaemonError>;
     fn connect(
@@ -29,6 +33,7 @@ pub trait Backend: Send + Sync {
     fn sleeping(&self) -> bool {
         false
     }
+    fn cancel(&self) {}
     fn audio(
         &self,
         _address: &str,
@@ -39,6 +44,10 @@ pub trait Backend: Send + Sync {
             "audio",
             "desktop adapter unavailable",
         ))
+    }
+    fn audio_async(&self, address: String, operation: Operation) -> AudioFuture {
+        let result = self.audio(&address, &operation);
+        Box::pin(async move { result })
     }
 }
 
@@ -57,17 +66,28 @@ impl SessionTransport for librepods_linux::l2cap::L2capLinux {
 pub struct LinuxBackend {
     sleep: std::sync::Mutex<Option<librepods_linux::sleep::SleepMonitor>>,
     sleeping: std::sync::atomic::AtomicBool,
+    monitor: Option<librepods_linux::bluez_monitor::BluezMonitor>,
+    connecting: std::sync::Mutex<Option<librepods_linux::l2cap::Cancellation>>,
 }
 impl Default for LinuxBackend {
     fn default() -> Self {
         Self {
             sleep: std::sync::Mutex::new(librepods_linux::sleep::SleepMonitor::start().ok()),
             sleeping: std::sync::atomic::AtomicBool::new(false),
+            monitor: librepods_linux::bluez_monitor::BluezMonitor::start().ok(),
+            connecting: std::sync::Mutex::new(None),
         }
     }
 }
 
 impl Backend for LinuxBackend {
+    fn cancel(&self) {
+        if let Ok(connecting) = self.connecting.lock() {
+            if let Some(cancel) = connecting.as_ref() {
+                cancel.cancel();
+            }
+        }
+    }
     fn sleeping(&self) -> bool {
         if let Ok(monitor) = self.sleep.lock() {
             if let Some(monitor) = monitor.as_ref() {
@@ -80,28 +100,17 @@ impl Backend for LinuxBackend {
         self.sleeping.load(std::sync::atomic::Ordering::SeqCst)
     }
     fn discover(&self, address: Option<&str>) -> Result<Endpoint, DaemonError> {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| DaemonError::io("discovery runtime", e))?;
-        let snapshot = rt
-            .block_on(async {
-                tokio::time::timeout(
-                    Duration::from_secs(3),
-                    librepods_linux::bluez_monitor::snapshot(),
-                )
-                .await
-            })
-            .map_err(|_| {
+        let snapshot = self
+            .monitor
+            .as_ref()
+            .ok_or_else(|| {
                 DaemonError::transient(
                     ErrorCode::AdapterUnavailable,
                     "discovery",
-                    "BlueZ query timed out",
+                    "BlueZ monitor unavailable",
                 )
             })?
-            .map_err(|e| {
-                DaemonError::transient(ErrorCode::AdapterUnavailable, "discovery", e.to_string())
-            })?;
+            .current_snapshot();
         if !snapshot.adapter_ready() {
             return Err(DaemonError::transient(
                 ErrorCode::AdapterUnavailable,
@@ -138,22 +147,28 @@ impl Backend for LinuxBackend {
         endpoint: &Endpoint,
         timeout: Duration,
     ) -> Result<Arc<dyn SessionTransport>, DaemonError> {
-        librepods_linux::l2cap::L2capLinux::connect_timeout(&endpoint.address, timeout)
-            .map(|transport| Arc::new(transport) as Arc<dyn SessionTransport>)
-            .map_err(|e| transport_error("connect", e))
+        let cancel = librepods_linux::l2cap::Cancellation::new()
+            .map_err(|e| transport_error("connect cancellation", e))?;
+        if let Ok(mut connecting) = self.connecting.lock() {
+            *connecting = Some(cancel.clone());
+        }
+        let result = librepods_linux::l2cap::L2capLinux::connect_with_cancel(
+            &endpoint.address,
+            librepods_core::protocol::packets::AAP_PSM,
+            timeout,
+            cancel,
+        )
+        .map(|transport| Arc::new(transport) as Arc<dyn SessionTransport>)
+        .map_err(|e| transport_error("connect", e));
+        if let Ok(mut connecting) = self.connecting.lock() {
+            *connecting = None;
+        }
+        result
     }
-    fn audio(
-        &self,
-        address: &str,
-        operation: &Operation,
-    ) -> Result<serde_json::Value, DaemonError> {
+    fn audio_async(&self, address: String, operation: Operation) -> AudioFuture {
         use librepods_linux::desktop::{self, AudioAction};
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| DaemonError::io("audio runtime", e))?;
-        rt.block_on(async {
-            let action = match operation {
+        Box::pin(async move {
+            let action = match &operation {
                 Operation::AudioStatus => None,
                 Operation::SetOutput(name) => {
                     Some(AudioAction::SetDefaultOutput { name: name.clone() })
@@ -171,7 +186,7 @@ impl Backend for LinuxBackend {
                     output: output.clone(),
                 }),
                 Operation::Unmute => {
-                    let snapshot = desktop::audio_snapshot(address)
+                    let snapshot = desktop::audio_snapshot(&address)
                         .await
                         .map_err(|e| transport_error("audio status", e))?;
                     let name = snapshot
@@ -201,11 +216,11 @@ impl Backend for LinuxBackend {
                 }
             };
             if let Some(action) = action {
-                desktop::audio_action(address, action)
+                desktop::audio_action(&address, action)
                     .await
                     .map_err(|e| transport_error("audio action", e))?;
             }
-            let snapshot = desktop::audio_snapshot(address)
+            let snapshot = desktop::audio_snapshot(&address)
                 .await
                 .map_err(|e| transport_error("audio status", e))?;
             serde_json::to_value(snapshot)

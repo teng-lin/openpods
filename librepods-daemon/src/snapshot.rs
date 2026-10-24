@@ -22,6 +22,10 @@ pub struct DeviceStatus {
     pub primary_in_ear: Option<bool>,
     pub secondary_in_ear: Option<bool>,
     pub reported_controls: BTreeMap<u8, [u8; 4]>,
+    pub wear: Option<librepods_core::device::state::WearReport>,
+    pub observations: BTreeMap<String, librepods_core::device::state::ObservationMeta>,
+    pub ca_event: Option<u8>,
+    pub lid_state: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,7 +108,7 @@ impl Snapshot {
             "one_bud_anc_mode":toggle(0x1B),"conversational_awareness":toggle(0x28),
             "adaptive_noise_level":d.reported_controls.get(&0x2E).map(|d|d[0]).unwrap_or(50),
             "ear_detection_behavior":match self.ear_policy {EarPolicy::OneRemoved=>0,EarPolicy::BothRemoved=>1,EarPolicy::Off=>2},
-            "lid_state":2,"daemon_instance":self.daemon_instance,"revision":self.revision,
+            "lid_state":d.lid_state.unwrap_or(2),"daemon_instance":self.daemon_instance,"revision":self.revision,
             "reconnect_attempts_total":self.retry_count})
     }
 
@@ -138,6 +142,14 @@ impl From<&DeviceState> for DeviceStatus {
                 .ear_detection_reported
                 .then_some(state.secondary_in_ear),
             reported_controls: state.reported_controls.clone(),
+            wear: state.wear,
+            observations: state.observations.clone(),
+            ca_event: None,
+            lid_state: match state.lid_state {
+                librepods_core::device::ble_advert::LidState::Open => Some(0),
+                librepods_core::device::ble_advert::LidState::Closed => Some(1),
+                librepods_core::device::ble_advert::LidState::Unknown => None,
+            },
         }
     }
 }

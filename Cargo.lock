@@ -827,6 +827,7 @@ name = "librepods-windows"
 version = "0.1.0"
 dependencies = [
  "btleplug",
+ "futures",
  "librepods-core",
  "log",
  "thiserror 2.0.18",

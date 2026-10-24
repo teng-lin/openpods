@@ -43,6 +43,8 @@ struct Active {
 #[derive(Clone)]
 pub struct SessionHandle {
     sender: mpsc::SyncSender<Envelope>,
+    backend: Arc<dyn Backend>,
+    audio_feed: watch::Sender<serde_json::Value>,
     pub status: watch::Receiver<Snapshot>,
     stopped: Arc<AtomicBool>,
     transport: Arc<Mutex<Option<Arc<dyn SessionTransport>>>>,
@@ -66,6 +68,27 @@ impl SessionHandle {
             };
         }
         let duration = Duration::from_millis(request.timeout_ms);
+        if matches!(
+            request.operation,
+            Operation::AudioStatus
+                | Operation::SetOutput(_)
+                | Operation::SetInput(_)
+                | Operation::SetProfile(_)
+                | Operation::MoveStream { .. }
+                | Operation::Unmute
+        ) {
+            let address = self.status.borrow().device.address.clone();
+            let result = tokio::time::timeout(
+                duration,
+                self.backend.audio_async(address, request.operation),
+            )
+            .await;
+            return match result {
+                Ok(Ok(value))=>{self.audio_feed.send_replace(value.clone());Response::ok(id,value)},
+                Ok(Err(error))=>Response::failed(id,error),
+                Err(_)=>Response::failed(id,DaemonError::new(ErrorCode::OutcomeUnknown,"audio","audio operation deadline elapsed; inspect status before retrying a mutation")),
+            };
+        }
         let deadline = Instant::now() + duration;
         let (reply, rx) = oneshot::channel();
         match self.sender.try_send(Envelope {
@@ -114,6 +137,7 @@ impl SessionHandle {
 
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
+        self.backend.cancel();
         if let Ok(transport) = self.transport.lock() {
             if let Some(transport) = transport.as_ref() {
                 transport.close();
@@ -134,10 +158,13 @@ impl Session {
         let mut status = Snapshot::new(instance, &state);
         status.ear_policy = config.ear_policy;
         let (status_tx, status_rx) = watch::channel(status.clone());
+        let (audio_feed, audio_updates) = watch::channel(status.audio.clone());
         let stopped = Arc::new(AtomicBool::new(false));
         let transport = Arc::new(Mutex::new(None));
         let handle = SessionHandle {
             sender,
+            backend: backend.clone(),
+            audio_feed,
             status: status_rx,
             stopped: stopped.clone(),
             transport: transport.clone(),
@@ -149,6 +176,7 @@ impl Session {
                 state,
                 status,
                 status_tx,
+                audio_updates,
                 receiver,
                 stopped,
                 transport,
@@ -192,6 +220,7 @@ struct Worker {
     state: DeviceState,
     status: Snapshot,
     status_tx: watch::Sender<Snapshot>,
+    audio_updates: watch::Receiver<serde_json::Value>,
     receiver: mpsc::Receiver<Envelope>,
     stopped: Arc<AtomicBool>,
     transport: Arc<Mutex<Option<Arc<dyn SessionTransport>>>>,
@@ -268,9 +297,9 @@ impl Worker {
         self.publish();
         let endpoint = self.backend.discover(self.config.address.as_deref())?;
         self.generation = self.generation.wrapping_add(1);
-        self.state.begin_session(self.generation);
         self.state
             .set_device_identity(&endpoint.address, &endpoint.name);
+        self.state.begin_session(self.generation);
         self.status.lifecycle = "connecting".into();
         self.publish();
         let connection = self.backend.connect(&endpoint, Duration::from_secs(3))?;
@@ -503,6 +532,10 @@ impl Worker {
     }
     fn run(&mut self) {
         while !self.stopped.load(Ordering::SeqCst) {
+            if self.audio_updates.has_changed().unwrap_or(false) {
+                self.status.audio = self.audio_updates.borrow_and_update().clone();
+                self.publish();
+            }
             while let Ok(envelope) = self.receiver.try_recv() {
                 self.enqueue(envelope);
             }
