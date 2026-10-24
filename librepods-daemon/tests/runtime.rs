@@ -244,7 +244,11 @@ impl Harness {
                     }
                 }
             }
-            assert!(Instant::now() < deadline, "status condition did not become true: {diagnostic}; server finished={}", self.task.as_ref().is_some_and(|task|task.is_finished()));
+            assert!(
+                Instant::now() < deadline,
+                "status condition did not become true: {diagnostic}; server finished={}",
+                self.task.as_ref().is_some_and(|task| task.is_finished())
+            );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
@@ -462,6 +466,338 @@ async fn preferences_persist_and_legacy_publication_cleans_up_on_shutdown() {
     assert!(!legacy.exists(), "owned legacy snapshot survives stop");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_during_handshake_is_bounded_and_an_existing_owner_is_preserved() {
+    let shared = Arc::new(Shared::default());
+    shared.no_handshake.store(true, Ordering::SeqCst);
+    let harness = Harness::start(shared, Config::default()).await;
+    harness
+        .wait_for(|status| status.lifecycle == "awaiting_handshake")
+        .await;
+    let duplicate = tokio::time::timeout(
+        Duration::from_secs(1),
+        runtime::run(
+            harness.paths.clone(),
+            Config::default(),
+            Arc::new(EmulatedBackend(Arc::new(Shared::default()))),
+            async {},
+        ),
+    )
+    .await
+    .expect("duplicate refusal");
+    assert_eq!(
+        duplicate.expect_err("owner already running").code,
+        ErrorCode::ServiceUnavailable
+    );
+    assert!(
+        harness.paths.socket().exists(),
+        "rejected owner removed the active socket"
+    );
+    harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watch_stream_tracks_real_updates_and_rejects_oversized_requests() {
+    let harness = Harness::start(Arc::new(Shared::default()), Config::default()).await;
+    harness.ready().await;
+    let mut watcher = UnixStream::connect(harness.paths.socket())
+        .await
+        .expect("watch connection");
+    let mut bytes = serde_json::to_vec(&Request {
+        version: 1,
+        id: 60,
+        timeout_ms: 1000,
+        operation: Operation::Watch,
+    })
+    .expect("watch JSON");
+    bytes.push(b'\n');
+    watcher.write_all(&bytes).await.expect("watch request");
+    let first = runtime::read_frame(&mut watcher)
+        .await
+        .expect("snapshot frame")
+        .expect("first snapshot");
+    let first: Response = serde_json::from_slice(&first).expect("response");
+    let first: Snapshot =
+        serde_json::from_value(first.result.expect("snapshot")).expect("snapshot schema");
+    let peer = harness
+        .shared
+        .peers
+        .lock()
+        .expect("peers")
+        .last()
+        .expect("peer")
+        .clone();
+    peer.push(ControlCommand::create(0x3E, &[2, 0, 0, 0]).to_vec());
+    let next = tokio::time::timeout(Duration::from_secs(1), runtime::read_frame(&mut watcher))
+        .await
+        .expect("watch update")
+        .expect("frame")
+        .expect("updated snapshot");
+    let next: Response = serde_json::from_slice(&next).expect("response");
+    let next: Snapshot =
+        serde_json::from_value(next.result.expect("snapshot")).expect("snapshot schema");
+    assert!(next.revision > first.revision);
+    assert_eq!(
+        next.device.reported_controls.get(&0x3E),
+        Some(&[2, 0, 0, 0])
+    );
+    let mut oversized = UnixStream::connect(harness.paths.socket())
+        .await
+        .expect("oversized connection");
+    oversized
+        .write_all(&vec![b' '; librepods_daemon::ipc::MAX_FRAME + 1])
+        .await
+        .expect("oversized request");
+    let reply = runtime::read_frame(&mut oversized)
+        .await
+        .expect("error frame")
+        .expect("error response");
+    let reply: Response = serde_json::from_slice(&reply).expect("typed error");
+    assert_eq!(
+        reply.error.expect("oversize refusal").code,
+        ErrorCode::InvalidInput
+    );
+    drop(watcher);
+    harness.stop().await;
+}
+
+async fn wait_for_change_count(shared: &Shared, count: usize) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while shared.changes.lock().expect("changes").len() < count {
+        assert!(
+            Instant::now() < deadline,
+            "expected mutation was not dispatched"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn expired_queued_requests_are_never_written_later() {
+    let shared = Arc::new(Shared::default());
+    let harness = Harness::start(shared.clone(), Config::default()).await;
+    harness.ready().await;
+    shared.lose_ack.store(true, Ordering::SeqCst);
+    let paths = harness.paths.clone();
+    let active = tokio::spawn(async move {
+        runtime::request(
+            &paths,
+            &Request {
+                version: 1,
+                id: 70,
+                timeout_ms: 1000,
+                operation: Operation::Change(SettingChange::ListeningMode(
+                    NoiseControlMode::Transparency,
+                )),
+            },
+        )
+        .await
+    });
+    wait_for_change_count(&shared, 1).await;
+    let queued = runtime::request(
+        &harness.paths,
+        &Request {
+            version: 1,
+            id: 71,
+            timeout_ms: 100,
+            operation: Operation::Change(SettingChange::ConversationalAwareness(false)),
+        },
+    )
+    .await;
+    assert!(queued.is_err() || queued.expect("response").error.is_some());
+    shared.lose_ack.store(false, Ordering::SeqCst);
+    shared
+        .peers
+        .lock()
+        .expect("peers")
+        .last()
+        .expect("peer")
+        .push(packets::build_noise_control(NoiseControlMode::Transparency).to_vec());
+    assert!(active
+        .await
+        .expect("client task")
+        .expect("active response")
+        .error
+        .is_none());
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert_eq!(
+        shared.changes.lock().expect("changes").len(),
+        1,
+        "expired queued mutation was written"
+    );
+    harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disconnected_queued_client_cannot_cause_a_late_mutation() {
+    let shared = Arc::new(Shared::default());
+    let harness = Harness::start(shared.clone(), Config::default()).await;
+    harness.ready().await;
+    shared.lose_ack.store(true, Ordering::SeqCst);
+    let paths = harness.paths.clone();
+    let active = tokio::spawn(async move {
+        runtime::request(
+            &paths,
+            &Request {
+                version: 1,
+                id: 80,
+                timeout_ms: 1000,
+                operation: Operation::Change(SettingChange::ListeningMode(
+                    NoiseControlMode::Transparency,
+                )),
+            },
+        )
+        .await
+    });
+    wait_for_change_count(&shared, 1).await;
+    let mut queued = UnixStream::connect(harness.paths.socket())
+        .await
+        .expect("queued client");
+    let mut bytes = serde_json::to_vec(&Request {
+        version: 1,
+        id: 81,
+        timeout_ms: 1000,
+        operation: Operation::Change(SettingChange::ConversationalAwareness(false)),
+    })
+    .expect("queued JSON");
+    bytes.push(b'\n');
+    queued.write_all(&bytes).await.expect("queued request");
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    drop(queued);
+    shared.lose_ack.store(false, Ordering::SeqCst);
+    shared
+        .peers
+        .lock()
+        .expect("peers")
+        .last()
+        .expect("peer")
+        .push(packets::build_noise_control(NoiseControlMode::Transparency).to_vec());
+    assert!(active
+        .await
+        .expect("client task")
+        .expect("active response")
+        .error
+        .is_none());
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert_eq!(
+        shared.changes.lock().expect("changes").len(),
+        1,
+        "disconnected queued client caused a write"
+    );
+    harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_preserves_an_unexpected_file_replacing_the_socket() {
+    let mut harness = Harness::start(Arc::new(Shared::default()), Config::default()).await;
+    harness.ready().await;
+    let socket = harness.paths.socket();
+    std::fs::remove_file(&socket).expect("remove test socket pathname");
+    std::fs::write(&socket, b"unexpected replacement").expect("replacement file");
+    harness
+        .shutdown
+        .take()
+        .expect("shutdown sender")
+        .send(())
+        .expect("shutdown request");
+    harness
+        .task
+        .take()
+        .expect("server task")
+        .await
+        .expect("server join")
+        .expect("server result");
+    assert_eq!(
+        std::fs::read(&socket).expect("unowned replacement must survive"),
+        b"unexpected replacement"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_only_request_timeout_is_not_reported_as_an_uncertain_mutation() {
+    let directory = TempDir::new().expect("test directory");
+    let paths = Paths {
+        runtime: directory.path().join("run"),
+        state: directory.path().join("state"),
+        config: directory.path().join("config.json"),
+        legacy_state: directory.path().join("legacy.json"),
+        legacy_socket: directory.path().join("legacy.sock"),
+    };
+    std::fs::create_dir(&paths.runtime).expect("runtime directory");
+    let listener = tokio::net::UnixListener::bind(paths.socket()).expect("unresponsive server");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("client");
+        let _ = runtime::read_frame(&mut stream).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    });
+    let error = runtime::request(
+        &paths,
+        &Request {
+            version: 1,
+            id: 90,
+            timeout_ms: 100,
+            operation: Operation::Status,
+        },
+    )
+    .await
+    .expect_err("read timeout");
+    assert_eq!(
+        error.code,
+        ErrorCode::CommandTimeout,
+        "a read-only request cannot have mutated the device"
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publication_failure_is_visible_without_breaking_control() {
+    let harness = Harness::start(Arc::new(Shared::default()), Config::default()).await;
+    let settled = harness
+        .wait_for(|snapshot| snapshot.device.reported_controls.contains_key(&0x1B))
+        .await;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let published = std::fs::read(harness.paths.state_file())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Snapshot>(&bytes).ok());
+        if published.is_some_and(|snapshot| snapshot.revision == settled.revision) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "initial publication not settled");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    std::fs::remove_file(harness.paths.state_file()).expect("remove test snapshot");
+    std::fs::create_dir(harness.paths.state_file()).expect("inject rename failure");
+    harness
+        .shared
+        .peers
+        .lock()
+        .expect("peers")
+        .last()
+        .expect("peer")
+        .push(ControlCommand::create(0x3E, &[2, 0, 0, 0]).to_vec());
+    let degraded = harness
+        .wait_for(|snapshot| snapshot.publication_error.is_some())
+        .await;
+    assert!(degraded.connected, "publication failure broke AACP");
+    std::fs::remove_dir(harness.paths.state_file()).expect("remove injected obstacle");
+    let response = harness
+        .request(
+            91,
+            Operation::Change(SettingChange::ListeningMode(NoiseControlMode::Transparency)),
+            1000,
+        )
+        .await;
+    assert!(
+        response.error.is_none(),
+        "control failed during publication degradation"
+    );
+    harness
+        .wait_for(|snapshot| snapshot.publication_error.is_none())
+        .await;
+    harness.stop().await;
+}
+
 #[test]
 fn actual_serializer_generates_legacy_consumer_fixtures() {
     let output = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/compat-fixtures");
@@ -485,7 +821,10 @@ fn actual_serializer_generates_legacy_consumer_fixtures() {
     let mut connected = Snapshot::new("fixture-instance".into(), &state);
     connected.connected = true;
     assert_eq!(connected.device.model_number, "A3048");
-    assert_eq!(connected.device.listening_mode, Some(NoiseControlMode::NoiseCancellation));
+    assert_eq!(
+        connected.device.listening_mode,
+        Some(NoiseControlMode::NoiseCancellation)
+    );
     assert_eq!(connected.device.battery.left.level, 100);
     std::fs::write(
         output.join("pro2.json"),
