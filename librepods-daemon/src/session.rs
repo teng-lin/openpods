@@ -18,7 +18,7 @@ use librepods_core::{
     protocol::{
         handshake::{Handshake, HandshakeAction, HandshakeStage},
         parser,
-        settings::{CommandAction, CommandOutcome, PendingChange},
+        settings::{CommandAction, CommandOutcome, CommandRejection, PendingChange},
     },
     transport::TransportError,
 };
@@ -107,10 +107,7 @@ impl SessionHandle {
             let status = self.status.borrow().clone();
             return match request.operation {
                 Operation::Capabilities => Response::ok(id, status.capabilities()),
-                Operation::Doctor => Response::ok(
-                    id,
-                    serde_json::json!({"lifecycle":status.lifecycle,"adapter_ready":status.adapter_ready,"bluez_connected":status.bluez_connected,"aacp_ready":status.connected,"last_error":status.last_error,"ble":status.ble,"queue_depth":status.queue_depth}),
-                ),
+                Operation::Doctor => Response::ok(id, status.doctor()),
                 _ => Response::snapshot(id, &status),
             };
         }
@@ -612,10 +609,15 @@ impl Worker {
             self.telemetry.pause_for_connection()?;
         }
         self.publish();
-        let connection = self.backend.connect(
-            &endpoint,
-            self.connection_budget(readback, Duration::from_secs(3))?,
-        )?;
+        let timeout = self.connection_budget(readback, Duration::from_secs(3))?;
+        if readback.is_some() {
+            self.status.readback_attempts_total =
+                self.status.readback_attempts_total.saturating_add(1);
+        } else if self.generation > 1 {
+            self.status.reconnect_attempts_total =
+                self.status.reconnect_attempts_total.saturating_add(1);
+        }
+        let connection = self.backend.connect(&endpoint, timeout)?;
         if let Err(error) = self.connection_budget(readback, Duration::from_secs(1)) {
             connection.close();
             return Err(error);
@@ -721,11 +723,17 @@ impl Worker {
                             CommandOutcome::OutcomeUnknown => ErrorCode::OutcomeUnknown,
                             CommandOutcome::TimedOut => ErrorCode::CommandTimeout,
                             CommandOutcome::Superseded => ErrorCode::Superseded,
+                            CommandOutcome::Rejected(
+                                CommandRejection::InvalidValue | CommandRejection::NotAdaptive,
+                            ) => ErrorCode::InvalidInput,
                             CommandOutcome::Rejected(_) => ErrorCode::Unsupported,
                             _ => ErrorCode::Cancelled,
                         },
                         "command",
-                        format!("{outcome:?}"),
+                        match outcome {
+                            CommandOutcome::Rejected(reason) => reason.to_string(),
+                            _ => format!("{outcome:?}"),
+                        },
                     ),
                 ),
             },
@@ -814,8 +822,18 @@ impl Worker {
                             }
                         }
                         Err(error) => {
-                            self.status.last_error = Some(error);
-                            resumed.pending.transport_lost()
+                            // Keep the immediate cause in the correlated reply: a later
+                            // successful recovery may clear the current status error.
+                            resumed.pending.transport_lost();
+                            self.disconnect();
+                            self.error(error.clone());
+                            self.schedule_retry();
+                            let _ = resumed.envelope.reply.send(Response::failed(
+                                resumed.envelope.request.id,
+                                DaemonError::new(ErrorCode::OutcomeUnknown,error.stage,
+                                    format!("setting was written once but readback failed ({:?}): {}; inspect status before retrying",error.code,error.message)),
+                            ));
+                            return;
                         }
                     };
                     active = resumed;
@@ -826,12 +844,13 @@ impl Worker {
                         active.envelope.request.id,
                         CommandAction::Complete(outcome),
                     );
-                    let _ = active.envelope.reply.send(response);
                     if uncertain {
                         self.disconnect();
                         self.schedule_retry();
                     }
                     self.publish();
+                    // A completed request must never race an older public snapshot.
+                    let _ = active.envelope.reply.send(response);
                     return;
                 }
             }
@@ -892,10 +911,7 @@ impl Worker {
         let response = match &envelope.request.operation {
             Operation::Status | Operation::Watch => Response::snapshot(id, &self.status),
             Operation::Capabilities => Response::ok(id, self.status.capabilities()),
-            Operation::Doctor => Response::ok(
-                id,
-                serde_json::json!({"lifecycle":self.status.lifecycle,"adapter_ready":self.status.adapter_ready,"bluez_connected":self.status.bluez_connected,"aacp_ready":self.status.connected,"last_error":self.status.last_error,"ble":self.status.ble,"queue_depth":self.status.queue_depth}),
-            ),
+            Operation::Doctor => Response::ok(id, self.status.doctor()),
             Operation::Change(change) => {
                 if !self.status.connected {
                     let _ = envelope.reply.send(Response::failed(

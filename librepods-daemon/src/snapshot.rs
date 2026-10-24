@@ -53,6 +53,10 @@ pub struct Snapshot {
     pub device: DeviceStatus,
     pub ear_policy: EarPolicy,
     pub retry_count: u32,
+    #[serde(default)]
+    pub reconnect_attempts_total: u64,
+    #[serde(default)]
+    pub readback_attempts_total: u64,
     pub retry_at_ms: Option<u64>,
     pub queue_depth: usize,
     pub malformed_frames: u64,
@@ -80,6 +84,8 @@ impl Snapshot {
             device: DeviceStatus::from(state),
             ear_policy: EarPolicy::Off,
             retry_count: 0,
+            reconnect_attempts_total: 0,
+            readback_attempts_total: 0,
             retry_at_ms: None,
             queue_depth: 0,
             malformed_frames: 0,
@@ -169,7 +175,7 @@ impl Snapshot {
             "adaptive_noise_level":d.reported_controls.get(&0x2E).map(|d|d[0]).unwrap_or(50),
             "ear_detection_behavior":match self.ear_policy {EarPolicy::OneRemoved=>0,EarPolicy::BothRemoved=>1,EarPolicy::Off=>2},
             "lid_state":d.lid_state.unwrap_or(2),"daemon_instance":self.daemon_instance,"revision":self.revision,
-            "reconnect_attempts_total":self.retry_count})
+            "reconnect_attempts_total":self.reconnect_attempts_total})
     }
 
     pub fn capabilities(&self) -> Value {
@@ -177,6 +183,20 @@ impl Snapshot {
         json!({"noise_control":capabilities.noise_control,"noise_off":capabilities.noise_off,
             "adaptive":capabilities.adaptive,"conversational_awareness":capabilities.conversational_awareness,
             "one_bud_anc":capabilities.one_bud_anc,"ble":cfg!(feature="ble")})
+    }
+
+    pub fn doctor(&self) -> Value {
+        json!({
+            "lifecycle": self.lifecycle,
+            "adapter_ready": self.adapter_ready,
+            "bluez_connected": self.bluez_connected,
+            "aacp_ready": self.connected,
+            "last_error": self.last_error,
+            "ble": self.ble,
+            "queue_depth": self.queue_depth,
+            "reconnect_attempts_total": self.reconnect_attempts_total,
+            "readback_attempts_total": self.readback_attempts_total,
+        })
     }
 }
 
