@@ -4,6 +4,9 @@ import importlib.util
 import json
 from pathlib import Path
 import stat
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -19,7 +22,7 @@ class Installation(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
-        self.prefix = self.root / "prefix with space%"
+        self.prefix = self.root / "prefix with space%${PODS_TEST}"
         self.unit_dir = self.prefix / "share/systemd/user"
         self.binary = self.root / "built-binary"
         self.binary.write_bytes(b"test binary\n")
@@ -33,7 +36,7 @@ class Installation(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(manifest.stat().st_mode), 0o600)
         unit = (self.unit_dir / installer.UNIT).read_text()
         self.assertIn('ExecStart="', unit)
-        self.assertIn("space%%", unit)
+        self.assertIn("space%%${PODS_TEST}", unit)
         self.assertIn("NoNewPrivileges=yes", unit)
         self.assertIn("CapabilityBoundingSet=\n", unit)
         self.assertIn("RuntimeDirectoryMode=0700", unit)
@@ -44,6 +47,13 @@ class Installation(unittest.TestCase):
         self.assertFalse(installed.exists())
         self.assertFalse(manifest.exists())
         self.assertEqual(settings.read_text(), "user settings")
+
+    @unittest.skipUnless(shutil.which("systemd-analyze"), "systemd parser unavailable")
+    def test_rendered_unit_accepts_literal_space_percent_and_dollar_path(self):
+        installer.install(self.prefix, Path(sys.executable), self.unit_dir)
+        result = subprocess.run(["systemd-analyze", "--user", "verify",
+            str(self.unit_dir / installer.UNIT)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_modified_and_unowned_files_are_not_overwritten_or_removed(self):
         installer.install(self.prefix, self.binary, self.unit_dir)
