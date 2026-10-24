@@ -168,6 +168,43 @@ impl L2capTransport for L2capLinux {
         Ok(())
     }
 
+    fn recv_timeout(
+        &self,
+        buf: &mut [u8],
+        timeout: std::time::Duration,
+    ) -> Result<usize, TransportError> {
+        let started = std::time::Instant::now();
+        loop {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(TransportError::new("AirPods response timed out"));
+            }
+            let mut descriptor = libc::pollfd {
+                fd: self.fd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let millis = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+            // Safety: descriptor points to one initialized pollfd for this owned socket.
+            let result = unsafe { libc::poll(&mut descriptor, 1, millis) };
+            if result > 0 {
+                if descriptor.revents & libc::POLLIN != 0 {
+                    return self.recv(buf);
+                }
+                return Err(TransportError::new(
+                    "AirPods control socket closed or failed",
+                ));
+            }
+            if result == 0 {
+                return Err(TransportError::new("AirPods response timed out"));
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EINTR) {
+                return Err(TransportError::with_source("L2CAP poll failed", error));
+            }
+        }
+    }
+
     fn is_connected(&self) -> bool {
         self.connected.load(Ordering::Relaxed)
     }

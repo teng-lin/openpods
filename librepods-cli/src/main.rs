@@ -13,11 +13,14 @@
 
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{ArgGroup, Parser, ValueEnum};
 use librepods_core::device::ble_advert;
 use librepods_core::device::state::{model_from_number, DeviceState};
+use librepods_core::protocol::settings::{change_setting, ChangeOutcome, SettingChange};
 use librepods_core::protocol::{packets, parser};
 use librepods_core::transport::{BleScanner, DeviceMonitor, L2capTransport, MediaControl};
+
+mod status;
 
 // ---------------------------------------------------------------------------
 // Platform selection
@@ -48,6 +51,7 @@ compile_error!("librepods-cli currently supports only Linux and Windows targets"
 
 #[derive(Parser)]
 #[command(name = "librepods", about = "LibrePods CLI daemon")]
+#[command(group(ArgGroup::new("change").args(["noise_control", "conversation_awareness", "one_bud_anc"])))]
 struct Cli {
     /// Bluetooth address to connect to directly (e.g. "AA:BB:CC:DD:EE:FF").
     /// If not given, will auto-detect via BlueZ.
@@ -66,11 +70,73 @@ struct Cli {
     /// Disable media control (no auto play/pause, no A2DP activation).
     #[arg(long)]
     no_media: bool,
+
+    /// Show live reported status and settings without changing audio routing.
+    #[arg(long, conflicts_with = "scan")]
+    status: bool,
+
+    /// Set listening mode, wait for confirmation, then exit (or continue --status).
+    #[arg(long, value_enum, conflicts_with = "scan")]
+    noise_control: Option<NoiseMode>,
+
+    /// Enable or disable Conversational Awareness.
+    #[arg(long, value_enum, conflicts_with = "scan")]
+    conversation_awareness: Option<Toggle>,
+
+    /// Allow ANC while wearing a single earbud.
+    #[arg(long, value_enum, conflicts_with = "scan")]
+    one_bud_anc: Option<Toggle>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum NoiseMode {
+    #[value(alias = "on")]
+    Anc,
+    Off,
+    Transparency,
+    Adaptive,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Toggle {
+    On,
+    Off,
+}
+
+impl Cli {
+    fn setting_change(&self) -> Option<SettingChange> {
+        use librepods_core::device::state::NoiseControlMode;
+        self.noise_control
+            .map(|mode| {
+                SettingChange::ListeningMode(match mode {
+                    NoiseMode::Anc => NoiseControlMode::NoiseCancellation,
+                    NoiseMode::Off => NoiseControlMode::Off,
+                    NoiseMode::Transparency => NoiseControlMode::Transparency,
+                    NoiseMode::Adaptive => NoiseControlMode::Adaptive,
+                })
+            })
+            .or_else(|| {
+                self.conversation_awareness.map(|value| {
+                    SettingChange::ConversationalAwareness(matches!(value, Toggle::On))
+                })
+            })
+            .or_else(|| {
+                self.one_bud_anc
+                    .map(|value| SettingChange::SingleEarbudAnc(matches!(value, Toggle::On)))
+            })
+    }
 }
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let cli = Cli::parse();
+    let change = cli.setting_change();
+    let default_filter = if cli.status || change.is_some() {
+        "error"
+    } else {
+        "info"
+    };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_filter))
+        .init();
 
     if cli.scan {
         run_ble_scan();
@@ -123,7 +189,7 @@ fn main() {
         ..DeviceState::default()
     };
 
-    let media: Option<Box<dyn MediaControl>> = if cli.no_media {
+    let media: Option<Box<dyn MediaControl>> = if cli.no_media || cli.status || change.is_some() {
         log::info!("Media control disabled (--no-media)");
         None
     } else {
@@ -132,11 +198,22 @@ fn main() {
         Some(Box::new(mc))
     };
 
-    if let Err(e) = run_connection(transport.as_ref(), &mut state, media.as_deref()) {
+    if let Err(e) = run_connection(
+        transport.as_ref(),
+        &mut state,
+        media.as_deref(),
+        cli.status,
+        change,
+    ) {
         log::error!("Connection ended: {e}");
+        std::process::exit(1);
     }
 
-    log::info!("Disconnected. Final state: {state:#?}");
+    if cli.status {
+        eprintln!("AirPods control connection ended.");
+    } else {
+        log::info!("Disconnected. Final state: {state:#?}");
+    }
 }
 
 /// BLE scan mode: discover nearby AirPods via BLE advertisements and print their info.
@@ -342,6 +419,8 @@ fn run_connection(
     transport: &dyn L2capTransport,
     state: &mut DeviceState,
     media: Option<&dyn MediaControl>,
+    show_status: bool,
+    change: Option<SettingChange>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // --- Handshake sequence ---
 
@@ -351,7 +430,11 @@ fn run_connection(
 
     // 2. Wait for handshake ACK, then send SET_SPECIFIC_FEATURES
     let mut buf = [0u8; 1024];
-    let n = transport.recv(&mut buf)?;
+    let n = if change.is_some() {
+        transport.recv_timeout(&mut buf, Duration::from_secs(5))?
+    } else {
+        transport.recv(&mut buf)?
+    };
     let pkt = &buf[..n];
     log::debug!("Received {} bytes: {:02X?}", n, pkt);
 
@@ -368,7 +451,11 @@ fn run_connection(
     }
 
     // 3. Wait for features ACK, then send REQUEST_NOTIFICATIONS
-    let n = transport.recv(&mut buf)?;
+    let n = if change.is_some() {
+        transport.recv_timeout(&mut buf, Duration::from_secs(5))?
+    } else {
+        transport.recv(&mut buf)?
+    };
     let pkt = &buf[..n];
     log::debug!("Received {} bytes: {:02X?}", n, pkt);
 
@@ -385,13 +472,35 @@ fn run_connection(
 
     log::info!("Handshake complete. Entering receive loop...");
 
+    if let Some(change) = change {
+        let outcome = change_setting(transport, change, Duration::from_secs(5), |packet| {
+            apply_to_state(state, packet);
+        })?;
+        println!(
+            "{}: {change}",
+            match outcome {
+                ChangeOutcome::Confirmed => "Confirmed",
+                ChangeOutcome::AlreadySet => "Already set",
+            }
+        );
+        if !show_status {
+            return Ok(());
+        }
+    }
+
     // Start head-tracking sensor streaming. Best-effort: devices without
     // spatial audio support simply ignore the packet.
-    if let Err(e) = transport.send(&packets::HEAD_TRACKING_START) {
-        log::warn!("Failed to start head tracking (continuing): {e}");
+    if !show_status {
+        if let Err(e) = transport.send(&packets::HEAD_TRACKING_START) {
+            log::warn!("Failed to start head tracking (continuing): {e}");
+        }
     }
 
     let mut ear_mc = media.map(EarMediaController::new);
+    let mut display = status::Display::new();
+    if show_status {
+        display.update(state)?;
+    }
 
     // --- Main receive loop ---
     loop {
@@ -431,6 +540,9 @@ fn run_connection(
                 };
 
                 apply_to_state(state, parsed);
+                if show_status {
+                    display.update(state)?;
+                }
 
                 if is_first_metadata {
                     if let Some(emc) = ear_mc.as_mut() {
@@ -451,7 +563,9 @@ fn run_connection(
     }
 
     // Cleanup: stop head tracking (best-effort) and release the audio output.
-    let _ = transport.send(&packets::HEAD_TRACKING_STOP);
+    if !show_status {
+        let _ = transport.send(&packets::HEAD_TRACKING_STOP);
+    }
     if let Some(emc) = ear_mc.as_ref() {
         emc.cleanup();
     }
@@ -482,11 +596,13 @@ fn apply_to_state(state: &mut DeviceState, packet: parser::ParsedPacket) {
             );
             state.primary_in_ear = primary_in_ear;
             state.secondary_in_ear = secondary_in_ear;
+            state.ear_detection_reported = true;
         }
 
         parser::ParsedPacket::NoiseControl(mode) => {
             log::info!("Noise control mode: {mode:?}");
             state.noise_control = mode;
+            state.noise_control_reported = true;
         }
 
         parser::ParsedPacket::ConversationalAwareness { status } => {
@@ -494,6 +610,7 @@ fn apply_to_state(state: &mut DeviceState, packet: parser::ParsedPacket) {
         }
 
         parser::ParsedPacket::ControlCommand { id, data } => {
+            state.reported_controls.insert(id.as_byte(), data);
             log::info!("Control command: {id:?} data={data:02X?}");
 
             // Update specific state fields based on the command
@@ -564,6 +681,13 @@ fn apply_to_state(state: &mut DeviceState, packet: parser::ParsedPacket) {
         }
 
         parser::ParsedPacket::Unknown(data) => {
+            use librepods_core::protocol::control_command::ControlCommand;
+            if let (Some(id), Some(value)) = (
+                ControlCommand::parse_id(&data),
+                ControlCommand::parse_data(&data),
+            ) {
+                state.reported_controls.insert(id, value);
+            }
             log::debug!(
                 "Unknown packet ({} bytes): {}",
                 data.len(),
@@ -573,5 +697,55 @@ fn apply_to_state(state: &mut DeviceState, packet: parser::ParsedPacket) {
                     .join(" ")
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use librepods_core::protocol::control_command::ControlCommand;
+
+    #[test]
+    fn change_options_accept_supported_values_and_reject_conflicting_actions() {
+        assert!(Cli::try_parse_from(["librepods", "--noise-control", "anc"]).is_ok());
+        assert!(Cli::try_parse_from(["librepods", "--noise-control", "on", "--status"]).is_ok());
+        assert!(Cli::try_parse_from(["librepods", "--conversation-awareness", "off"]).is_ok());
+        assert!(Cli::try_parse_from(["librepods", "--noise-control", "invalid"]).is_err());
+        assert!(Cli::try_parse_from([
+            "librepods",
+            "--noise-control",
+            "off",
+            "--conversation-awareness",
+            "on"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from(["librepods", "--scan", "--one-bud-anc", "on"]).is_err());
+    }
+
+    #[test]
+    fn unknown_control_notifications_reach_the_display_state() {
+        let mut state = DeviceState::default();
+        let packet = ControlCommand::create(0x3E, &[1, 2, 3, 4]);
+        let parsed = parser::parse(&packet).expect("unknown control should remain a packet");
+        apply_to_state(&mut state, parsed);
+        assert_eq!(state.reported_controls.get(&0x3E), Some(&[1, 2, 3, 4]));
+        assert!(!state.noise_control_reported);
+        assert!(!state.ear_detection_reported);
+    }
+
+    #[test]
+    fn settings_and_measurements_are_only_marked_reported_after_notifications() {
+        let mut state = DeviceState::default();
+        let packet = ControlCommand::enabled(0x28);
+        apply_to_state(&mut state, parser::parse(&packet).expect("valid setting"));
+        assert_eq!(state.reported_controls.get(&0x28), Some(&[1, 0, 0, 0]));
+        let packet = packets::build_noise_control(
+            librepods_core::device::state::NoiseControlMode::NoiseCancellation,
+        );
+        apply_to_state(&mut state, parser::parse(&packet).expect("valid mode"));
+        assert!(state.noise_control_reported);
+        state.reset();
+        assert!(state.reported_controls.is_empty());
+        assert!(!state.noise_control_reported);
     }
 }

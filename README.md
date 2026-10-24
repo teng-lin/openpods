@@ -236,6 +236,45 @@ Example output:
 └─────────────────────────────────────────────
 ```
 
+### Live terminal status
+
+```bash
+./target/debug/librepods-cli --status --address AA:BB:CC:DD:EE:FF
+```
+
+Shows device details, earbud and case battery, listening mode, ear detection,
+and all received control settings. The terminal refreshes when reported values
+change; redirected output contains plain-text snapshots. Press Ctrl+C to exit.
+Status mode disables media automation and does not start head-tracking streaming.
+
+Missing readings are shown as **Unavailable** or **Not reported**, rather than
+default values. Settings include their identifier and all four raw hexadecimal
+bytes; unknown identifiers are retained. Only known boolean settings are labeled
+Enabled/Disabled. This displays notifications received from the AirPods, not an
+exhaustive inventory of every setting supported by their firmware.
+
+### Change listening mode and settings
+
+```bash
+./target/debug/librepods-cli --address AA:BB:CC:DD:EE:FF --noise-control anc
+./target/debug/librepods-cli --address AA:BB:CC:DD:EE:FF --noise-control off
+./target/debug/librepods-cli --address AA:BB:CC:DD:EE:FF --noise-control transparency
+./target/debug/librepods-cli --address AA:BB:CC:DD:EE:FF --noise-control adaptive
+./target/debug/librepods-cli --address AA:BB:CC:DD:EE:FF --conversation-awareness on
+./target/debug/librepods-cli --address AA:BB:CC:DD:EE:FF --one-bud-anc off
+```
+
+Choose one setting per invocation. Toggle options accept `on` or `off`;
+`--noise-control on` is an alias for `anc`. Commands disable media automation,
+observe the initial setting, and wait up to five seconds for confirmation.
+Already-matching values need no write. A missing acknowledgement returns an
+error and a nonzero exit status. These bounded setting exchanges currently
+require the Linux transport. Stop any existing monitor before opening a separate
+command connection. Add `--status` to keep showing live status after confirmation.
+
+The AirPods must accept the mode: wear the earbuds, and enable **Off Listening
+Mode** in Apple's settings first if the firmware refuses `off`.
+
 ## CLI Options
 
 ```
@@ -246,6 +285,10 @@ Options:
       --retries <RETRIES>  Maximum connection retry attempts [default: 3]
   -s, --scan               Scan for nearby AirPods via BLE advertisements
       --no-media           Disable media control (no auto play/pause)
+      --status             Show live status and settings; disables media automation
+      --noise-control <MODE>  anc (or on), off, transparency, adaptive
+      --conversation-awareness <VALUE>  on, off
+      --one-bud-anc <VALUE>   on, off
   -h, --help               Print help
 ```
 
@@ -492,6 +535,10 @@ bluetoothctl
 ```
 
 ## Development
+
+See the [Rust daemon port and reliability plan](plans/rust-daemon-port.md) for
+the feature parity map, optional BLE design, recovery architecture, test strategy,
+and phased acceptance criteria.
 
 ```bash
 # Run with debug logging

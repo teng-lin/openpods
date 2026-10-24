@@ -9,6 +9,7 @@
 //! - `enums.h` — `NoiseControlMode`, `AirPodsModel`, `parseModelNumber()`
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::device::battery::BatteryInfo;
 
@@ -125,6 +126,14 @@ pub struct DeviceState {
     pub adaptive_noise_level: u8,
     pub one_bud_anc: bool,
 
+    /// Settings actually reported during this connection, including unknown identifiers.
+    #[serde(default)]
+    pub reported_controls: BTreeMap<u8, [u8; 4]>,
+    #[serde(default)]
+    pub noise_control_reported: bool,
+    #[serde(default)]
+    pub ear_detection_reported: bool,
+
     /// Identity Resolving Key for BLE RPA verification (16 bytes).
     pub magic_acc_irk: Option<[u8; 16]>,
     /// Encryption key for BLE ad battery decryption (16 bytes).
@@ -146,6 +155,9 @@ impl Default for DeviceState {
             secondary_in_ear: false,
             adaptive_noise_level: 50,
             one_bud_anc: false,
+            reported_controls: BTreeMap::new(),
+            noise_control_reported: false,
+            ear_detection_reported: false,
             magic_acc_irk: None,
             magic_acc_enc_key: None,
         }

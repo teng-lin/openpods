@@ -75,6 +75,18 @@ pub trait L2capTransport: Send + Sync {
     /// Receive bytes from the L2CAP connection. Returns number of bytes read.
     fn recv(&self, buf: &mut [u8]) -> Result<usize, TransportError>;
 
+    /// Receive one packet within a bounded wait. Unsupported transports fail
+    /// before a setting is changed rather than silently waiting indefinitely.
+    fn recv_timeout(
+        &self,
+        _buf: &mut [u8],
+        _timeout: std::time::Duration,
+    ) -> Result<usize, TransportError> {
+        Err(TransportError::new(
+            "timed receive is unavailable on this transport",
+        ))
+    }
+
     /// Close the connection.
     fn close(&self) -> Result<(), TransportError>;
 

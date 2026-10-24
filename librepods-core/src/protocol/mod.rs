@@ -8,3 +8,4 @@ pub mod control_command;
 pub mod opcodes;
 pub mod packets;
 pub mod parser;
+pub mod settings;
