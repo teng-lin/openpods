@@ -206,8 +206,27 @@ async fn adapter_loss_and_reconnect_during_suspend_do_not_consume_or_escape_budg
     facts.availability.store(0, Ordering::SeqCst);
     let previous = ready(&mut status).await.session_generation;
     facts.sleeping.store(true, Ordering::SeqCst);
-    wait(&mut status, |s| s.lifecycle == "suspended").await;
-    reconnect(&session).await;
+    let suspended = wait(&mut status, |s| s.lifecycle == "suspended").await;
+    let response = session
+        .handle
+        .request(Request {
+            version: 1,
+            id: 1,
+            timeout_ms: 1000,
+            operation: Operation::Reconnect,
+        })
+        .await;
+    assert_eq!(
+        response
+            .error
+            .expect("reconnect during suspend must be rejected")
+            .code,
+        ErrorCode::Cancelled
+    );
+    let after_rejection = status.borrow().clone();
+    assert_eq!(after_rejection.lifecycle, "suspended");
+    assert_eq!(after_rejection.retry_count, suspended.retry_count);
+    assert_eq!(after_rejection.retry_at_ms, suspended.retry_at_ms);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(facts.connections.load(Ordering::SeqCst), 1);
     facts.sleeping.store(false, Ordering::SeqCst);
