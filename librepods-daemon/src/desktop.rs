@@ -912,6 +912,7 @@ mod tests {
         fail_audio: bool,
         fail_effect: AtomicBool,
         fail_after_effect: AtomicBool,
+        stall_after_effect: AtomicBool,
         stall: bool,
     }
     impl Default for Fake {
@@ -956,6 +957,7 @@ mod tests {
                 fail_audio: false,
                 fail_effect: AtomicBool::new(false),
                 fail_after_effect: AtomicBool::new(false),
+                stall_after_effect: AtomicBool::new(false),
                 stall: false,
             }
         }
@@ -1005,19 +1007,24 @@ mod tests {
                 if self.fail_effect.load(Ordering::SeqCst) {
                     return Err(TransportError::PermissionDenied);
                 }
-                let mut audio = self.audio.lock().unwrap();
-                match action {
-                    AudioAction::SetDefaultOutput { name } => audio.default_output = Some(name),
-                    AudioAction::SetProfile { profile } => audio.profile = Some(profile),
-                    AudioAction::SetVolume { name, percent, .. } => {
-                        audio
-                            .outputs
-                            .iter_mut()
-                            .find(|node| node.name == name)
-                            .unwrap()
-                            .volume_percent = Some(f64::from(percent))
+                {
+                    let mut audio = self.audio.lock().unwrap();
+                    match action {
+                        AudioAction::SetDefaultOutput { name } => audio.default_output = Some(name),
+                        AudioAction::SetProfile { profile } => audio.profile = Some(profile),
+                        AudioAction::SetVolume { name, percent, .. } => {
+                            audio
+                                .outputs
+                                .iter_mut()
+                                .find(|node| node.name == name)
+                                .unwrap()
+                                .volume_percent = Some(f64::from(percent))
+                        }
+                        _ => panic!("unexpected action"),
                     }
-                    _ => panic!("unexpected action"),
+                }
+                if self.stall_after_effect.load(Ordering::SeqCst) {
+                    std::future::pending::<()>().await;
                 }
                 if self.fail_after_effect.load(Ordering::SeqCst) {
                     Err(TransportError::Timeout)
@@ -1712,6 +1719,82 @@ mod tests {
                 fake.audio.lock().unwrap().outputs[0].volume_percent,
                 Some(50.0)
             );
+        }
+    }
+    #[tokio::test]
+    async fn generation_replacement_cancels_a_written_volume_effect_and_restores_from_readback() {
+        let fake = Arc::new(Fake::default());
+        fake.stall_after_effect.store(true, Ordering::SeqCst);
+        let mut s = snapshot(ConfigEar::Off);
+        s.device.ca_event = Some(1);
+        observe(&mut s, "ca_event", 0);
+        let (status_sender, status) = watch::channel(s.clone());
+        let (audio, _view) = watch::channel(Value::Null);
+        let (_overrides, overrides) = watch::channel(0);
+        let (stop, shutdown) = watch::channel(false);
+        let task = tokio::spawn(run_with_adapter(
+            Config {
+                ca_ducking: true,
+                ..Config::default()
+            },
+            status,
+            audio,
+            overrides,
+            shutdown,
+            fake.clone(),
+        ));
+        tokio::time::timeout(Duration::from_millis(100), async {
+            loop {
+                if !fake.effects.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            fake.audio.lock().unwrap().outputs[0].volume_percent,
+            Some(10.0)
+        );
+        fake.stall_after_effect.store(false, Ordering::SeqCst);
+        s.session_generation = 2;
+        s.device.ca_event = None;
+        s.device.observations.clear();
+        status_sender.send(s).unwrap();
+        tokio::time::timeout(Duration::from_millis(100), async {
+            loop {
+                if fake.audio.lock().unwrap().outputs[0].volume_percent == Some(50.0) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        stop.send(true).unwrap();
+        task.await.unwrap();
+        assert_eq!(fake.effects.lock().unwrap().len(), 2);
+    }
+    #[tokio::test]
+    async fn live_or_unknown_capture_suppresses_new_conversation_volume_mutations() {
+        for known in [false, true] {
+            let fake = Fake::default();
+            {
+                let mut audio = fake.audio.lock().unwrap();
+                audio.capture_known = known;
+                audio.capture_active = known;
+            }
+            let mut c = Coordinator::new(Config {
+                ca_ducking: true,
+                ..Config::default()
+            });
+            let mut s = snapshot(ConfigEar::Off);
+            s.device.ca_event = Some(1);
+            observe(&mut s, "ca_event", 0);
+            c.step(&s, 0, &fake).await;
+            assert!(fake.effects.lock().unwrap().is_empty());
+            assert!(!c.ducking.is_ducking());
         }
     }
     #[tokio::test]
