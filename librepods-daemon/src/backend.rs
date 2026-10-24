@@ -115,37 +115,9 @@ impl Backend for LinuxBackend {
                 )
             })?
             .current_snapshot();
-        if !snapshot.adapter_ready() {
-            return Err(DaemonError::transient(
-                ErrorCode::AdapterUnavailable,
-                "discovery",
-                "Bluetooth adapter unavailable or powered off",
-            ));
-        }
-        let mut devices = snapshot.devices.into_iter().filter(|device| {
-            device.airpods
-                && device.connected
-                && address.is_none_or(|a| a.eq_ignore_ascii_case(&device.address))
-        });
-        let device = devices.next().ok_or_else(|| {
-            DaemonError::transient(
-                ErrorCode::DeviceUnavailable,
-                "discovery",
-                "selected AirPods are not connected",
-            )
-        })?;
-        if devices.next().is_some() {
-            return Err(DaemonError::new(
-                ErrorCode::InvalidInput,
-                "discovery",
-                "multiple AirPods connected; select an address",
-            ));
-        }
-        Ok(Endpoint {
-            address: device.address,
-            name: device.name,
-        })
+        select_endpoint(&snapshot, address)
     }
+
     fn connect(
         &self,
         endpoint: &Endpoint,
@@ -237,6 +209,59 @@ impl Backend for LinuxBackend {
     }
 }
 
+fn select_endpoint(
+    snapshot: &librepods_linux::bluez_monitor::BluezSnapshot,
+    address: Option<&str>,
+) -> Result<Endpoint, DaemonError> {
+    let unavailable = || {
+        DaemonError::transient(
+            ErrorCode::AdapterUnavailable,
+            "discovery",
+            "selected Bluetooth adapter unavailable or powered off",
+        )
+    };
+    if !snapshot.adapter_ready() {
+        return Err(unavailable());
+    }
+    let candidates: Vec<_> = snapshot
+        .devices
+        .iter()
+        .filter(|device| {
+            device.airpods
+                && device.connected
+                && address.is_none_or(|address| address.eq_ignore_ascii_case(&device.address))
+        })
+        .collect();
+    let mut ready = candidates.iter().filter(|device| {
+        snapshot
+            .adapters
+            .iter()
+            .any(|adapter| adapter.powered && adapter.path == device.adapter)
+    });
+    let Some(device) = ready.next() else {
+        return Err(if candidates.is_empty() {
+            DaemonError::transient(
+                ErrorCode::DeviceUnavailable,
+                "discovery",
+                "selected AirPods are not connected",
+            )
+        } else {
+            unavailable()
+        });
+    };
+    if ready.next().is_some() {
+        return Err(DaemonError::new(
+            ErrorCode::InvalidInput,
+            "discovery",
+            "multiple AirPods connected; select an address",
+        ));
+    }
+    Ok(Endpoint {
+        address: device.address.clone(),
+        name: device.name.clone(),
+    })
+}
+
 pub fn transport_error(stage: &str, error: TransportError) -> DaemonError {
     use librepods_linux::error::{kind, ErrorKind};
     let code = match kind(&error) {
@@ -261,4 +286,127 @@ pub fn transport_error(stage: &str, error: TransportError) -> DaemonError {
 pub fn is_timeout(error: &TransportError) -> bool {
     matches!(error, TransportError::Timeout)
         || librepods_linux::error::kind(error) == Some(librepods_linux::error::ErrorKind::Timeout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use librepods_linux::bluez_monitor::{AdapterSnapshot, BluezSnapshot, DeviceSnapshot};
+
+    fn snapshot() -> BluezSnapshot {
+        BluezSnapshot {
+            available: true,
+            adapters: vec![
+                AdapterSnapshot {
+                    path: "/org/bluez/hci0".into(),
+                    address: "00:11:22:33:44:55".into(),
+                    powered: true,
+                },
+                AdapterSnapshot {
+                    path: "/org/bluez/hci1".into(),
+                    address: "00:11:22:33:44:66".into(),
+                    powered: true,
+                },
+            ],
+            devices: vec![DeviceSnapshot {
+                path: "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF".into(),
+                adapter: "/org/bluez/hci0".into(),
+                address: "AA:BB:CC:DD:EE:FF".into(),
+                name: "Selected AirPods".into(),
+                paired: true,
+                connected: true,
+                services_resolved: true,
+                airpods: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn unrelated_powered_adapter_does_not_make_selected_adapter_ready() {
+        let mut state = snapshot();
+        state.adapters[0].powered = false;
+        for address in [None, Some("aa:bb:cc:dd:ee:ff")] {
+            let error = select_endpoint(&state, address).expect_err("selected adapter off");
+            assert_eq!(error.code, ErrorCode::AdapterUnavailable);
+            assert!(error.retryable);
+        }
+        state.adapters.remove(0);
+        assert_eq!(
+            select_endpoint(&state, None)
+                .expect_err("adapter removed")
+                .code,
+            ErrorCode::AdapterUnavailable
+        );
+        state.devices[0].adapter.clear();
+        assert_eq!(
+            select_endpoint(&state, None)
+                .expect_err("adapter identity unknown")
+                .code,
+            ErrorCode::AdapterUnavailable
+        );
+    }
+
+    #[test]
+    fn bluez_loss_and_absent_devices_preserve_classified_discovery_failures() {
+        let mut state = snapshot();
+        state.available = false;
+        assert_eq!(
+            select_endpoint(&state, None)
+                .expect_err("BlueZ lost despite cached flags")
+                .code,
+            ErrorCode::AdapterUnavailable
+        );
+        state.available = true;
+        state.devices[0].connected = false;
+        assert_eq!(
+            select_endpoint(&state, None)
+                .expect_err("device disconnected")
+                .code,
+            ErrorCode::DeviceUnavailable
+        );
+        state.devices[0].connected = true;
+        state.devices[0].airpods = false;
+        assert_eq!(
+            select_endpoint(&state, None)
+                .expect_err("unrelated Bluetooth device")
+                .code,
+            ErrorCode::DeviceUnavailable
+        );
+    }
+
+    #[test]
+    fn ambiguity_requires_selection_among_devices_on_ready_adapters() {
+        let mut state = snapshot();
+        let mut second = state.devices[0].clone();
+        second.address = "11:22:33:44:55:66".into();
+        second.name = "Other AirPods".into();
+        second.adapter = "/org/bluez/hci1".into();
+        state.devices.push(second);
+        let error = select_endpoint(&state, None).expect_err("ambiguous connected devices");
+        assert_eq!(error.code, ErrorCode::InvalidInput);
+        assert!(!error.retryable);
+        let endpoint = select_endpoint(&state, Some("aa:bb:cc:dd:ee:ff"))
+            .expect("explicit case insensitive selection");
+        assert_eq!(endpoint.address, "AA:BB:CC:DD:EE:FF");
+        assert_eq!(endpoint.name, "Selected AirPods");
+        assert_eq!(
+            select_endpoint(&state, Some("00:00:00:00:00:00"))
+                .expect_err("selected device absent")
+                .code,
+            ErrorCode::DeviceUnavailable
+        );
+        state.adapters[0].powered = false;
+        assert_eq!(
+            select_endpoint(&state, None)
+                .expect("only one ready connected device")
+                .address,
+            "11:22:33:44:55:66"
+        );
+        assert_eq!(
+            select_endpoint(&state, Some("AA:BB:CC:DD:EE:FF"))
+                .expect_err("explicit selection never falls back to another device")
+                .code,
+            ErrorCode::AdapterUnavailable
+        );
+    }
 }
