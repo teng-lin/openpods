@@ -84,6 +84,16 @@ enum Command {
     Doctor,
     Capabilities,
     Reconnect,
+    /// Enable or disable optional proximity telemetry without restarting.
+    Ble {
+        #[arg(value_enum)]
+        mode: Toggle,
+    },
+    /// Retrieve or forget privately stored proximity keys. Never prints keys.
+    Keys {
+        #[command(subcommand)]
+        action: KeyCommand,
+    },
     /// Change host-side automatic pause policy.
     Ear {
         #[arg(value_enum)]
@@ -116,6 +126,12 @@ enum AudioCommand {
     Profile { name: String },
     MoveStream { stream: String, output: String },
     Unmute,
+}
+
+#[derive(Subcommand)]
+enum KeyCommand {
+    Fetch,
+    Forget,
 }
 
 impl Cli {
@@ -152,6 +168,11 @@ impl Cli {
             Some(Command::Doctor) => Operation::Doctor,
             Some(Command::Capabilities) => Operation::Capabilities,
             Some(Command::Reconnect) => Operation::Reconnect,
+            Some(Command::Ble { mode }) => Operation::BleEnabled(matches!(mode, Toggle::On)),
+            Some(Command::Keys { action }) => match action {
+                KeyCommand::Fetch => Operation::FetchKeys,
+                KeyCommand::Forget => Operation::ForgetKeys,
+            },
             Some(Command::Ear { mode }) => Operation::EarPolicy(match mode {
                 EarMode::Off => EarPolicy::Off,
                 EarMode::One => EarPolicy::OneRemoved,

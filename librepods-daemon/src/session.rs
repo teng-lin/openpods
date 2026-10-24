@@ -7,6 +7,7 @@ use crate::{
     config::Config,
     ipc::{Operation, Request, Response},
     snapshot::{DeviceStatus, Snapshot},
+    telemetry::{KeyRead, Telemetry},
     DaemonError, ErrorCode,
 };
 use librepods_core::{
@@ -35,6 +36,10 @@ struct Envelope {
     deadline: Instant,
     reply: oneshot::Sender<Response>,
     dispatched: Arc<AtomicBool>,
+}
+struct KeyExchange {
+    envelope: Envelope,
+    keys: KeyRead,
 }
 struct Active {
     envelope: Envelope,
@@ -70,6 +75,7 @@ impl SessionHandle {
                 _ => Response::snapshot(id, &status),
             };
         }
+        let readonly = matches!(request.operation, Operation::FetchKeys);
         let duration = Duration::from_millis(request.timeout_ms);
         let readonly_audio = matches!(request.operation, Operation::AudioStatus);
         if matches!(
@@ -137,7 +143,7 @@ impl SessionHandle {
             Err(_) => Response::failed(
                 id,
                 DaemonError::new(
-                    if dispatched.load(Ordering::SeqCst) {
+                    if !readonly && dispatched.load(Ordering::SeqCst) {
                         ErrorCode::OutcomeUnknown
                     } else {
                         ErrorCode::CommandTimeout
@@ -184,7 +190,10 @@ impl Session {
         paths: Option<crate::storage::Paths>,
     ) -> Self {
         let (sender, receiver) = mpsc::sync_channel(QUEUE_LIMIT);
-        let state = DeviceState::default();
+        let mut state = DeviceState::default();
+        if let Some(address) = &config.address {
+            state.set_device_identity(address, "");
+        }
         let mut status = Snapshot::new(instance, &state);
         status.ear_policy = config.ear_policy;
         let (status_tx, status_rx) = watch::channel(status.clone());
@@ -204,6 +213,8 @@ impl Session {
             transport: transport.clone(),
         };
         let join = thread::spawn(move || {
+            let started = Instant::now();
+            let telemetry = Telemetry::new(started, paths.clone());
             Worker {
                 backend,
                 config,
@@ -218,8 +229,10 @@ impl Session {
                 transport,
                 connection: None,
                 active: None,
+                key_exchange: None,
+                telemetry,
                 queue: VecDeque::new(),
-                started: Instant::now(),
+                started,
                 generation: 0,
                 retry_at: Instant::now(),
                 attempts: 0,
@@ -264,6 +277,8 @@ struct Worker {
     transport: Arc<Mutex<Option<Arc<dyn SessionTransport>>>>,
     connection: Option<Arc<dyn SessionTransport>>,
     active: Option<Active>,
+    key_exchange: Option<KeyExchange>,
+    telemetry: Telemetry,
     queue: VecDeque<Envelope>,
     started: Instant,
     generation: u64,
@@ -286,7 +301,9 @@ impl Worker {
             .unwrap_or_default()
             .as_millis() as u64;
         self.status.observed_monotonic_ms = self.now();
-        self.status.queue_depth = self.queue.len() + usize::from(self.active.is_some());
+        self.status.queue_depth = self.queue.len()
+            + usize::from(self.active.is_some())
+            + usize::from(self.key_exchange.is_some());
         self.status_tx.send_replace(self.status.clone());
     }
     fn error(&mut self, error: DaemonError) {
@@ -294,6 +311,16 @@ impl Worker {
         self.publish();
     }
     fn disconnect(&mut self) {
+        if let Some(exchange) = self.key_exchange.take() {
+            let _ = exchange.envelope.reply.send(Response::failed(
+                exchange.envelope.request.id,
+                DaemonError::new(
+                    ErrorCode::Cancelled,
+                    "BLE keys",
+                    "key acquisition interrupted; no keys persisted",
+                ),
+            ));
+        }
         if let Some(connection) = self.connection.take() {
             connection.close();
         }
@@ -339,6 +366,7 @@ impl Worker {
             .set_device_identity(&endpoint.address, &endpoint.name);
         self.state.begin_session(self.generation);
         self.status.lifecycle = "connecting".into();
+        self.poll_telemetry(false);
         self.publish();
         let connection = self.backend.connect(&endpoint, Duration::from_secs(3))?;
         if let Ok(mut transport) = self.transport.lock() {
@@ -505,7 +533,7 @@ impl Worker {
         }
     }
     fn dispatch(&mut self) {
-        if self.active.is_some() {
+        if self.active.is_some() || self.key_exchange.is_some() {
             return;
         }
         let Some(envelope) = self.queue.pop_front() else {
@@ -559,6 +587,85 @@ impl Worker {
                 self.handle_action(Active { envelope, pending }, action);
                 return;
             }
+            Operation::FetchKeys => {
+                if !cfg!(feature = "ble") {
+                    Response::failed(
+                        id,
+                        DaemonError::new(
+                            ErrorCode::Unsupported,
+                            "BLE keys",
+                            "BLE support was not compiled",
+                        ),
+                    )
+                } else if self.paths.is_none() {
+                    Response::failed(
+                        id,
+                        DaemonError::new(
+                            ErrorCode::Unsupported,
+                            "BLE keys",
+                            "key persistence requires the persistent service",
+                        ),
+                    )
+                } else if !self.status.connected || !self.state.fresh("metadata") {
+                    Response::failed(
+                        id,
+                        DaemonError::new(
+                            ErrorCode::DeviceUnavailable,
+                            "BLE keys",
+                            "AirPods control connection and identity must be ready",
+                        ),
+                    )
+                } else {
+                    envelope.dispatched.store(true, Ordering::SeqCst);
+                    let remaining = envelope.deadline.saturating_duration_since(Instant::now());
+                    let result = self
+                        .connection
+                        .as_ref()
+                        .ok_or(TransportError::NotConnected)
+                        .and_then(|connection| {
+                            connection.send(
+                                &librepods_core::protocol::packets::REQUEST_MAGIC_CLOUD_KEYS,
+                                remaining.min(Duration::from_secs(1)),
+                            )
+                        });
+                    match result {
+                        Ok(()) => {
+                            self.key_exchange = Some(KeyExchange {
+                                envelope,
+                                keys: KeyRead::default(),
+                            });
+                            self.publish();
+                            return;
+                        }
+                        Err(error) => {
+                            self.disconnect();
+                            self.schedule_retry();
+                            Response::failed(id, transport_error("BLE key request", error))
+                        }
+                    }
+                }
+            }
+            Operation::ForgetKeys => match self.telemetry.forget(&self.state.bluetooth_address) {
+                Ok(()) => Response::ok(id, serde_json::json!({"keys_available":false})),
+                Err(error) => Response::failed(id, error),
+            },
+            Operation::BleEnabled(enabled) => {
+                let mut config = self.config.clone();
+                config.ble_enabled = *enabled;
+                let result = config.validate().and_then(|()| match &self.paths {
+                    Some(paths) => paths.save_config(&config),
+                    None => Ok(()),
+                });
+                match result {
+                    Ok(()) => {
+                        self.config = config;
+                        self.poll_telemetry(false);
+                        self.publish();
+                        Response::ok(id, self.status.ble.clone())
+                    }
+                    Err(error) => Response::failed(id, error),
+                }
+            }
             Operation::Reconnect => {
                 envelope.dispatched.store(true, Ordering::SeqCst);
                 self.disconnect();
@@ -591,6 +698,39 @@ impl Worker {
         };
         let _ = envelope.reply.send(response);
     }
+    fn poll_telemetry(&mut self, allowed: bool) {
+        let before = self.state.observations.clone();
+        let ble = self.telemetry.poll(
+            &mut self.state,
+            self.generation,
+            self.config.ble_enabled,
+            allowed,
+        );
+        if self.status.ble != ble || before != self.state.observations {
+            self.status.ble_enabled = self.config.ble_enabled;
+            self.status.ble = ble;
+            self.publish();
+        }
+    }
+    fn expire_key_exchange(&mut self) {
+        if self.key_exchange.as_ref().is_some_and(|exchange| {
+            exchange.envelope.reply.is_closed() || Instant::now() >= exchange.envelope.deadline
+        }) {
+            if let Some(exchange) = self.key_exchange.take() {
+                let _ = exchange.envelope.reply.send(Response::failed(
+                    exchange.envelope.request.id,
+                    DaemonError::new(
+                        ErrorCode::CommandTimeout,
+                        "BLE keys",
+                        "key request expired; no keys persisted",
+                    ),
+                ));
+            }
+            // A late old key response must not satisfy a subsequent exchange.
+            self.disconnect();
+            self.schedule_retry();
+        }
+    }
     fn run(&mut self) {
         while !self.stopped.load(Ordering::SeqCst) {
             if self.publication_updates.has_changed().unwrap_or(false) {
@@ -616,7 +756,13 @@ impl Worker {
                 self.suspended = false;
                 self.retry_at = Instant::now();
             }
+            self.expire_key_exchange();
             self.dispatch();
+            self.poll_telemetry(
+                !self.suspended
+                    && self.connection.is_none()
+                    && self.status.lifecycle == "waiting_for_device",
+            );
             if !self.suspended && self.connection.is_none() && Instant::now() >= self.retry_at {
                 if let Err(error) = self.connect() {
                     self.disconnect();
@@ -637,6 +783,28 @@ impl Worker {
                 match connection.recv(&mut bytes, READ_SLICE) {
                     Ok(size) => match parser::parse(&bytes[..size]) {
                         Ok(packet) => {
+                            if let Some(mut exchange) = self.key_exchange.take() {
+                                if !exchange.envelope.reply.is_closed()
+                                    && Instant::now() < exchange.envelope.deadline
+                                    && exchange.keys.observe(&packet)
+                                {
+                                    let result = self
+                                        .telemetry
+                                        .persist(&self.state.bluetooth_address, &exchange.keys);
+                                    let response = match result {
+                                        Ok(()) => Response::ok(
+                                            exchange.envelope.request.id,
+                                            serde_json::json!({"keys_available":true}),
+                                        ),
+                                        Err(error) => {
+                                            Response::failed(exchange.envelope.request.id, error)
+                                        }
+                                    };
+                                    let _ = exchange.envelope.reply.send(response);
+                                } else {
+                                    self.key_exchange = Some(exchange);
+                                }
+                            }
                             let changed =
                                 self.state
                                     .apply_packet(&packet, self.generation, self.now());

@@ -37,13 +37,21 @@ pub enum Operation {
     Capabilities,
     Change(SettingChange),
     EarPolicy(EarPolicy),
+    /// Opt-in scan policy; scanner failures never prevent AACP control.
+    BleEnabled(bool),
+    /// Explicitly request and privately persist this device's proximity keys.
+    FetchKeys,
+    ForgetKeys,
     Reconnect,
     Doctor,
     AudioStatus,
     SetOutput(String),
     SetInput(String),
     SetProfile(String),
-    MoveStream { stream: String, output: String },
+    MoveStream {
+        stream: String,
+        output: String,
+    },
     Unmute,
 }
 

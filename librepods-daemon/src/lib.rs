@@ -25,3 +25,6 @@ pub use error::{DaemonError, ErrorCode};
 
 #[cfg(target_os = "linux")]
 pub mod desktop;
+
+#[cfg(target_os = "linux")]
+mod telemetry;
