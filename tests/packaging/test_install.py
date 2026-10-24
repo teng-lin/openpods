@@ -56,6 +56,49 @@ class Installation(unittest.TestCase):
             str(self.unit_dir / installer.UNIT)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_legacy_opt_in_is_narrow_and_preserves_state_on_uninstall(self):
+        state_home = self.root / "state with space % ${PODS_TEST}"
+        installer.install(self.prefix, Path(sys.executable), self.unit_dir, state_home)
+        native, legacy = state_home / "librepods-rs", state_home / "librepods"
+        for directory in [native, legacy]:
+            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
+        unit = (self.unit_dir / installer.UNIT).read_text()
+        self.assertIn("ProtectHome=read-only", unit)
+        self.assertIn('Environment="XDG_STATE_HOME=', unit)
+        self.assertIn("state with space %% ${PODS_TEST}/librepods", unit)
+        if shutil.which("systemd-analyze"):
+            result = subprocess.run(["systemd-analyze", "--user", "verify", str(self.unit_dir / installer.UNIT)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        status = legacy / "status.json"
+        status.write_text("user state")
+        installer.uninstall(self.prefix)
+        self.assertEqual(status.read_text(), "user state")
+
+    def test_default_install_never_grants_or_creates_legacy_state(self):
+        installer.install(self.prefix, self.binary, self.unit_dir)
+        unit = (self.unit_dir / installer.UNIT).read_text()
+        self.assertNotIn("XDG_STATE_HOME=", unit)
+        self.assertNotIn('ReadWritePaths="', unit)
+        self.assertFalse((self.root / "state").exists())
+
+    def test_legacy_opt_in_refuses_existing_foreign_status_or_nonprivate_directory(self):
+        state_home = self.root / "state"
+        legacy = state_home / "librepods"
+        legacy.mkdir(parents=True, mode=0o700)
+        status = legacy / "status.json"
+        status.write_text('{"daemon_instance":"previous-owner"}')
+        with self.assertRaisesRegex(ValueError, "legacy status already exists"):
+            installer.install(self.prefix, self.binary, self.unit_dir, state_home)
+        self.assertEqual(status.read_text(), '{"daemon_instance":"previous-owner"}')
+        status.unlink()
+        legacy.chmod(0o755)
+        with self.assertRaisesRegex(ValueError, "private owned real"):
+            installer.install(self.prefix, self.binary, self.unit_dir, state_home)
+        legacy.rmdir()
+        legacy.symlink_to(self.root, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "private owned real"):
+            installer.install(self.prefix, self.binary, self.unit_dir, state_home)
+
     def test_modified_and_unowned_files_are_not_overwritten_or_removed(self):
         installer.install(self.prefix, self.binary, self.unit_dir)
         installed = self.prefix / "bin/librepods-cli"

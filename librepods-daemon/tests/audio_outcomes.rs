@@ -108,6 +108,7 @@ fn real_audio_adapter_preserves_uncertainty_after_action_timeout_or_failed_readb
 import json, os, pathlib, sys, time
 args = sys.argv[1:]
 if args[:2] == ['-f', 'json']: args = args[2:]
+if args[:1] == ['--format=json']: args = args[1:]
 marker = pathlib.Path(os.environ['LIBREPODS_AUDIO_MARKER'])
 mode = os.environ['LIBREPODS_AUDIO_FAILURE_MODE']
 if args[0].startswith('set-'):

@@ -106,3 +106,31 @@ systemctl --user daemon-reload
 Uninstall removes only unchanged owned program/unit files. User state/config and
 modified files survive. `--prefix`, `--binary` and `--unit-dir` support staging
 and packaging tests; those tests never operate on a live user service.
+
+## Optional legacy status publication under the hardened unit
+
+The default unit grants write access to native state only. To publish the old
+`librepods/status.json` path, stop the previous owner and review its status file
+before opting in. The installer refuses any existing legacy status file,
+symlink, or nonprivate/unowned state directory; it never takes over foreign state.
+
+```bash
+python3 scripts/install.py install --legacy
+systemctl --user daemon-reload
+```
+
+Merge `"legacy_compatibility": true` into the existing Rust configuration when
+this compatibility output is needed. The flag prepares private `librepods-rs`
+and `librepods` state leaf directories and grants only those exact writable paths;
+`ProtectHome=read-only` remains enabled. It also sets the service's explicit
+`XDG_STATE_HOME` to the install-time value. For a custom state home, use
+`--legacy --state-home /absolute/private/state-home` so the sandbox permission
+and daemon publication path agree. Restart and inspect `doctor`/native status
+after the reviewed configuration change; a foreign-file conflict is reported
+without disrupting AACP control.
+
+Without `--legacy`, the installer does not prepare or grant access to the legacy
+directory. Reinstalling without the flag removes the added unit permission; also
+turn off the configuration flag. Uninstall preserves both state directories and
+all contents. Actual daemon operation under both sandbox variants remains a
+separate release check; parser tests do not establish runtime sandbox acceptance.

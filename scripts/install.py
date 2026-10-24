@@ -73,7 +73,33 @@ def owned_destination(path, manifest):
             raise ValueError(f"refusing to overwrite an unowned or modified file: {path}")
 
 
-def install(prefix, binary, unit_dir):
+def unit_escape(value):
+    value = str(value)
+    if any(ord(character) < 32 for character in value):
+        raise ValueError("service path contains control characters")
+    return value.replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')
+
+
+def prepare_legacy_state(state_home):
+    state_home = state_home.expanduser()
+    if not state_home.is_absolute():
+        raise ValueError("legacy state home must be absolute")
+    unit_escape(state_home)
+    native, legacy = state_home / "librepods-rs", state_home / "librepods"
+    for directory in [native, legacy]:
+        if os.path.lexists(directory):
+            metadata = directory.lstat()
+            if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+                raise ValueError("legacy opt-in requires private owned real state directories")
+    if os.path.lexists(legacy / "status.json"):
+        raise ValueError("legacy status already exists; review the previous owner's file before opting in")
+    for directory in [native, legacy]:
+        if not os.path.lexists(directory):
+            directory.mkdir(parents=True, mode=0o700)
+    return state_home, native, legacy
+
+
+def install(prefix, binary, unit_dir, legacy_state_home=None):
     prefix = prefix.expanduser().absolute()
     unit_dir = unit_dir.expanduser().absolute()
     if not binary.is_file():
@@ -86,8 +112,13 @@ def install(prefix, binary, unit_dir):
     owned_destination(destination, manifest)
     owned_destination(unit_path, manifest)
     # systemd performs percent expansion even inside double-quoted arguments.
-    escaped = str(destination).replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')
+    escaped = unit_escape(destination)
     unit = (ROOT / "packaging/systemd/librepods-rs.service.in").read_text()
+    if legacy_state_home is not None:
+        state_home, native, legacy = prepare_legacy_state(legacy_state_home)
+        extra = (f'Environment="XDG_STATE_HOME={unit_escape(state_home)}"\n'
+                 f'ReadWritePaths="{unit_escape(native)}" "{unit_escape(legacy)}"')
+        unit = unit.replace("ReadWritePaths=%t/librepods-rs", "ReadWritePaths=%t/librepods-rs\n" + extra)
     files = [(destination, binary.read_bytes(), 0o755),
              (unit_path, unit.replace("@BINARY@", escaped).encode(), 0o644)]
     backups = {path: (path.read_bytes(), path.stat().st_mode & 0o777) if path.exists() else None
@@ -140,11 +171,16 @@ def main():
     parser.add_argument("--prefix", type=Path, default=Path.home() / ".local")
     parser.add_argument("--binary", type=Path, default=ROOT / "target/release/librepods-cli")
     parser.add_argument("--unit-dir", type=Path)
+    parser.add_argument("--legacy", action="store_true", help="opt in to a narrowly writable legacy status directory")
+    parser.add_argument("--state-home", type=Path, help="state home used by --legacy; defaults to XDG_STATE_HOME")
     args = parser.parse_args()
     unit_dir = args.unit_dir or args.prefix / "share/systemd/user"
+    if args.state_home and not args.legacy:
+        parser.error("--state-home requires --legacy")
+    state_home = args.state_home or Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
     try:
         if args.action == "install":
-            for path in install(args.prefix, args.binary, unit_dir):
+            for path in install(args.prefix, args.binary, unit_dir, state_home if args.legacy else None):
                 print(f"Installed {path}")
             print("No service was enabled or started. Run systemctl --user daemon-reload, then review docs/deployment.md.")
         else:
