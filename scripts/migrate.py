@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 
@@ -44,17 +45,29 @@ def capture(path, old_unit, run=systemctl):
 
 
 def load(path):
-    if path.is_symlink() or path.stat().st_uid != os.getuid():
-        raise ValueError("snapshot is not an owned regular file")
-    snapshot = json.loads(path.read_text())
-    if snapshot.get("version") != 1 or snapshot.get("uid") != os.getuid():
+    # Open first and inspect that descriptor: FIFOs must not block and symlinks
+    # must not redirect validation to a different file before the read.
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as source:
+        metadata = os.fstat(source.fileno())
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+                or metadata.st_mode & 0o077):
+            raise ValueError("snapshot must be a private owned regular file")
+        encoded = source.read(64 * 1024 + 1)
+    if len(encoded) > 64 * 1024:
+        raise ValueError("snapshot exceeds 64 KiB size limit")
+    snapshot = json.loads(encoded)
+    if (not isinstance(snapshot, dict) or snapshot.get("version") != 1
+            or snapshot.get("uid") != os.getuid()):
         raise ValueError("unknown snapshot version or owner")
+    for key in ["old", "new"]:
+        entry = snapshot.get(key)
+        if (not isinstance(entry, dict) or not isinstance(entry.get("unit"), str)
+                or not isinstance(entry.get("active"), bool)):
+            raise ValueError("invalid snapshot service state")
     validate_old_unit(snapshot["old"]["unit"])
     if snapshot["new"]["unit"] != NEW_UNIT:
         raise ValueError("snapshot names an unexpected replacement service")
-    for key in ["old", "new"]:
-        if not isinstance(snapshot[key]["active"], bool):
-            raise ValueError("invalid snapshot activity state")
     return snapshot
 
 

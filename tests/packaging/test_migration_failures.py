@@ -3,6 +3,10 @@
 import importlib.util
 from pathlib import Path
 import subprocess
+import os
+import sys
+import json
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -90,6 +94,43 @@ class MigrationFailure(unittest.TestCase):
             migration.switch(services.snapshot, services)
         self.assertIn("new start failed", str(failure.exception))
         self.assertIn("old restore failed", str(failure.exception))
+
+
+class MigrationSnapshotInspection(unittest.TestCase):
+    def test_fifo_snapshot_is_rejected_without_waiting_for_a_writer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rollback.fifo"
+            os.mkfifo(path, 0o600)
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/migrate.py"), "switch", "--snapshot", str(path)],
+                capture_output=True, text=True, timeout=2)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("private owned regular file", result.stderr)
+
+    def test_snapshot_validation_rejects_public_symlink_oversize_and_invalid_shapes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rollback.json"
+            valid = {"version": 1, "uid": os.getuid(),
+                     "old": {"unit": "previous.service", "active": True},
+                     "new": {"unit": migration.NEW_UNIT, "active": False}}
+            path.write_text(json.dumps(valid))
+            path.chmod(0o644)
+            with self.assertRaisesRegex(ValueError, "private"):
+                migration.load(path)
+            path.chmod(0o600)
+            link = Path(directory) / "link.json"
+            link.symlink_to(path)
+            with self.assertRaises(OSError):
+                migration.load(link)
+            path.write_bytes(b"x" * (64 * 1024 + 1))
+            with self.assertRaisesRegex(ValueError, "size limit"):
+                migration.load(path)
+            for invalid in [[], {**valid, "old": []}, {**valid, "new": {"unit": migration.NEW_UNIT, "active": 1}}]:
+                path.write_text(json.dumps(invalid))
+                with self.assertRaises(ValueError):
+                    migration.load(path)
+            path.write_text(json.dumps(valid))
+            self.assertEqual(migration.load(path), valid)
 
 
 if __name__ == "__main__":
