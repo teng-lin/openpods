@@ -1,7 +1,10 @@
 # Release acceptance evidence
 
-Status: pending. This file is a checklist template, not completed acceptance.
-Do not mark a gate passed without linking the exact command output or recording.
+Status: incomplete; do not merge for release yet. Implementation is committed on
+`daemon-port`; physical reconnect/suspend/audio gates and the 24-hour soak remain
+open. Automated evidence is recorded separately in [automated-evidence.md](automated-evidence.md).
+A final instrumentation run also exposed a queued-client cancellation race under
+investigation; no passing rerun or earlier checkpoint overrides that failure.
 
 ## Environment record
 
@@ -9,9 +12,9 @@ Do not mark a gate passed without linking the exact command output or recording.
 | --- | --- |
 | Rust commit and tree cleanliness | Pending |
 | Rust compiler and dependency lock hash | Pending |
-| OS/kernel, BlueZ, PipeWire and WirePlumber versions | Pending |
-| Adapter model/driver | Pending |
-| AirPods model and firmware | Pending |
+| OS/kernel, BlueZ, PipeWire and WirePlumber versions | [Recorded host](evidence/2026-10-24/hardware-environment.json) |
+| Adapter model/driver | Intel USB 8087:0033 / btusb; host record above |
+| AirPods model and firmware | A3048, 90.3431000025000000.6807; host record above |
 | Build features and runtime BLE state | Pending |
 | Original listening mode, CA, one-bud ANC and adaptive level | Pending |
 | Original profile, defaults and stream routes | Pending |
@@ -26,8 +29,8 @@ Do not mark a gate passed without linking the exact command output or recording.
 | Protocol robustness | Corpus replay, fuzz artifacts/regressions, Miri or documented platform limitation | Pending |
 | Native IPC | Concurrent clients, deadline expiry, unknown mutation outcome, stop/restart behavior | Pending |
 | Legacy integration | Rust-generated snapshots accepted by actual Omarchy Model.js | Pending |
-| Package restrictions | Real user-unit install/start/stop/restart/uninstall and permission evidence | Pending |
-| Mode/settings | At least 20 accepted mode transitions, Adaptive/CA/one-bud/adaptive-level as supported | Pending |
+| Package restrictions | [Native and compatibility unit](evidence/2026-10-24/hardware-unit-smoke.json); [staged uninstall/reinstall](evidence/2026-10-24/package-uninstall-reinstall.json), original config preserved, no root/capabilities | Passed for staged units at recorded binaries; final deployment pending |
+| Mode/settings | [20 mode transitions](evidence/2026-10-24/hardware-mode-cycles.json); [CA](evidence/2026-10-24/configuration-ca-readback.json); [Adaptive, one-bud ANC and levels 0/50/100](evidence/2026-10-24/configuration-settings-readback.json), with restoration | Hardware checks passed at their recorded binaries; final source reconciliation pending |
 | Reconnect | At least 20 case/reconnect cycles, control-only drop, adapter/BlueZ restart | Pending |
 | Suspend | At least 10 real suspend/resume cycles, including queued-command handling | Pending |
 | Audio | Playback continuity, profile-off/node recreation/mute/wrong route, server restart, user override | Pending |
@@ -72,3 +75,27 @@ the release soak result. The optional `--unit` collects only bounded journal
 volume counts for the measured time window; it retains no journal content.
 Truncated, timed-out or absent journal evidence also prevents a complete release
 soak claim. A shorter diagnostic run can still produce useful samples.
+
+## Performance observations and open acceptance work
+
+The 20 physical listening-mode transitions had p95 confirmation 2150.096 ms
+and a maximum of 2155.729 ms, missing the initial 2000 ms target.
+[Eight additional instrumented commands](evidence/2026-10-24/hardware-command-timing.json)
+separated the host write and reply-publication time from the remote-report wait.
+These observations describe this adapter/model/firmware only; they do not pass
+the original target or establish audible playback continuity.
+
+A completed 600-second diagnostic on the earlier `33e181f` application checkpoint
+measured 0.1733% CPU of one core, p95 local status latency 3.378 ms and maximum
+RSS 11644 KiB. RSS increased from its first sample; this is a warm-up diagnostic,
+not the required 24-hour stability proof. Raw private samples are in
+`target/idle-33e181f/`. The final 24-hour run has not started.
+
+Physical work still required: 20 case/reconnect cycles, adapter/BlueZ restart,
+10 suspend/resume cycles (including queued work), continuous playback listening,
+profile-off and node recreation, pinned-stream/mute/zero-volume conditions,
+audio-server restart, and explicit capture selection/restoration. Synthetic
+coverage does not replace these gates. No previous daemon was initially active;
+the staged install cycle therefore does not prove a full previous-daemon
+migration and rollback. Optional BLE hardware coexistence remains unverified;
+connected scanning remains disabled and BLE is experimental.

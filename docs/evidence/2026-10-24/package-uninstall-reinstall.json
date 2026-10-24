@@ -1,0 +1,24 @@
+{
+  "source_commit": "2fd82fe365df212e43a74b87b101e4eff75b55ff",
+  "source_tree": "0962e8f5fec9ff68f693fdf5243b98e98af6b701",
+  "features": "no-default-features",
+  "checks": [
+    "owned binary/unit/manifest removed; config preserved"
+  ],
+  "stop_seconds": 0.11656910300371237,
+  "restart_active": true,
+  "unit_properties": [
+    "Result=success",
+    "ExecMainStatus=0",
+    "CapabilityBoundingSet=",
+    "ProtectHome=read-only",
+    "NoNewPrivileges=yes"
+  ],
+  "binary_sha256": "aa9f923e0e0b4b0923b84a14611218633ba52eb31f993bebdf8a1bca4103f013",
+  "config_preserved": true,
+  "limits": [
+    "Existing staged deployment only; no previous active daemon was available for end-to-end legacy rollback.",
+    "Audio equality checked defaults; profile and pinned stream route restoration require separate validation."
+  ],
+  "audio_defaults_preserved": true
+}
