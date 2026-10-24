@@ -306,7 +306,7 @@ mod tests {
             emit(&player, "Paused").await;
         }
         tokio::time::timeout(Duration::from_secs(2), async {
-            while monitor.shared.epoch.load(Ordering::Acquire) == 0 {
+            while monitor.shared.epoch.load(Ordering::Acquire) < 10 {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
