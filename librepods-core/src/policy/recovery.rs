@@ -6,6 +6,13 @@
 
 use serde::{Deserialize, Serialize};
 
+pub const FIRST_RETRY_DELAY_MS: u64 = 750;
+pub const MAX_RETRY_DELAY_MS: u64 = 16_000;
+pub const MAX_CONNECTED_ATTEMPTS: u32 = 10;
+pub const DEFAULT_ABSENT_ATTEMPTS: u32 = 3;
+pub const RECONCILE_INTERVAL_MS: u64 = 30_000;
+pub const MAX_JITTER_MS: u64 = 499;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Lifecycle {
     #[default]
@@ -56,7 +63,7 @@ impl RecoveryPolicy {
         self.due_ms = None;
         self.connected_attempts = 0;
         self.absent_attempts = 0;
-        self.watchdog_at_ms = now_ms.saturating_add(30_000);
+        self.watchdog_at_ms = now_ms.saturating_add(RECONCILE_INTERVAL_MS);
     }
     pub fn on_failure(
         &mut self,
@@ -70,9 +77,9 @@ impl RecoveryPolicy {
         self.generation = self.generation.saturating_add(1);
         self.state = Lifecycle::Recovering;
         let attempt = if bluez_connected {
-            if self.connected_attempts >= 10 {
+            if self.connected_attempts >= MAX_CONNECTED_ATTEMPTS {
                 self.due_ms = None;
-                self.watchdog_at_ms = now_ms.saturating_add(30_000);
+                self.watchdog_at_ms = now_ms.saturating_add(RECONCILE_INTERVAL_MS);
                 return RecoveryDecision::Wait;
             }
             self.connected_attempts += 1;
@@ -87,13 +94,15 @@ impl RecoveryPolicy {
             self.absent_attempts
         };
         let delay = if attempt == 1 {
-            750
+            FIRST_RETRY_DELAY_MS
         } else {
-            1000_u64.saturating_mul(1 << ((attempt - 2).min(4)))
+            1000_u64
+                .saturating_mul(1 << ((attempt - 2).min(4)))
+                .min(MAX_RETRY_DELAY_MS)
         };
         let due = now_ms
             .saturating_add(delay)
-            .saturating_add(jitter_ms.min(499));
+            .saturating_add(jitter_ms.min(MAX_JITTER_MS));
         self.due_ms = Some(due);
         RecoveryDecision::RetryAt(due)
     }
@@ -125,7 +134,7 @@ impl RecoveryPolicy {
             && now_ms >= self.watchdog_at_ms
             && (bluez_connected || !have_address)
         {
-            self.watchdog_at_ms = now_ms.saturating_add(30_000);
+            self.watchdog_at_ms = now_ms.saturating_add(RECONCILE_INTERVAL_MS);
             self.connected_attempts = 0;
             return RecoveryDecision::Reconcile;
         }
@@ -141,6 +150,9 @@ impl RecoveryPolicy {
             return RecoveryDecision::Wait;
         }
         self.state = Lifecycle::WaitingForAdapter;
+        self.connected_attempts = 0;
+        self.absent_attempts = 0;
+        self.due_ms = Some(now_ms);
         self.watchdog_at_ms = now_ms;
         RecoveryDecision::Reconcile
     }
@@ -154,6 +166,7 @@ impl RecoveryPolicy {
         self.desired = true;
         self.connected_attempts = 0;
         self.absent_attempts = 0;
+        self.due_ms = Some(now_ms);
         self.watchdog_at_ms = now_ms;
         self.state = Lifecycle::WaitingForAdapter;
         RecoveryDecision::Reconcile
@@ -232,6 +245,33 @@ mod tests {
         );
         assert_eq!(policy.stop(), RecoveryDecision::Stop);
         assert_eq!(policy.on_failure(200_001, true, 0), RecoveryDecision::Wait);
+    }
+    #[test]
+    fn explicit_reconnect_and_resume_replace_old_timers_and_reset_budgets() {
+        let mut policy = RecoveryPolicy::new(DEFAULT_ABSENT_ATTEMPTS);
+        policy.on_failure(10_000, true, 0);
+        assert_eq!(
+            policy.reconnect_explicitly(10_100),
+            RecoveryDecision::Reconcile
+        );
+        assert_eq!(policy.due_ms, Some(10_100));
+        assert_eq!(
+            policy.tick(10_100, false, true, true),
+            RecoveryDecision::Wait
+        );
+        assert_eq!(
+            policy.tick(10_101, true, true, true),
+            RecoveryDecision::Reconcile
+        );
+        policy.on_failure(10_102, true, 0);
+        policy.on_failure(10_103, false, 0);
+        policy.suspend();
+        assert_eq!(policy.resume(10_104), RecoveryDecision::Reconcile);
+        assert_eq!((policy.connected_attempts, policy.absent_attempts), (0, 0));
+        assert_eq!(
+            policy.tick(10_104, true, true, true),
+            RecoveryDecision::Reconcile
+        );
     }
     #[test]
     fn cold_start_without_adapter_waits_then_reconciles_without_an_address() {
