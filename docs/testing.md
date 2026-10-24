@@ -90,3 +90,20 @@ For release coverage, use `scripts/coverage.sh target/coverage.json`. It clears
 old counters, instruments both minimal and optional-BLE Rust tests and the actual CLI executable, runs the
 isolated CLI process suite, and enforces the same complete-source thresholds.
 A plain `cargo llvm-cov` test invocation misses subprocess-only CLI paths.
+
+## Production-only coverage accounting
+
+The release gate uses LLVM LCOV `DA` counters per source line, merging repeated
+feature variants by line number and maximum execution count.
+`tools/coverage-spans` parses the exact measured Rust source with `syn` and emits
+line spans for `#[cfg(test)]` modules, test functions (including `tokio::test`),
+and externally declared test-only modules. The checker removes only those spans;
+production files and failure paths remain in the denominator. A conditional
+`any(test, feature = "ble")` item remains production code. Missing span metadata
+is a hard error. Reports retain test-line exclusion counts for audit.
+
+Historical summary percentages above used ordinary llvm-cov totals, which include
+inline unit-test functions, and therefore must not serve as release evidence.
+The JSON report, LCOV counters and parsed-span map are all needed to reproduce
+the final production-only calculation. The standalone analyzer has its own
+locked dependencies and does not modify the application workspace manifest.

@@ -12,4 +12,9 @@ cargo test --workspace --no-default-features --features librepods-cli/ble --lock
 cargo build -p librepods-cli --no-default-features --locked
 python3 tests/cli/contract.py "${CARGO_LLVM_COV_TARGET_DIR}/debug/librepods-cli" -v
 cargo llvm-cov report --json --output-path "$report"
-python3 scripts/check-coverage.py "$report" --core-min 90 --service-min 80
+cargo llvm-cov report --lcov --output-path "${report%.json}.lcov"
+# Build this standalone analysis utility without inheriting workspace coverage.
+CARGO_TARGET_DIR="${CARGO_LLVM_COV_TARGET_DIR}/span-tool" RUSTC_WRAPPER= \
+  cargo run --manifest-path tools/coverage-spans/Cargo.toml --locked -- "$report" > "${report%.json}-test-spans.json"
+python3 scripts/check-coverage.py "$report" --lcov "${report%.json}.lcov" \
+  --test-spans "${report%.json}-test-spans.json" --core-min 90 --service-min 80
