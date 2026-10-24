@@ -20,6 +20,7 @@ pub enum ErrorCode {
     Superseded,
     Cancelled,
     QueueFull,
+    ResponseTooLarge,
     ServiceUnavailable,
     VersionMismatch,
     PersistenceFailed,

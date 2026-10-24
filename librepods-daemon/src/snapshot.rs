@@ -158,6 +158,53 @@ pub fn available(reading: BatteryState) -> bool {
     )
 }
 
+/// Large audio graphs have an explicit detailed endpoint. They must not prevent
+/// battery, command and recovery status from fitting in the native frame budget.
+pub(crate) fn bounded_audio(value: Value) -> Value {
+    const DETAILS_LIMIT: usize = 32 * 1024;
+    if serde_json::to_vec(&value).is_ok_and(|bytes| bytes.len() <= DETAILS_LIMIT) {
+        return value;
+    }
+    let mut summary = serde_json::Map::new();
+    for key in [
+        "health",
+        "server_name",
+        "profile",
+        "default_output",
+        "default_input",
+        "capture_active",
+        "capture_known",
+        "media_history_ready",
+        "routing_policy",
+        "audio_recovery",
+        "automation_yielded",
+        "last_recovery",
+        "last_error",
+    ] {
+        if let Some(value) = value.get(key) {
+            let value = match value {
+                Value::String(text) => Value::String(text.chars().take(1024).collect()),
+                Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
+                _ => Value::String("details omitted; query audio status".into()),
+            };
+            summary.insert(key.into(), value);
+        }
+    }
+    for key in [
+        "profiles",
+        "outputs",
+        "inputs",
+        "playback_streams",
+        "recording_streams",
+    ] {
+        if let Some(array) = value.get(key).and_then(Value::as_array) {
+            summary.insert(format!("{key}_count"), json!(array.len()));
+        }
+    }
+    summary.insert("details_omitted".into(), Value::Bool(true));
+    Value::Object(summary)
+}
+
 impl From<&DeviceState> for DeviceStatus {
     fn from(state: &DeviceState) -> Self {
         Self {
@@ -187,6 +234,19 @@ impl From<&DeviceState> for DeviceStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn large_audio_graph_keeps_health_and_reports_explicitly_omitted_details() {
+        let value = json!({"health":"Healthy","profile":"a2dp-sink","default_input":"external microphone","capture_known":true,"capture_active":false,"outputs":vec!["x".repeat(1024);100]});
+        let summary = bounded_audio(value);
+        assert_eq!(summary["profile"], "a2dp-sink");
+        assert_eq!(summary["default_input"], "external microphone");
+        assert_eq!(summary["capture_active"], false);
+        assert_eq!(summary["details_omitted"], true);
+        assert_eq!(summary["outputs_count"], 100);
+        assert!(serde_json::to_vec(&summary).expect("summary").len() < 1024);
+        let small = json!({"outputs":[],"health":"MissingSink"});
+        assert_eq!(bounded_audio(small.clone()), small);
+    }
     #[test]
     fn observation_wall_times_survive_clock_changes_and_stale_publication() {
         let mut state = DeviceState::default();

@@ -313,6 +313,10 @@ async fn run(cli: &Cli) -> Result<(), DaemonError> {
                 "stop the running connection owner before opening a direct session",
             ));
         }
+        // Hold the same lock as the service before any Bluetooth preparation.
+        // A pathname check alone races another direct client or service startup.
+        let _owner =
+            librepods_daemon::storage::OwnerGuard::acquire(&paths, &runtime::instance_id())?;
         let session = librepods_daemon::session::Session::spawn(
             Arc::new(LinuxBackend::default()),
             config,

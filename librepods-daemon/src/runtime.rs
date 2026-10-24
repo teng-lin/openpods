@@ -381,11 +381,15 @@ pub async fn write_response(
     let mut bytes = serde_json::to_vec(response)
         .map_err(|e| DaemonError::new(ErrorCode::Internal, "ipc encode", e.to_string()))?;
     if bytes.len() > ipc::MAX_RESPONSE_FRAME {
-        return Err(DaemonError::new(
-            ErrorCode::InvalidInput,
-            "ipc encode",
-            "response exceeds 128 KiB",
-        ));
+        bytes = serde_json::to_vec(&Response::failed(
+            response.id,
+            DaemonError::new(
+                ErrorCode::ResponseTooLarge,
+                "ipc encode",
+                "response exceeds 128 KiB; inspect status before repeating a mutation",
+            ),
+        ))
+        .map_err(|error| DaemonError::new(ErrorCode::Internal, "ipc encode", error.to_string()))?;
     }
     bytes.push(b'\n');
     tokio::time::timeout(Duration::from_secs(1), writer.write_all(&bytes))

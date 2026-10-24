@@ -876,7 +876,8 @@ impl Worker {
                 self.publish();
             }
             if self.audio_updates.has_changed().unwrap_or(false) {
-                self.status.audio = self.audio_updates.borrow_and_update().clone();
+                self.status.audio =
+                    crate::snapshot::bounded_audio(self.audio_updates.borrow_and_update().clone());
                 self.publish();
             }
             while let Ok(envelope) = self.receiver.try_recv() {
