@@ -244,6 +244,7 @@ pub fn transport_error(stage: &str, error: TransportError) -> DaemonError {
         Some(ErrorKind::Cancelled) => ErrorCode::Cancelled,
         Some(ErrorKind::PermissionDenied) => ErrorCode::PermissionDenied,
         Some(ErrorKind::Unsupported) => ErrorCode::Unsupported,
+        Some(ErrorKind::Unavailable) => ErrorCode::ServiceUnavailable,
         Some(ErrorKind::Truncated) => ErrorCode::MalformedFrame,
         Some(ErrorKind::InvalidInput) => ErrorCode::InvalidInput,
         _ => match &error {

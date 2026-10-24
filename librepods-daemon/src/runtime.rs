@@ -148,10 +148,16 @@ pub async fn run(
     });
     let permits = Arc::new(Semaphore::new(32));
     let mut clients = tokio::task::JoinSet::new();
+    let mut owner_health = session.handle.status.clone();
     tokio::pin!(shutdown);
     let outcome = loop {
         tokio::select! {
             _=&mut shutdown=>break Ok(()),
+            changed=owner_health.changed()=>{
+                if changed.is_err() {
+                    break Err(DaemonError::new(ErrorCode::ServiceUnavailable,"session owner","session worker exited unexpectedly"));
+                }
+            },
             Some(_)=clients.join_next(),if !clients.is_empty()=>{},
             result=listener.accept()=>{
                 let (stream,_) = match result { Ok(accepted)=>accepted, Err(error)=>break Err(DaemonError::io("accept", error)) };
