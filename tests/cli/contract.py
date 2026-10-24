@@ -58,6 +58,8 @@ class CliContract(unittest.TestCase):
         thread.start()
         result = self.call(*args, machine=machine)
         thread.join(4)
+        server.close()
+        self.socket.unlink(missing_ok=True)
         self.assertFalse(thread.is_alive(), "IPC peer did not finish")
         self.assertEqual(failures, [])
         self.assertEqual(len(received), 1)
@@ -106,7 +108,6 @@ class CliContract(unittest.TestCase):
                 result, request = self.exchange(args, self.ok)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(request["operation"], expected)
-                self.socket.unlink()
 
     def test_watch_consumes_actual_serializer_snapshots(self):
         snapshots = [json.loads((FIXTURES / name).read_text())
@@ -159,6 +160,28 @@ class CliContract(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertEqual(json.loads(result.stderr), error)
 
+    def test_post_dispatch_transport_and_invalid_response_are_uncertain_only_for_mutations(self):
+        cases = [
+            (lambda req: b"", "service_unavailable"),
+            (lambda req: b"not JSON\n", "malformed_frame"),
+            (lambda req: {"version": 1, "id": req["id"] + 1, "result": {}, "error": None}, "version_mismatch"),
+            (lambda req: {"version": 1, "id": req["id"], "result": None, "error": None}, "malformed_frame"),
+        ]
+        for response, readonly_code in cases:
+            for args, expected in [(["status"], readonly_code), (["--conversation-awareness", "off"], "outcome_unknown")]:
+                with self.subTest(expected=expected, readonly_code=readonly_code):
+                    result, _ = self.exchange(args, response)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(json.loads(result.stderr)["code"], expected)
+
+    def test_typed_daemon_rejection_of_mutation_keeps_its_precise_error(self):
+        error = {"code": "unsupported", "stage": "capabilities", "message": "unsupported setting", "retryable": False}
+        result, _ = self.exchange(["--conversation-awareness", "off"], lambda req: {
+            "version": 1, "id": req["id"], "result": None, "error": error})
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stderr), error)
+
     def test_foreign_response_identifier_and_version_are_rejected(self):
         for version, identifier in [(1, 99), (99, 1)]:
             with self.subTest(version=version, identifier=identifier):
@@ -166,7 +189,6 @@ class CliContract(unittest.TestCase):
                     "version": version, "id": identifier, "result": {}, "error": None})
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual(json.loads(result.stderr)["code"], "version_mismatch")
-                self.socket.unlink()
 
     def test_bad_or_missing_result_does_not_print_success(self):
         for response in [b"not JSON\n", b"{\"version\":1,\"id\":1,\"result\":null,\"error\":null}\n"]:
@@ -175,7 +197,6 @@ class CliContract(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual(result.stdout, "")
                 self.assertEqual(json.loads(result.stderr)["code"], "malformed_frame")
-                self.socket.unlink()
 
     def test_direct_refuses_an_existing_owner_without_opening_bluetooth(self):
         self.socket.touch()
