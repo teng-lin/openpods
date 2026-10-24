@@ -15,5 +15,6 @@
 
 pub mod crossdevice;
 pub mod device;
+pub mod policy;
 pub mod protocol;
 pub mod transport;

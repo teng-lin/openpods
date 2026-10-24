@@ -307,6 +307,16 @@ impl Default for DeviceState {
 }
 
 impl DeviceState {
+    pub fn set_device_identity(&mut self, address: &str, name: &str) {
+        if self.bluetooth_address != address {
+            let generation = self.session_generation;
+            *self = Self::default();
+            self.session_generation = generation;
+        }
+        self.bluetooth_address = address.to_owned();
+        self.device_name = name.to_owned();
+    }
+
     pub fn capabilities(&self) -> ModelCapabilities {
         self.model.capabilities()
     }
