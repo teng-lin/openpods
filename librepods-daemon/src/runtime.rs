@@ -1,0 +1,392 @@
+// LibrePods - AirPods liberated from Apple's ecosystem
+// Copyright (C) 2025 LibrePods contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+
+use crate::{
+    backend::Backend,
+    config::Config,
+    ipc::{self, Operation, Request, Response},
+    session::{Session, SessionHandle},
+    snapshot::Snapshot,
+    storage::{atomic_write, restrict_socket, OwnerGuard, Paths},
+    DaemonError, ErrorCode,
+};
+use std::future::Future;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Semaphore;
+
+pub fn instance_id() -> String {
+    format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    )
+}
+
+pub async fn serve(
+    paths: Paths,
+    config: Config,
+    backend: Arc<dyn Backend>,
+) -> Result<(), DaemonError> {
+    run(paths, config, backend, async {
+        let term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+        match term {
+            Ok(mut term) => {
+                tokio::select! {_=tokio::signal::ctrl_c()=>{},_=term.recv()=>{}}
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    })
+    .await
+}
+
+pub async fn run(
+    paths: Paths,
+    config: Config,
+    backend: Arc<dyn Backend>,
+    shutdown: impl Future<Output = ()>,
+) -> Result<(), DaemonError> {
+    config.validate()?;
+    let instance = instance_id();
+    let _owner = OwnerGuard::acquire(&paths, &instance)?;
+    if paths.legacy_socket.exists() {
+        return Err(DaemonError::new(
+            ErrorCode::ServiceUnavailable,
+            "ownership",
+            "legacy daemon socket exists; stop the previous connection owner before starting Rust",
+        ));
+    }
+    let listener = UnixListener::bind(paths.socket()).map_err(|e| DaemonError::io("listen", e))?;
+    restrict_socket(&paths.socket())?;
+    let session = Session::spawn(backend, config.clone(), instance);
+    let mut publication = session.handle.status.clone();
+    let publisher_paths = paths.clone();
+    let legacy = config.legacy_compatibility;
+    let publisher = tokio::spawn(async move {
+        let mut previous = Vec::new();
+        loop {
+            let snapshot = publication.borrow_and_update().clone();
+            let bytes = match serde_json::to_vec(&snapshot) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    log::error!("status encoding failed: {error}");
+                    break;
+                }
+            };
+            if bytes != previous {
+                let path = publisher_paths.state_file();
+                let clone = bytes.clone();
+                let result = tokio::task::spawn_blocking(move || atomic_write(&path, &clone)).await;
+                match result {
+                    Ok(Ok(())) => previous = bytes,
+                    Ok(Err(error)) => log::error!("status publication degraded: {error}"),
+                    Err(error) => log::error!("status publisher failed: {error}"),
+                }
+                if legacy {
+                    let path = publisher_paths.legacy_state.clone();
+                    let bytes = serde_json::to_vec(&snapshot.legacy()).unwrap_or_default();
+                    if let Ok(Err(error)) =
+                        tokio::task::spawn_blocking(move || atomic_write(&path, &bytes)).await
+                    {
+                        log::error!("legacy publication degraded: {error}");
+                    }
+                }
+            }
+            if publication.changed().await.is_err() {
+                break;
+            }
+        }
+    });
+    let permits = Arc::new(Semaphore::new(32));
+    let mut clients = tokio::task::JoinSet::new();
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            _=&mut shutdown=>break,
+            Some(_)=clients.join_next(),if !clients.is_empty()=>{},
+            result=listener.accept()=>{
+                let (stream,_)=result.map_err(|e|DaemonError::io("accept",e))?;
+                let credentials=stream.peer_cred().map_err(|e|DaemonError::io("peer credentials",e))?;
+                // Safety: getuid has no preconditions.
+                if credentials.uid()!=unsafe{libc::getuid()}{continue;}
+                let Ok(permit)=permits.clone().try_acquire_owned() else {continue;};
+                let handle=session.handle.clone();
+                let paths=paths.clone();
+                let config=config.clone();
+                clients.spawn(async move {let _permit=permit;let _=client_connection(stream,handle,paths,config).await;});
+            },
+        }
+    }
+    clients.abort_all();
+    while clients.join_next().await.is_some() {}
+    session.handle.stop();
+    // The platform close operation wakes pending reads before joining the owner.
+    tokio::task::spawn_blocking(move || session.stop())
+        .await
+        .map_err(|e| DaemonError::new(ErrorCode::Internal, "shutdown", e.to_string()))?;
+    publisher.abort();
+    let _ = publisher.await;
+    if legacy {
+        if let Ok(bytes) = std::fs::read(&paths.legacy_state) {
+            if serde_json::from_slice::<serde_json::Value>(&bytes).is_ok_and(|v| {
+                v["daemon_instance"].as_str() == Some(publication_instance(&paths).as_str())
+            }) {
+                let _ = std::fs::remove_file(&paths.legacy_state);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn publication_instance(paths: &Paths) -> String {
+    std::fs::read(paths.state_file())
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Snapshot>(&bytes).ok())
+        .map(|s| s.daemon_instance)
+        .unwrap_or_default()
+}
+
+async fn client_connection(
+    mut stream: UnixStream,
+    handle: SessionHandle,
+    paths: Paths,
+    mut config: Config,
+) -> Result<(), DaemonError> {
+    loop {
+        let bytes =
+            match tokio::time::timeout(Duration::from_secs(5), read_frame(&mut stream)).await {
+                Ok(Ok(Some(bytes))) => bytes,
+                Ok(Ok(None)) => return Ok(()),
+                Ok(Err(error)) => {
+                    write_response(&mut stream, &Response::failed(0, error)).await?;
+                    return Ok(());
+                }
+                Err(_) => {
+                    return Err(DaemonError::new(
+                        ErrorCode::CommandTimeout,
+                        "ipc read",
+                        "client stopped sending",
+                    ))
+                }
+            };
+        let request = match ipc::decode_request(&bytes) {
+            Ok(request) => request,
+            Err(error) => {
+                write_response(&mut stream, &Response::failed(0, error)).await?;
+                continue;
+            }
+        };
+        if matches!(request.operation, Operation::Watch) {
+            let id = request.id;
+            let mut snapshots = handle.status.clone();
+            loop {
+                let snapshot = snapshots.borrow_and_update().clone();
+                write_response(&mut stream, &Response::snapshot(id, &snapshot)).await?;
+                if snapshots.changed().await.is_err() {
+                    return Ok(());
+                }
+            }
+        }
+        if let Operation::EarPolicy(policy) = request.operation {
+            config.ear_policy = policy;
+            if let Err(error) = paths.save_config(&config) {
+                write_response(&mut stream, &Response::failed(request.id, error)).await?;
+                continue;
+            }
+        }
+        let response = handle.request(request).await;
+        write_response(&mut stream, &response).await?;
+    }
+}
+
+pub async fn read_frame(
+    reader: &mut (impl AsyncRead + Unpin),
+) -> Result<Option<Vec<u8>>, DaemonError> {
+    let mut frame = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        let size = reader
+            .read(&mut byte)
+            .await
+            .map_err(|e| DaemonError::io("IPC read", e))?;
+        if size == 0 {
+            return if frame.is_empty() {
+                Ok(None)
+            } else {
+                Err(DaemonError::new(
+                    ErrorCode::MalformedFrame,
+                    "ipc",
+                    "connection closed within a frame",
+                ))
+            };
+        }
+        if byte[0] == b'\n' {
+            return Ok(Some(frame));
+        }
+        if frame.len() == ipc::MAX_FRAME {
+            return Err(DaemonError::new(
+                ErrorCode::InvalidInput,
+                "ipc",
+                "frame exceeds 16 KiB",
+            ));
+        }
+        frame.push(byte[0]);
+    }
+}
+
+pub async fn write_response(
+    writer: &mut (impl AsyncWrite + Unpin),
+    response: &Response,
+) -> Result<(), DaemonError> {
+    let mut bytes = serde_json::to_vec(response)
+        .map_err(|e| DaemonError::new(ErrorCode::Internal, "ipc encode", e.to_string()))?;
+    if bytes.len() > ipc::MAX_FRAME {
+        return Err(DaemonError::new(
+            ErrorCode::InvalidInput,
+            "ipc encode",
+            "response exceeds 16 KiB",
+        ));
+    }
+    bytes.push(b'\n');
+    tokio::time::timeout(Duration::from_secs(1), writer.write_all(&bytes))
+        .await
+        .map_err(|_| {
+            DaemonError::new(
+                ErrorCode::CommandTimeout,
+                "ipc write",
+                "client stopped reading",
+            )
+        })?
+        .map_err(|e| DaemonError::io("ipc write", e))
+}
+
+pub async fn request(paths: &Paths, request: &Request) -> Result<Response, DaemonError> {
+    let duration = Duration::from_millis(request.timeout_ms);
+    tokio::time::timeout(duration, async {
+        let mut stream = UnixStream::connect(paths.socket())
+            .await
+            .map_err(|e| DaemonError::io("connect daemon", e))?;
+        let mut bytes = serde_json::to_vec(request)
+            .map_err(|e| DaemonError::new(ErrorCode::InvalidInput, "request", e.to_string()))?;
+        if bytes.len() > ipc::MAX_FRAME {
+            return Err(DaemonError::new(
+                ErrorCode::InvalidInput,
+                "request",
+                "request too large",
+            ));
+        }
+        bytes.push(b'\n');
+        stream
+            .write_all(&bytes)
+            .await
+            .map_err(|e| DaemonError::io("request write", e))?;
+        let bytes = read_frame(&mut stream).await?.ok_or_else(|| {
+            DaemonError::new(
+                ErrorCode::ServiceUnavailable,
+                "response",
+                "daemon closed before replying",
+            )
+        })?;
+        let response: Response = serde_json::from_slice(&bytes)
+            .map_err(|e| DaemonError::new(ErrorCode::MalformedFrame, "response", e.to_string()))?;
+        if response.version != ipc::PROTOCOL_VERSION || response.id != request.id {
+            return Err(DaemonError::new(
+                ErrorCode::VersionMismatch,
+                "response",
+                "unexpected version or request identifier",
+            ));
+        }
+        Ok(response)
+    })
+    .await
+    .map_err(|_| {
+        DaemonError::new(
+            ErrorCode::OutcomeUnknown,
+            "request",
+            "request deadline elapsed; a dispatched mutation may have applied",
+        )
+    })?
+}
+
+pub async fn watch_status(
+    paths: &Paths,
+    request: &Request,
+    mut output: impl FnMut(Snapshot),
+) -> Result<(), DaemonError> {
+    let mut stream =
+        tokio::time::timeout(Duration::from_secs(1), UnixStream::connect(paths.socket()))
+            .await
+            .map_err(|_| {
+                DaemonError::new(
+                    ErrorCode::ServiceUnavailable,
+                    "watch",
+                    "daemon connection timed out",
+                )
+            })?
+            .map_err(|e| DaemonError::io("watch connect", e))?;
+    let mut bytes = serde_json::to_vec(request)
+        .map_err(|e| DaemonError::new(ErrorCode::InvalidInput, "watch", e.to_string()))?;
+    bytes.push(b'\n');
+    stream
+        .write_all(&bytes)
+        .await
+        .map_err(|e| DaemonError::io("watch write", e))?;
+    while let Some(bytes) = read_frame(&mut stream).await? {
+        let response: Response = serde_json::from_slice(&bytes)
+            .map_err(|e| DaemonError::new(ErrorCode::MalformedFrame, "watch", e.to_string()))?;
+        if let Some(error) = response.error {
+            return Err(error);
+        }
+        if response.version != ipc::PROTOCOL_VERSION || response.id != request.id {
+            return Err(DaemonError::new(
+                ErrorCode::VersionMismatch,
+                "watch",
+                "unexpected watch response",
+            ));
+        }
+        let snapshot = serde_json::from_value(response.result.ok_or_else(|| {
+            DaemonError::new(ErrorCode::MalformedFrame, "watch", "missing status")
+        })?)
+        .map_err(|e| DaemonError::new(ErrorCode::MalformedFrame, "watch", e.to_string()))?;
+        output(snapshot);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn framing_preserves_split_and_combined_messages() {
+        let (mut left, mut right) = tokio::io::duplex(64);
+        let writer = tokio::spawn(async move {
+            left.write_all(b"one\nsecond\n").await.expect("write");
+        });
+        assert_eq!(
+            read_frame(&mut right).await.expect("frame"),
+            Some(b"one".to_vec())
+        );
+        assert_eq!(
+            read_frame(&mut right).await.expect("frame"),
+            Some(b"second".to_vec())
+        );
+        writer.await.expect("writer");
+        assert!(read_frame(&mut right).await.expect("eof").is_none());
+    }
+    #[tokio::test]
+    async fn framing_rejects_partial_eof_and_oversize() {
+        let mut partial: &[u8] = b"unfinished";
+        assert!(read_frame(&mut partial).await.is_err());
+        let bytes = vec![b'a'; ipc::MAX_FRAME + 1];
+        let mut oversized = bytes.as_slice();
+        assert!(read_frame(&mut oversized).await.is_err());
+    }
+}

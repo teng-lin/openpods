@@ -8,8 +8,8 @@ use std::fmt::Write as _;
 use std::io::{self, IsTerminal, Write};
 
 use librepods_core::device::battery::{BatteryState, BatteryStatus};
-use librepods_core::device::state::DeviceState;
 use librepods_core::protocol::control_command::ControlCommandId;
+use librepods_daemon::snapshot::DeviceStatus;
 
 pub struct Display {
     previous: String,
@@ -24,7 +24,7 @@ impl Display {
         }
     }
 
-    pub fn update(&mut self, state: &DeviceState) -> io::Result<()> {
+    pub fn update(&mut self, state: &DeviceStatus) -> io::Result<()> {
         let next = render(state);
         if next != self.previous {
             let mut stdout = io::stdout().lock();
@@ -50,7 +50,7 @@ fn text(value: &str) -> String {
 
 fn battery(reading: BatteryState) -> String {
     match reading.status {
-        BatteryStatus::Disconnected => "Unavailable".into(),
+        BatteryStatus::Disconnected | BatteryStatus::Unknown(_) => "Unavailable".into(),
         BatteryStatus::Charging => format!("{}% (charging)", reading.level),
         BatteryStatus::Discharging => format!("{}% (discharging)", reading.level),
         BatteryStatus::OptimizedCharging => format!("{}% (charging paused)", reading.level),
@@ -75,41 +75,33 @@ fn label(id: u8) -> String {
     }
 }
 
-pub fn render(state: &DeviceState) -> String {
+pub fn render(state: &DeviceStatus) -> String {
     let mut output = String::new();
     // Writing to a String cannot fail.
     let _ = writeln!(output, "AirPods live status — Ctrl+C to exit\n");
     for (name, value) in [
-        ("Device", text(&state.device_name)),
+        ("Device", text(&state.name)),
         ("Model", text(&state.model_number)),
         ("Manufacturer", text(&state.manufacturer)),
-        ("Bluetooth address", text(&state.bluetooth_address)),
+        ("Bluetooth address", text(&state.address)),
         ("Left battery", battery(state.battery.left)),
         ("Right battery", battery(state.battery.right)),
         ("Case battery", battery(state.battery.case_)),
         (
             "Listening mode",
-            if state.noise_control_reported {
-                format!("{:?}", state.noise_control)
-            } else {
-                "Not reported".into()
-            },
+            state
+                .listening_mode
+                .map(|mode| format!("{mode:?}"))
+                .unwrap_or_else(|| "Not reported".into()),
         ),
         (
             "Ear detection",
-            if state.ear_detection_reported {
+            if let (Some(primary), Some(secondary)) = (state.primary_in_ear, state.secondary_in_ear)
+            {
                 format!(
                     "primary: {}, secondary: {}",
-                    if state.primary_in_ear {
-                        "in-ear"
-                    } else {
-                        "out"
-                    },
-                    if state.secondary_in_ear {
-                        "in-ear"
-                    } else {
-                        "out"
-                    },
+                    if primary { "in-ear" } else { "out" },
+                    if secondary { "in-ear" } else { "out" },
                 )
             } else {
                 "Not reported".into()
@@ -159,7 +151,9 @@ mod tests {
 
     #[test]
     fn unreported_values_are_not_presented_as_real_measurements() {
-        let rendered = render(&DeviceState::default());
+        let rendered = render(&DeviceStatus::from(
+            &librepods_core::device::state::DeviceState::default(),
+        ));
         assert!(rendered.contains("Unavailable"));
         assert!(rendered.contains("Not reported"));
         assert!(!rendered.contains("0% ("));
@@ -175,7 +169,7 @@ mod tests {
 
     #[test]
     fn unknown_settings_survive_without_being_interpreted_as_booleans() {
-        let mut state = DeviceState::default();
+        let mut state = DeviceStatus::from(&librepods_core::device::state::DeviceState::default());
         state.reported_controls.insert(0x3E, [1, 2, 3, 4]);
         let rendered = render(&state);
         assert!(rendered.contains("Unknown setting"));
@@ -185,10 +179,8 @@ mod tests {
 
     #[test]
     fn device_names_cannot_emit_terminal_escape_sequences() {
-        let state = DeviceState {
-            device_name: "Pods\x1b[2J\n".into(),
-            ..DeviceState::default()
-        };
+        let mut state = DeviceStatus::from(&librepods_core::device::state::DeviceState::default());
+        state.name = "Pods\x1b[2J\n".into();
         assert!(!render(&state).contains('\x1b'));
     }
 }

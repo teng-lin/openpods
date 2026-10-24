@@ -14,7 +14,7 @@
 ❌ Missing AGPL-3.0-only header on new Rust source files
 ❌ New packet constant defined outside protocol/packets.rs
 ❌ ParsedPacket variant that silently drops data → use ParsedPacket::Unknown
-❌ State mutation outside apply_to_state() in main.rs
+❌ Device state mutation outside the single core reducer (apply_packet / session lifecycle)
 ❌ Hardcoded audio backend assumption (wpctl-only OR pactl-only)
 ❌ unwrap() on packet parsing / wire data
 ```
@@ -27,7 +27,10 @@
 |---|---|---|
 | `librepods-core` | `serde`, `thiserror`, `log`, `aes` | Any Bluetooth / OS / async-runtime I/O |
 | `librepods-linux` | `nix`, `zbus`, `btleplug`, `tokio`, `libc` | Domain logic, packet parsing |
-| `librepods-cli` | `clap`, `env_logger`, `tokio` | New protocol types |
+| `librepods-daemon` | core, platform adapters, Tokio, serde, tracing/log | Wire formats in orchestration |
+| `librepods-cli` | `clap`, `env_logger`, `tokio`, daemon API | Protocol logic and direct state mutation |
+
+The daemon owns one connection reader. Core policies accept explicit time and return actions; no blocking transport execution or wall-clock access in core.
 
 > `librepods-core` must compile for `aarch64-linux-android`. This is the litmus test.
 
@@ -147,7 +150,7 @@ sequenceDiagram
 2. Add prefix constant → `protocol/packets.rs`
 3. Add `ParsedPacket` variant → `protocol/parser.rs`
 4. Add match arm in `parse()` → `protocol/parser.rs`
-5. Add state handling in `apply_to_state()` → `librepods-cli/src/main.rs`
+5. Add state handling in the core reducer → `librepods-core/src/device/state.rs`
 6. Add unit test with raw bytes in same module
 
 > Unknown / future opcodes → `ParsedPacket::Unknown(Vec<u8>)`. Never panic.

@@ -63,6 +63,8 @@ violates this should be rejected.
 | `librepods-windows` | `windows`, `windows-sys`, `btleplug`, `tokio` | Domain logic, packet parsing | Windows Bluetooth + media I/O |
 | `librepods-cli` | `clap`, `env_logger`, `tokio`, `log` | New protocol types | Headless daemon, state machine, backend selection |
 
+The daemon port adds `librepods-daemon` for Tokio orchestration and IPC. The CLI is a thin client. Device state is updated only through the core reducer/session lifecycle; pure policies receive explicit time. See plans/rust-daemon-port.md.
+
 `librepods-core` defines I/O as traits in `src/transport.rs`
 (`L2capTransport`, `DeviceMonitor`, `MediaControl`, `BleScanner`); platform crates
 provide the implementations. The core crate contains **zero** implementations.

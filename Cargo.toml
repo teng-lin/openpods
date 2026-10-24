@@ -4,6 +4,7 @@ members = [
     "librepods-linux",
     "librepods-windows",
     "librepods-cli",
+    "librepods-daemon",
 ]
 resolver = "2"
 
