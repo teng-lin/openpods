@@ -17,7 +17,7 @@ use librepods_daemon::storage::Paths;
 use librepods_daemon::{DaemonError, ErrorCode};
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -39,6 +39,13 @@ fn battery_left() -> Vec<u8> {
     vec![4, 0, 4, 0, 4, 0, 1, 4, 1, 100, 2, 1]
 }
 
+fn key_packet(kind: u8, byte: u8) -> Vec<u8> {
+    // Synthetic one-key TLV responses; these bytes never came from a device.
+    let mut packet = vec![4, 0, 4, 0, 0x31, 0, 1, kind, 0, 16, 0];
+    packet.extend_from_slice(&[byte; 16]);
+    packet
+}
+
 #[derive(Default)]
 struct Shared {
     sleeping: AtomicBool,
@@ -46,6 +53,8 @@ struct Shared {
     lose_ack: AtomicBool,
     no_handshake: AtomicBool,
     slow_audio: AtomicBool,
+    key_reply: AtomicU8,
+    key_requests: AtomicUsize,
     connections: AtomicUsize,
     mode: Mutex<Option<NoiseControlMode>>,
     changes: Mutex<Vec<Vec<u8>>>,
@@ -74,6 +83,15 @@ impl SessionTransport for Peer {
         if bytes == packets::HANDSHAKE {
             if !self.shared.no_handshake.load(Ordering::SeqCst) {
                 self.push(packets::HANDSHAKE_ACK_PREFIX.to_vec());
+            }
+        } else if bytes == packets::REQUEST_MAGIC_CLOUD_KEYS {
+            self.shared.key_requests.fetch_add(1, Ordering::SeqCst);
+            let reply = self.shared.key_reply.load(Ordering::SeqCst);
+            if reply > 0 {
+                self.push(key_packet(1, 0x11));
+            }
+            if reply == 1 {
+                self.push(key_packet(4, 0x22));
             }
         } else if bytes == packets::SET_SPECIFIC_FEATURES {
             self.push(packets::FEATURES_ACK_PREFIX.to_vec());
@@ -1136,4 +1154,321 @@ async fn shutdown_drains_legacy_publication_and_never_recreates_owned_files_afte
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
+}
+
+#[cfg(not(feature = "ble"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn absent_ble_feature_rejects_enabling_and_key_fetch_without_disturbing_aacp() {
+    let harness = Harness::start(Arc::new(Shared::default()), Config::default()).await;
+    let initial = harness.ready().await;
+    for operation in [Operation::BleEnabled(true), Operation::FetchKeys] {
+        assert_eq!(
+            harness
+                .request(300, operation, 1000)
+                .await
+                .error
+                .expect("unsupported BLE")
+                .code,
+            ErrorCode::Unsupported
+        );
+    }
+    assert!(!harness.paths.load_config().expect("config").ble_enabled);
+    assert_eq!(harness.shared.key_requests.load(Ordering::SeqCst), 0);
+    assert!(!harness.paths.state.join("ble-keys.json").exists());
+    let status = harness.ready().await;
+    assert_eq!(status.session_generation, initial.session_generation);
+    assert!(harness
+        .request(
+            301,
+            Operation::Change(SettingChange::SingleEarbudAnc(true)),
+            1000
+        )
+        .await
+        .error
+        .is_none());
+    harness.stop().await;
+}
+
+#[cfg(feature = "ble")]
+async fn wait_for_key_requests(shared: &Shared, count: usize) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while shared.key_requests.load(Ordering::SeqCst) < count {
+        assert!(Instant::now() < deadline, "key request was not sent");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[cfg(feature = "ble")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_key_fetch_waits_for_both_new_packets_persists_privately_and_forgets() {
+    use std::os::unix::fs::PermissionsExt;
+    let shared = Arc::new(Shared::default());
+    shared.key_reply.store(2, Ordering::SeqCst); // Withhold encryption key.
+    let harness = Harness::start(shared.clone(), Config::default()).await;
+    let initial = harness.ready().await;
+    let paths = harness.paths.clone();
+    let fetch = tokio::spawn(async move {
+        runtime::request(
+            &paths,
+            &Request {
+                version: 1,
+                id: 310,
+                timeout_ms: 1500,
+                operation: Operation::FetchKeys,
+            },
+        )
+        .await
+    });
+    wait_for_key_requests(&shared, 1).await;
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(
+        !fetch.is_finished(),
+        "one key incorrectly completed acquisition"
+    );
+    assert!(
+        !harness.paths.state.join("ble-keys.json").exists(),
+        "partial keys were persisted"
+    );
+    shared
+        .peers
+        .lock()
+        .expect("peers")
+        .last()
+        .expect("peer")
+        .push(key_packet(4, 0x22));
+    let response = fetch.await.expect("fetch client").expect("response");
+    assert!(response.error.is_none(), "{:?}", response.error);
+    assert_eq!(
+        response.result,
+        Some(serde_json::json!({"keys_available": true}))
+    );
+    let key_path = harness.paths.state.join("ble-keys.json");
+    assert_eq!(
+        std::fs::metadata(&key_path)
+            .expect("private key store")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&key_path).expect("keys")).expect("private JSON");
+    assert_eq!(
+        stored["devices"][ADDRESS]["irk"],
+        serde_json::json!(vec![0x11_u8; 16])
+    );
+    assert_eq!(
+        stored["devices"][ADDRESS]["encryption_key"],
+        serde_json::json!(vec![0x22_u8; 16])
+    );
+    let enabled = harness
+        .request(311, Operation::BleEnabled(true), 1000)
+        .await;
+    assert!(enabled.error.is_none());
+    let status = harness
+        .wait_for(|status| status.ble["keys_available"] == true)
+        .await;
+    assert_eq!(status.session_generation, initial.session_generation);
+    for encoded in [
+        serde_json::to_string(&status).expect("public status"),
+        status.legacy().to_string(),
+    ] {
+        assert!(!encoded.contains("\"irk\""));
+        assert!(!encoded.contains("encryption_key"));
+        assert!(!encoded.contains("magic_acc"));
+    }
+    let forgotten = harness.request(312, Operation::ForgetKeys, 1000).await;
+    assert!(forgotten.error.is_none());
+    assert!(librepods_daemon::keys::KeyStore::load(key_path)
+        .expect("store")
+        .get(ADDRESS)
+        .expect("lookup")
+        .is_none());
+    harness
+        .wait_for(|status| status.ble["keys_available"] == false && status.connected)
+        .await;
+    assert!(harness
+        .request(313, Operation::BleEnabled(false), 1000)
+        .await
+        .error
+        .is_none());
+    assert!(
+        !harness
+            .paths
+            .load_config()
+            .expect("persisted BLE policy")
+            .ble_enabled
+    );
+    harness.stop().await;
+}
+
+#[cfg(feature = "ble")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn incomplete_key_request_times_out_without_saving_or_replaying_and_aacp_recovers() {
+    let shared = Arc::new(Shared::default());
+    shared.key_reply.store(2, Ordering::SeqCst);
+    let harness = Harness::start(shared.clone(), Config::default()).await;
+    let initial = harness.ready().await;
+    let result = runtime::request(
+        &harness.paths,
+        &Request {
+            version: 1,
+            id: 320,
+            timeout_ms: 100,
+            operation: Operation::FetchKeys,
+        },
+    )
+    .await;
+    let error = match result {
+        Ok(response) => response.error.expect("incomplete exchange"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, ErrorCode::CommandTimeout);
+    let old_peer = shared
+        .peers
+        .lock()
+        .expect("peers")
+        .first()
+        .expect("old peer")
+        .clone();
+    harness
+        .wait_for(|status| {
+            status.connected && status.session_generation > initial.session_generation
+        })
+        .await;
+    old_peer.push(key_packet(4, 0x22)); // A late response belongs to the closed session.
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(!harness.paths.state.join("ble-keys.json").exists());
+    assert_eq!(
+        shared.key_requests.load(Ordering::SeqCst),
+        1,
+        "expired key request replayed"
+    );
+    assert!(harness
+        .request(
+            321,
+            Operation::Change(SettingChange::SingleEarbudAnc(true)),
+            1000
+        )
+        .await
+        .error
+        .is_none());
+    harness.stop().await;
+}
+
+#[cfg(feature = "ble")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_ble_keys_never_block_aacp_or_start_scanning_while_connected() {
+    let harness = Harness::start(
+        Arc::new(Shared::default()),
+        Config {
+            ble_enabled: true,
+            ..Config::default()
+        },
+    )
+    .await;
+    let initial = harness.ready().await;
+    let status = harness
+        .wait_for(|status| status.ble["health"] == "paused")
+        .await;
+    assert_eq!(status.ble["keys_available"], false);
+    assert_eq!(status.ble["connected_scanning"], false);
+    assert_eq!(
+        harness.shared.key_requests.load(Ordering::SeqCst),
+        0,
+        "keys fetched without explicit request"
+    );
+    assert!(harness
+        .request(
+            330,
+            Operation::Change(SettingChange::ListeningMode(NoiseControlMode::Transparency)),
+            1000
+        )
+        .await
+        .error
+        .is_none());
+    assert_eq!(
+        harness.ready().await.session_generation,
+        initial.session_generation
+    );
+    harness.stop().await;
+}
+
+#[cfg(feature = "ble")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_key_fetch_discards_old_responses_and_requires_a_complete_new_exchange() {
+    let shared = Arc::new(Shared::default());
+    shared.key_reply.store(2, Ordering::SeqCst);
+    let harness = Harness::start(shared.clone(), Config::default()).await;
+    let initial = harness.ready().await;
+    let mut client = UnixStream::connect(harness.paths.socket())
+        .await
+        .expect("client");
+    let mut bytes = serde_json::to_vec(&Request {
+        version: 1,
+        id: 340,
+        timeout_ms: 1000,
+        operation: Operation::FetchKeys,
+    })
+    .expect("request");
+    bytes.push(b'\n');
+    client.write_all(&bytes).await.expect("key request");
+    wait_for_key_requests(&shared, 1).await;
+    let old = shared
+        .peers
+        .lock()
+        .expect("peers")
+        .first()
+        .expect("old peer")
+        .clone();
+    drop(client);
+    harness
+        .wait_for(|status| {
+            status.connected && status.session_generation > initial.session_generation
+        })
+        .await;
+    old.push(key_packet(4, 0x22));
+    let current = shared
+        .peers
+        .lock()
+        .expect("peers")
+        .last()
+        .expect("new peer")
+        .clone();
+    current.push(key_packet(4, 0x22)); // Unsolicited cached key cannot complete a later request.
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert_eq!(
+        shared.key_requests.load(Ordering::SeqCst),
+        1,
+        "cancelled exchange replayed"
+    );
+    assert!(!harness.paths.state.join("ble-keys.json").exists());
+    let paths = harness.paths.clone();
+    let fresh = tokio::spawn(async move {
+        runtime::request(
+            &paths,
+            &Request {
+                version: 1,
+                id: 341,
+                timeout_ms: 1000,
+                operation: Operation::FetchKeys,
+            },
+        )
+        .await
+    });
+    wait_for_key_requests(&shared, 2).await;
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(
+        !fresh.is_finished(),
+        "cached encryption key incorrectly completed a new exchange"
+    );
+    current.push(key_packet(4, 0x22));
+    assert!(fresh
+        .await
+        .expect("client task")
+        .expect("response")
+        .error
+        .is_none());
+    assert!(harness.paths.state.join("ble-keys.json").is_file());
+    harness.stop().await;
 }

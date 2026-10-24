@@ -74,6 +74,22 @@ class CliContract(unittest.TestCase):
 
     def test_control_audio_and_policy_verbs_forward_typed_operations(self):
         cases = [
+            (["doctor"], {"type": "doctor"}),
+            (["capabilities"], {"type": "capabilities"}),
+            (["reconnect"], {"type": "reconnect"}),
+            (["ble", "on"], {"type": "ble_enabled", "value": True}),
+            (["ble", "off"], {"type": "ble_enabled", "value": False}),
+            (["keys", "fetch"], {"type": "fetch_keys"}),
+            (["keys", "forget"], {"type": "forget_keys"}),
+            (["adaptive-level", "42"], {"type": "change", "value": {"AdaptiveNoiseLevel": 42}}),
+            (["rename", "Example AirPods"], {"type": "change", "value": {"Rename": "Example AirPods"}}),
+            (["long-press-modes", "13"], {"type": "change", "value": {"LongPressModes": 13}}),
+            (["--one-bud-anc", "off"], {"type": "change", "value": {"SingleEarbudAnc": False}}),
+            (["--noise-control", "off"], {"type": "change", "value": {"ListeningMode": "Off"}}),
+            (["--noise-control", "transparency"], {"type": "change", "value": {"ListeningMode": "Transparency"}}),
+            (["--noise-control", "adaptive"], {"type": "change", "value": {"ListeningMode": "Adaptive"}}),
+            (["audio", "unmute"], {"type": "unmute"}),
+            (["audio", "output", "example-sink"], {"type": "set_output", "value": "example-sink"}),
             (["--noise-control", "anc"], {"type": "change", "value": {"ListeningMode": "NoiseCancellation"}}),
             (["--conversation-awareness", "off"], {"type": "change", "value": {"ConversationalAwareness": False}}),
             (["compat", "onebud:on"], {"type": "change", "value": {"SingleEarbudAnc": True}}),
