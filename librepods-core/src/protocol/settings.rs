@@ -309,3 +309,282 @@ impl PendingChange {
         self.cancel()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::state::AirPodsModel;
+    use crate::protocol::parser;
+    fn state() -> DeviceState {
+        let mut state = DeviceState {
+            model: AirPodsModel::AirPodsPro2Usbc,
+            ..DeviceState::default()
+        };
+        state.begin_session(1);
+        state
+    }
+    fn mode(mode: NoiseControlMode) -> ParsedPacket {
+        ParsedPacket::NoiseControl(mode)
+    }
+    fn control(id: ControlCommandId, value: u8) -> ParsedPacket {
+        ParsedPacket::ControlCommand {
+            id,
+            data: [value, 0, 0, 0],
+        }
+    }
+    #[test]
+    fn setting_change_requires_fresh_confirmation_after_dispatch() {
+        let mut state = state();
+        state.apply_packet(&mode(NoiseControlMode::NoiseCancellation), 1, 0);
+        let change = SettingChange::ListeningMode(NoiseControlMode::Transparency);
+        let mut pending = PendingChange::new(change.clone(), 1, 100);
+        assert_eq!(
+            pending.begin(&state, 1),
+            CommandAction::Send(
+                packets::build_noise_control(NoiseControlMode::Transparency).to_vec()
+            )
+        );
+        assert_eq!(
+            pending.on_packet(&mode(NoiseControlMode::Transparency), 1, 2),
+            CommandAction::Wait
+        );
+        assert_eq!(pending.mark_sent(1, 3), CommandAction::Wait);
+        assert_eq!(
+            pending.on_packet(&control(ControlCommandId::OneBudAncMode, 1), 1, 4),
+            CommandAction::Wait
+        );
+        assert_eq!(
+            pending.on_packet(&mode(NoiseControlMode::NoiseCancellation), 1, 5),
+            CommandAction::Wait
+        );
+        assert_eq!(
+            pending.on_packet(&mode(NoiseControlMode::Transparency), 1, 6),
+            CommandAction::Complete(CommandOutcome::Confirmed)
+        );
+        assert_eq!(
+            pending.tick(1, 200),
+            CommandAction::Complete(CommandOutcome::Confirmed)
+        );
+        assert_eq!(change.id(), Some(ControlCommandId::ListeningMode.as_byte()));
+        assert!(!change.to_string().is_empty());
+    }
+    #[test]
+    fn missing_baseline_waits_and_matching_baseline_needs_no_write() {
+        let state = state();
+        let mut pending = PendingChange::new(SettingChange::ConversationalAwareness(true), 1, 100);
+        assert_eq!(
+            pending.on_packet(
+                &control(ControlCommandId::ConversationDetectConfig, 1),
+                1,
+                0
+            ),
+            CommandAction::Wait
+        );
+        assert_eq!(pending.begin(&state, 1), CommandAction::Wait);
+        assert_eq!(pending.begin(&state, 2), CommandAction::Wait);
+        assert_eq!(
+            pending.on_packet(
+                &control(ControlCommandId::ConversationDetectConfig, 1),
+                1,
+                3
+            ),
+            CommandAction::Complete(CommandOutcome::AlreadySet)
+        );
+        let mut pending = PendingChange::new(SettingChange::SingleEarbudAnc(false), 1, 100);
+        assert_eq!(pending.begin(&state, 1), CommandAction::Wait);
+        assert_eq!(
+            pending.on_packet(&control(ControlCommandId::OneBudAncMode, 1), 1, 2),
+            CommandAction::Send(ControlCommand::disabled(0x1b).to_vec())
+        );
+        pending.mark_sent(1, 3);
+        assert_eq!(
+            pending.on_packet(&control(ControlCommandId::OneBudAncMode, 2), 1, 4),
+            CommandAction::Complete(CommandOutcome::Confirmed)
+        );
+    }
+    #[test]
+    fn queued_expiry_supersession_and_disconnect_never_replay_mutations() {
+        let state = state();
+        let change = SettingChange::ConversationalAwareness(false);
+        let mut pending = PendingChange::new(change.clone(), 1, 0);
+        assert_eq!(
+            pending.begin(&state, 0),
+            CommandAction::Complete(CommandOutcome::TimedOut)
+        );
+        let mut pending = PendingChange::new(change.clone(), 1, 100);
+        assert_eq!(
+            pending.cancel(),
+            CommandAction::Complete(CommandOutcome::Cancelled)
+        );
+        let mut pending = PendingChange::new(change.clone(), 1, 100);
+        assert_eq!(
+            pending.supersede(),
+            CommandAction::Complete(CommandOutcome::Superseded)
+        );
+        let mut pending = PendingChange::new(change.clone(), 1, 100);
+        assert_eq!(
+            pending.tick(2, 0),
+            CommandAction::Complete(CommandOutcome::Cancelled)
+        );
+        for action in 0..4 {
+            let mut pending = PendingChange::new(change.clone(), 1, 100);
+            pending.begin(&state, 0);
+            pending.on_packet(
+                &control(ControlCommandId::ConversationDetectConfig, 1),
+                1,
+                1,
+            );
+            pending.mark_sent(1, 2);
+            let outcome = match action {
+                0 => pending.tick(1, 100),
+                1 => pending.cancel(),
+                2 => pending.supersede(),
+                _ => pending.transport_lost(),
+            };
+            assert_eq!(
+                outcome,
+                CommandAction::Complete(CommandOutcome::OutcomeUnknown)
+            );
+        }
+        let mut pending = PendingChange::new(change, 1, 100);
+        pending.begin(&state, 0);
+        pending.on_packet(
+            &control(ControlCommandId::ConversationDetectConfig, 1),
+            1,
+            1,
+        );
+        assert_eq!(
+            pending.mark_sent(1, 100),
+            CommandAction::Complete(CommandOutcome::TimedOut)
+        );
+    }
+    #[test]
+    fn model_and_value_validation_prevent_unsupported_mutations() {
+        let mut state = state();
+        for change in [
+            SettingChange::ListeningMode(NoiseControlMode::Off),
+            SettingChange::ConversationalAwareness(true),
+            SettingChange::SingleEarbudAnc(true),
+            SettingChange::Rename("Pods".into()),
+            SettingChange::LongPressModes(15),
+        ] {
+            assert!(change.validate(&state).is_ok());
+            assert!(!change.packet().is_empty());
+            assert!(!change.to_string().is_empty());
+        }
+        assert_eq!(
+            SettingChange::AdaptiveNoiseLevel(101).validate(&state),
+            Err(CommandRejection::InvalidValue)
+        );
+        assert_eq!(
+            SettingChange::AdaptiveNoiseLevel(50).validate(&state),
+            Err(CommandRejection::NotAdaptive)
+        );
+        state.apply_packet(&mode(NoiseControlMode::Adaptive), 1, 1);
+        assert!(SettingChange::AdaptiveNoiseLevel(50)
+            .validate(&state)
+            .is_ok());
+        assert_eq!(
+            SettingChange::AdaptiveNoiseLevel(50).packet(),
+            ControlCommand::create(0x2e, &[50, 0, 0, 0])
+        );
+        assert!(!SettingChange::AdaptiveNoiseLevel(50).to_string().is_empty());
+        for change in [
+            SettingChange::Rename(String::new()),
+            SettingChange::Rename("a".repeat(256)),
+            SettingChange::Rename("bad\nname".into()),
+            SettingChange::LongPressModes(0),
+            SettingChange::LongPressModes(16),
+        ] {
+            assert_eq!(change.validate(&state), Err(CommandRejection::InvalidValue));
+        }
+        state.model = AirPodsModel::AirPodsPro3;
+        assert_eq!(
+            SettingChange::ListeningMode(NoiseControlMode::Off).validate(&state),
+            Err(CommandRejection::Unsupported)
+        );
+        assert_eq!(
+            SettingChange::LongPressModes(1).validate(&state),
+            Err(CommandRejection::Unsupported)
+        );
+        state.model = AirPodsModel::AirPodsPro;
+        assert_eq!(
+            SettingChange::ListeningMode(NoiseControlMode::Adaptive).validate(&state),
+            Err(CommandRejection::Unsupported)
+        );
+        assert_eq!(
+            SettingChange::ConversationalAwareness(true).validate(&state),
+            Err(CommandRejection::Unsupported)
+        );
+        assert_eq!(
+            SettingChange::AdaptiveNoiseLevel(50).validate(&state),
+            Err(CommandRejection::Unsupported)
+        );
+        assert_eq!(
+            SettingChange::LongPressModes(8).validate(&state),
+            Err(CommandRejection::Unsupported)
+        );
+        state.model = AirPodsModel::AirPods1;
+        assert_eq!(
+            SettingChange::ListeningMode(NoiseControlMode::NoiseCancellation).validate(&state),
+            Err(CommandRejection::Unsupported)
+        );
+        assert_eq!(
+            SettingChange::SingleEarbudAnc(false).validate(&state),
+            Err(CommandRejection::Unsupported)
+        );
+        assert_eq!(
+            SettingChange::LongPressModes(2).validate(&state),
+            Err(CommandRejection::Unsupported)
+        );
+        state.model = AirPodsModel::Unknown;
+        let mut pending = PendingChange::new(SettingChange::ConversationalAwareness(true), 1, 100);
+        assert_eq!(
+            pending.begin(&state, 0),
+            CommandAction::Complete(CommandOutcome::Rejected(CommandRejection::UnknownModel))
+        );
+    }
+    #[test]
+    fn cached_fresh_values_and_metadata_confirmations_are_supported() {
+        let mut state = state();
+        state.apply_packet(
+            &control(ControlCommandId::ConversationDetectConfig, 1),
+            1,
+            1,
+        );
+        let mut pending = PendingChange::new(SettingChange::ConversationalAwareness(true), 1, 100);
+        assert_eq!(
+            pending.begin(&state, 2),
+            CommandAction::Complete(CommandOutcome::AlreadySet)
+        );
+        state.apply_packet(
+            &ParsedPacket::Metadata {
+                name: "Old".into(),
+                model_number: "A3048".into(),
+                manufacturer: "Apple".into(),
+            },
+            1,
+            3,
+        );
+        let mut pending = PendingChange::new(SettingChange::Rename("New".into()), 1, 100);
+        assert!(matches!(pending.begin(&state, 4), CommandAction::Send(_)));
+        pending.mark_sent(1, 5);
+        assert_eq!(
+            pending.on_packet(
+                &ParsedPacket::Metadata {
+                    name: "New".into(),
+                    model_number: "A3048".into(),
+                    manufacturer: "Apple".into()
+                },
+                1,
+                6
+            ),
+            CommandAction::Complete(CommandOutcome::Confirmed)
+        );
+        let raw = ControlCommand::enabled(0x28);
+        assert!(matches!(
+            parser::parse(&raw),
+            Ok(ParsedPacket::ControlCommand { .. })
+        ));
+    }
+}

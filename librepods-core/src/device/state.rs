@@ -235,7 +235,7 @@ pub fn model_from_ble_id(id: u16) -> AirPodsModel {
 // ---------------------------------------------------------------------------
 
 /// Aggregate device state — the central "truth" struct updated by the parser.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DeviceState {
     #[serde(default)]
     pub session_generation: u64,
@@ -277,6 +277,23 @@ pub struct DeviceState {
     pub magic_acc_enc_key: Option<[u8; 16]>,
 }
 
+impl std::fmt::Debug for DeviceState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DeviceState")
+            .field("session_generation", &self.session_generation)
+            .field("revision", &self.revision)
+            .field("connected", &self.connected)
+            .field("model", &self.model)
+            .field("noise_control_reported", &self.noise_control_reported)
+            .field(
+                "keys_available",
+                &(self.magic_acc_irk.is_some() && self.magic_acc_enc_key.is_some()),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
 impl Default for DeviceState {
     fn default() -> Self {
         Self {
@@ -310,11 +327,15 @@ impl DeviceState {
     pub fn set_device_identity(&mut self, address: &str, name: &str) {
         if self.bluetooth_address != address {
             let generation = self.session_generation;
+            let revision = self.revision;
             *self = Self::default();
             self.session_generation = generation;
+            self.revision = revision.saturating_add(1);
         }
         self.bluetooth_address = address.to_owned();
-        self.device_name = name.to_owned();
+        if !name.is_empty() {
+            self.device_name = name.to_owned();
+        }
     }
 
     pub fn capabilities(&self) -> ModelCapabilities {
@@ -340,7 +361,7 @@ impl DeviceState {
     }
 
     pub fn end_session(&mut self, generation: u64) {
-        if generation != self.session_generation {
+        if generation != self.session_generation || !self.connected {
             return;
         }
         self.connected = false;
@@ -370,12 +391,23 @@ impl DeviceState {
         if !self.connected || generation != self.session_generation {
             return false;
         }
+        if self.observations.values().any(|meta| {
+            meta.generation == generation
+                && meta.source == ObservationSource::Aacp
+                && !meta.stale
+                && meta.observed_at_ms > observed_at_ms
+        }) {
+            return false;
+        }
         let mut fields = Vec::new();
         match packet {
             ParsedPacket::Battery(info) => {
                 self.battery.merge(info);
                 for component in &info.present {
                     fields.push(format!("battery.{}", component.name().to_lowercase()));
+                }
+                for component in info.unknown_records.keys() {
+                    fields.push(format!("battery.unknown.{component:02x}"));
                 }
             }
             ParsedPacket::EarStatus { primary, secondary } => {
@@ -538,5 +570,223 @@ mod tests {
         ] {
             assert_eq!(NoiseControlMode::from_byte(mode.as_byte()), Some(mode));
         }
+    }
+}
+
+#[cfg(test)]
+mod reducer_tests {
+    use super::*;
+    use crate::device::battery::{self, BatteryStatus, Component};
+    use crate::protocol::parser::{self, ProximityKey};
+    fn reduce(state: &mut DeviceState, bytes: &[u8], at: u64) {
+        assert!(state.apply_packet(&parser::parse(bytes).expect("fixture"), 1, at));
+    }
+    #[test]
+    fn partial_updates_preserve_components_and_true_zero_is_available() {
+        let mut state = DeviceState::default();
+        state.begin_session(1);
+        reduce(
+            &mut state,
+            &[4, 0, 4, 0, 4, 0, 2, 2, 1, 80, 2, 1, 8, 1, 50, 2, 1],
+            1,
+        );
+        reduce(&mut state, &[4, 0, 4, 0, 4, 0, 1, 4, 1, 0, 1, 1], 2);
+        assert_eq!(state.battery.left.level, 0);
+        assert_eq!(state.battery.left.status, BatteryStatus::Charging);
+        assert_eq!(state.battery.right.level, 80);
+        assert_eq!(state.battery.case_.level, 50);
+        assert_eq!(state.battery.primary_side(), Some(Component::Left));
+        assert_eq!(state.battery.get(Component::Headset), Default::default());
+        reduce(&mut state, &[4, 0, 4, 0, 4, 0, 1, 1, 1, 42, 2, 1], 3);
+        assert_eq!(state.battery.get(Component::Headset).level, 42);
+        reduce(&mut state, &[4, 0, 4, 0, 4, 0, 1, 0x7f, 1, 25, 9, 1], 4);
+        assert_eq!(
+            state.battery.unknown_records[&0x7f].status,
+            BatteryStatus::Unknown(9)
+        );
+        assert!(state.fresh("battery.unknown.7f"));
+        let revision = state.revision;
+        assert!(!state.apply_packet(&ParsedPacket::NoiseControl(NoiseControlMode::Off), 0, 5));
+        assert!(!state.apply_packet(&ParsedPacket::NoiseControl(NoiseControlMode::Off), 1, 3));
+        assert_eq!(state.revision, revision);
+        state.end_session(0);
+        assert!(state.connected);
+        state.end_session(1);
+        assert!(!state.connected);
+        assert!(!state.fresh("battery.right"));
+        let revision = state.revision;
+        state.end_session(1);
+        assert_eq!(state.revision, revision);
+        state.begin_session(2);
+        assert!(!state.noise_control_reported);
+        assert_eq!(state.battery.right.level, 80);
+        assert!(!state.apply_packet(&ParsedPacket::NoiseControl(NoiseControlMode::Off), 1, 6));
+        assert_eq!(
+            battery::parse_battery(&[4, 0, 4, 0, 4, 0, 0])
+                .expect("empty packet")
+                .primary_side(),
+            None
+        );
+    }
+    #[test]
+    fn only_reducer_populates_settings_keys_wear_and_metadata() {
+        let mut state = DeviceState::default();
+        assert!(!state.apply_packet(&ParsedPacket::HandshakeAck, 0, 0));
+        state.set_device_identity("00:00:00:00:00:01", "BlueZ name");
+        state.begin_session(1);
+        state.set_device_identity("00:00:00:00:00:01", "");
+        assert_eq!(state.device_name, "BlueZ name");
+        state.begin_session(1);
+        let metadata = ParsedPacket::Metadata {
+            name: "Pods".into(),
+            model_number: "A3048".into(),
+            manufacturer: "Apple".into(),
+        };
+        assert!(state.apply_packet(&metadata, 1, 1));
+        assert_eq!(state.model, AirPodsModel::AirPodsPro2Usbc);
+        reduce(&mut state, &[4, 0, 4, 0, 6, 0, 2, 9], 2);
+        assert_eq!(
+            state.wear,
+            Some(WearReport {
+                primary: WearState::InCase,
+                secondary: WearState::Unknown(9)
+            })
+        );
+        assert!(!state.primary_in_ear);
+        assert!(!state.secondary_in_ear);
+        assert!(state.apply_packet(
+            &ParsedPacket::EarDetection {
+                primary_in_ear: true,
+                secondary_in_ear: false
+            },
+            1,
+            3
+        ));
+        assert_eq!(state.wear.expect("legacy report").primary, WearState::InEar);
+        assert!(state.apply_packet(
+            &ParsedPacket::EarDetection {
+                primary_in_ear: false,
+                secondary_in_ear: true
+            },
+            1,
+            4
+        ));
+        for (id, value) in [
+            (ControlCommandId::ConversationDetectConfig, 1),
+            (ControlCommandId::OneBudAncMode, 2),
+            (ControlCommandId::AutoAncStrength, 40),
+            (ControlCommandId::VoiceTrigger, 9),
+        ] {
+            assert!(state.apply_packet(
+                &ParsedPacket::ControlCommand {
+                    id,
+                    data: [value, 0, 0, 0]
+                },
+                1,
+                5
+            ));
+        }
+        assert!(state.conversational_awareness);
+        assert!(!state.one_bud_anc);
+        assert_eq!(state.adaptive_noise_level, 40);
+        reduce(&mut state, &ControlCommand::create(0x3e, &[1, 2, 3, 4]), 6);
+        assert_eq!(state.reported_controls[&0x3e], [1, 2, 3, 4]);
+        let keys = ParsedPacket::ProximityKeys(vec![
+            ProximityKey {
+                key_type: ProximityKeyType::Irk,
+                data: vec![1; 16],
+            },
+            ProximityKey {
+                key_type: ProximityKeyType::EncKey,
+                data: vec![2; 16],
+            },
+            ProximityKey {
+                key_type: ProximityKeyType::Irk,
+                data: vec![],
+            },
+        ]);
+        assert!(state.apply_packet(&keys, 1, 7));
+        assert_eq!(state.magic_acc_irk, Some([1; 16]));
+        assert!(state.apply_packet(
+            &ParsedPacket::MagicCloudKeys {
+                irk: [3; 16],
+                enc_key: [4; 16]
+            },
+            1,
+            8
+        ));
+        assert_eq!(state.magic_acc_enc_key, Some([4; 16]));
+        assert!(!format!("{state:?}").contains("3, 3, 3"));
+        for packet in [
+            ParsedPacket::HandshakeAck,
+            ParsedPacket::FeaturesAck,
+            ParsedPacket::Unknown(vec![]),
+            ParsedPacket::ConversationalAwareness { status: 1 },
+            ParsedPacket::HeadTracking(vec![]),
+        ] {
+            assert!(!state.apply_packet(&packet, 1, 9));
+        }
+        let revision = state.revision;
+        state.set_device_identity("00:00:00:00:00:02", "Other");
+        assert!(state.revision > revision);
+        assert!(state.magic_acc_irk.is_none());
+        assert_eq!(state.model, AirPodsModel::Unknown);
+        state.reset();
+        assert!(!state.connected);
+        assert!(!state.any_pod_in_ear());
+        assert!(!state.both_pods_in_ear());
+    }
+    #[test]
+    fn capability_map_is_conservative_and_model_identity_stable() {
+        let models = [
+            ("A1523", AirPodsModel::AirPods1),
+            ("A2031", AirPodsModel::AirPods2),
+            ("A2564", AirPodsModel::AirPods3),
+            ("A2083", AirPodsModel::AirPodsPro),
+            ("A2698", AirPodsModel::AirPodsPro2Lightning),
+            ("A3048", AirPodsModel::AirPodsPro2Usbc),
+            ("A2096", AirPodsModel::AirPodsMaxLightning),
+            ("A3184", AirPodsModel::AirPodsMaxUsbc),
+            ("A3050", AirPodsModel::AirPods4),
+            ("A3055", AirPodsModel::AirPods4Anc),
+            ("A3064", AirPodsModel::AirPodsPro3),
+            ("A3454", AirPodsModel::AirPodsMax2),
+        ];
+        for (index, (number, model)) in models.iter().enumerate() {
+            assert_eq!(model_from_number(number), *model);
+            assert!(!model.display_name().is_empty());
+            assert_eq!(model.legacy_index(), (index + 1) as u8);
+        }
+        assert_eq!(AirPodsModel::Unknown.display_name(), "");
+        assert_eq!(
+            AirPodsModel::Unknown.capabilities(),
+            ModelCapabilities::default()
+        );
+        assert!(!AirPodsModel::AirPodsPro3.capabilities().noise_off);
+        assert!(AirPodsModel::AirPodsMax2.capabilities().adaptive);
+        assert!(!AirPodsModel::AirPodsMax2.capabilities().one_bud_anc);
+        for (id, model) in [
+            (0x0220, AirPodsModel::AirPods1),
+            (0x0f20, AirPodsModel::AirPods2),
+            (0x1320, AirPodsModel::AirPods3),
+            (0x0e20, AirPodsModel::AirPodsPro),
+            (0x1420, AirPodsModel::AirPodsPro2Lightning),
+            (0x2420, AirPodsModel::AirPodsPro2Usbc),
+            (0x0a20, AirPodsModel::AirPodsMaxLightning),
+            (0x1f20, AirPodsModel::AirPodsMaxUsbc),
+            (0x1920, AirPodsModel::AirPods4),
+            (0x1b20, AirPodsModel::AirPods4Anc),
+        ] {
+            assert_eq!(model_from_ble_id(id), model);
+        }
+        assert_eq!(WearState::from_byte(1).in_ear(), Some(false));
+        assert_eq!(WearState::Unknown(4).in_ear(), None);
+        let state = DeviceState {
+            primary_in_ear: true,
+            secondary_in_ear: true,
+            ..DeviceState::default()
+        };
+        assert!(state.any_pod_in_ear());
+        assert!(state.both_pods_in_ear());
     }
 }
