@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import stat
 import shutil
@@ -76,8 +77,31 @@ class Installation(unittest.TestCase):
         path = installer.manifest_path(self.prefix)
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps({"version": 999, "files": {}}))
+        path.chmod(0o600)
         with self.assertRaises(ValueError):
             installer.uninstall(self.prefix)
+
+    def test_manifest_fifo_cannot_block_uninstall_and_private_json_is_bounded(self):
+        manifest = installer.manifest_path(self.prefix)
+        manifest.parent.mkdir(parents=True)
+        os.mkfifo(manifest, mode=0o600)
+        result = subprocess.run([sys.executable, str(ROOT / "scripts/install.py"), "uninstall",
+            "--prefix", str(self.prefix)], capture_output=True, text=True, timeout=2)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("private owned regular file", result.stderr)
+        self.assertTrue(stat.S_ISFIFO(manifest.stat().st_mode))
+        manifest.unlink()
+        manifest.write_bytes(b" " * 65537)
+        manifest.chmod(0o600)
+        with self.assertRaisesRegex(ValueError, "exceeds"):
+            installer.read_manifest(self.prefix)
+        manifest.write_text("[]")
+        with self.assertRaisesRegex(ValueError, "version/shape"):
+            installer.read_manifest(self.prefix)
+        manifest.write_text('{"version":1,"files":{}}')
+        manifest.chmod(0o644)
+        with self.assertRaisesRegex(ValueError, "private owned"):
+            installer.read_manifest(self.prefix)
 
     def test_failed_install_rolls_back_files_already_written(self):
         installer.install(self.prefix, self.binary, self.unit_dir)

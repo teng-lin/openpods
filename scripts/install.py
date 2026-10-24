@@ -5,6 +5,8 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import stat
 from pathlib import Path
 import sys
 import tempfile
@@ -40,11 +42,25 @@ def read_manifest(prefix):
     path = manifest_path(prefix)
     if path.is_symlink():
         raise ValueError("installation manifest is a symlink")
-    if not path.exists():
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
         return {"version": 1, "files": {}, "unit_dir": None}
-    result = json.loads(path.read_text())
-    if result.get("version") != 1 or not isinstance(result.get("files"), dict):
+    with os.fdopen(descriptor, "rb") as source:
+        metadata = os.fstat(source.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+            raise ValueError("installation manifest must be a private owned regular file")
+        content = source.read(64 * 1024 + 1)
+    if len(content) > 64 * 1024:
+        raise ValueError("installation manifest exceeds 64KiB")
+    result = json.loads(content)
+    if not isinstance(result, dict) or result.get("version") != 1 or not isinstance(result.get("files"), dict):
         raise ValueError("unknown installation manifest version/shape")
+    if any(not isinstance(name, str) or not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+           for name, value in result["files"].items()):
+        raise ValueError("invalid installation manifest file records")
+    if result.get("unit_dir") is not None and (not isinstance(result["unit_dir"], str) or not Path(result["unit_dir"]).is_absolute()):
+        raise ValueError("invalid installation manifest unit directory")
     return result
 
 
