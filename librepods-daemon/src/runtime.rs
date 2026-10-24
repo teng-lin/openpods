@@ -8,7 +8,9 @@ use crate::{
     ipc::{self, Operation, Request, Response},
     session::{Session, SessionHandle},
     snapshot::Snapshot,
-    storage::{atomic_write, restrict_socket, OwnerGuard, Paths},
+    storage::{
+        atomic_write, publish_legacy, read_private_json, restrict_socket, OwnerGuard, Paths,
+    },
     DaemonError, ErrorCode,
 };
 use std::future::Future;
@@ -105,11 +107,8 @@ pub async fn run(
                 let path = publisher_paths.state_file();
                 let clone = bytes.clone();
                 let result = tokio::task::spawn_blocking(move || atomic_write(&path, &clone)).await;
-                let error = match result {
-                    Ok(Ok(())) => {
-                        previous = bytes;
-                        None
-                    }
+                let mut error = match result {
+                    Ok(Ok(())) => None,
                     Ok(Err(error)) => Some(DaemonError::new(
                         ErrorCode::PersistenceFailed,
                         "status publication",
@@ -121,6 +120,28 @@ pub async fn run(
                         error.to_string(),
                     )),
                 };
+                if legacy {
+                    let paths = publisher_paths.clone();
+                    let instance = snapshot.daemon_instance.clone();
+                    let legacy_bytes = serde_json::to_vec(&snapshot.legacy())
+                        .expect("legacy DTO contains only JSON values");
+                    let legacy_result = tokio::task::spawn_blocking(move || {
+                        publish_legacy(&paths, &instance, &legacy_bytes)
+                    })
+                    .await;
+                    let legacy_error = match legacy_result {
+                        Ok(result) => result.err(),
+                        Err(join) => Some(DaemonError::new(
+                            ErrorCode::PersistenceFailed,
+                            "legacy publisher",
+                            join.to_string(),
+                        )),
+                    };
+                    error = error.or(legacy_error);
+                }
+                if error.is_none() {
+                    previous = bytes;
+                }
                 publication_health.send_if_modified(|current| {
                     if *current == error {
                         false
@@ -129,15 +150,6 @@ pub async fn run(
                         true
                     }
                 });
-                if legacy {
-                    let path = publisher_paths.legacy_state.clone();
-                    let bytes = serde_json::to_vec(&snapshot.legacy()).unwrap_or_default();
-                    if let Ok(Err(error)) =
-                        tokio::task::spawn_blocking(move || atomic_write(&path, &bytes)).await
-                    {
-                        log::error!("legacy publication degraded: {error}");
-                    }
-                }
             }
             if publication_health.borrow().is_some() {
                 tokio::select! {changed=publication.changed()=>{if changed.is_err(){break;}},_=publisher_shutdown.changed()=>break,_=tokio::time::sleep(Duration::from_secs(1))=>{}}
@@ -194,10 +206,8 @@ pub async fn run(
     publisher_stop.send_replace(true);
     let _ = publisher.await;
     if legacy {
-        if let Ok(bytes) = std::fs::read(&paths.legacy_state) {
-            if serde_json::from_slice::<serde_json::Value>(&bytes)
-                .is_ok_and(|v| v["daemon_instance"].as_str() == Some(instance.as_str()))
-            {
+        if let Ok(Some(value)) = read_private_json(&paths.legacy_state) {
+            if value["daemon_instance"].as_str() == Some(instance.as_str()) {
                 let _ = std::fs::remove_file(&paths.legacy_state);
             }
         }

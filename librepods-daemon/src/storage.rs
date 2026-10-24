@@ -69,7 +69,7 @@ impl Paths {
     pub fn load_config(&self) -> Result<Config, DaemonError> {
         match OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
             .open(&self.config)
         {
             Ok(file) => {
@@ -153,7 +153,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), DaemonError> {
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
             .open(&temporary)
             .map_err(|e| DaemonError::io("publish temporary", e))?;
         created = true;
@@ -171,6 +171,54 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), DaemonError> {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+/// A replaced FIFO, device or symlink must never turn inspection into a wait.
+pub fn read_private_json(path: &Path) -> Result<Option<serde_json::Value>, DaemonError> {
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(DaemonError::io("inspect publication", error)),
+    };
+    validate_file(&file)?;
+    let mut bytes = Vec::new();
+    file.take(crate::ipc::MAX_FRAME as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| DaemonError::io("read publication", error))?;
+    if bytes.len() > crate::ipc::MAX_FRAME {
+        return Err(DaemonError::new(
+            ErrorCode::InvalidInput,
+            "publication",
+            "existing publication exceeds size limit",
+        ));
+    }
+    serde_json::from_slice(&bytes).map(Some).map_err(|_| {
+        DaemonError::new(
+            ErrorCode::InvalidInput,
+            "publication",
+            "existing publication is not valid JSON",
+        )
+    })
+}
+
+pub fn publish_legacy(paths: &Paths, instance: &str, bytes: &[u8]) -> Result<(), DaemonError> {
+    if paths.legacy_socket.exists() {
+        return Err(DaemonError::new(
+            ErrorCode::ServiceUnavailable,
+            "legacy publication",
+            "another connection owner is present",
+        ));
+    }
+    if read_private_json(&paths.legacy_state)?
+        .is_some_and(|value| value["daemon_instance"].as_str() != Some(instance))
+    {
+        return Err(DaemonError::new(ErrorCode::PersistenceFailed,"legacy publication","existing publication belongs to another instance; preserve it before enabling compatibility"));
+    }
+    atomic_write(&paths.legacy_state, bytes)
 }
 
 pub struct OwnerGuard {
@@ -191,7 +239,7 @@ impl OwnerGuard {
             .create(true)
             .truncate(false)
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
             .open(paths.runtime.join("owner.lock"))
             .map_err(|e| DaemonError::io("owner lock", e))?;
         validate_file(&lock)?;
@@ -256,21 +304,9 @@ impl Drop for OwnerGuard {
                 let _ = fs::remove_file(&self.socket);
             }
         }
-        if let Ok(file) = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&self.state)
-        {
-            let mut bytes = Vec::new();
-            if file
-                .take(crate::ipc::MAX_FRAME as u64 + 1)
-                .read_to_end(&mut bytes)
-                .is_err()
-            {
-                return;
-            }
-            if serde_json::from_slice::<Snapshot>(&bytes)
-                .is_ok_and(|s| s.daemon_instance == self.instance)
+        if let Ok(Some(value)) = read_private_json(&self.state) {
+            if serde_json::from_value::<Snapshot>(value)
+                .is_ok_and(|snapshot| snapshot.daemon_instance == self.instance)
             {
                 let _ = fs::remove_file(&self.state);
             }

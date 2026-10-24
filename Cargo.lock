@@ -809,7 +809,9 @@ dependencies = [
 name = "librepods-linux"
 version = "0.1.0"
 dependencies = [
+ "bluez-async",
  "btleplug",
+ "dbus",
  "futures",
  "libc",
  "librepods-core",
