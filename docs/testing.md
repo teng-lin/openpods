@@ -87,6 +87,6 @@ The runtime integration tests separately exercise the actual daemon actor and
 protocol reducer using a fake transport, rather than replacing them with peers.
 
 For release coverage, use `scripts/coverage.sh target/coverage.json`. It clears
-old counters, instruments Rust tests and the actual CLI executable, runs the
+old counters, instruments both minimal and optional-BLE Rust tests and the actual CLI executable, runs the
 isolated CLI process suite, and enforces the same complete-source thresholds.
 A plain `cargo llvm-cov` test invocation misses subprocess-only CLI paths.
