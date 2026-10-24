@@ -29,6 +29,11 @@ class SoakEvidence(unittest.TestCase):
         self.assertTrue(result["memory_growth_review_required"])
         self.assertFalse(soak.summarize(samples, soak.RELEASE_SECONDS, [])["release_soak_passed"])
 
+    def test_completed_release_gate_failure_is_a_nonzero_process_exit(self):
+        self.assertEqual(soak.exit_code({"failures": [], "release_duration_met": True, "release_soak_passed": False}), 1)
+        self.assertEqual(soak.exit_code({"failures": [], "release_duration_met": False, "release_soak_passed": False}), 0)
+        self.assertEqual(soak.exit_code({"failures": [], "release_duration_met": True, "release_soak_passed": True}), 0)
+
     def test_percentile_uses_upper_tail_not_average(self):
         self.assertEqual(soak.p95(list(range(1, 101))), 95)
 

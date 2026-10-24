@@ -126,6 +126,11 @@ def summarize(samples, elapsed, failures, integrity=None):
     }
 
 
+def exit_code(summary):
+    return int(bool(summary["failures"]) or
+               (summary["release_duration_met"] and not summary["release_soak_passed"]))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pid", type=int, required=True)
@@ -218,7 +223,8 @@ def main():
             journal = journal_volume(args.unit, started_wall, time.time())
         except (OSError, ValueError) as error:
             journal = {"complete": False, "error": str(error)}
-    integrity = {"binary_identity_verified": baseline is not None,
+    integrity = {"baseline_binary_identity_verified": baseline is not None,
+                 "binary_identity_verified": baseline is not None and not failures,
                  "source_metadata_complete": source_valid,
                  "compiled_no_ble_proven": bool(samples) and compiled_no_ble,
                  "daemon_instance": daemon_instance, "journal_volume": journal,
@@ -227,7 +233,7 @@ def main():
     summary = summarize(samples, measurement_elapsed, failures, integrity)
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))
-    return int(bool(failures))
+    return exit_code(summary)
 
 
 if __name__ == "__main__":
