@@ -56,7 +56,7 @@ pub async fn run(
 ) -> Result<(), DaemonError> {
     config.validate()?;
     let instance = instance_id();
-    let _owner = OwnerGuard::acquire(&paths, &instance)?;
+    let mut owner = OwnerGuard::acquire(&paths, &instance)?;
     if paths.legacy_socket.exists() {
         return Err(DaemonError::new(
             ErrorCode::ServiceUnavailable,
@@ -66,9 +66,11 @@ pub async fn run(
     }
     let listener = UnixListener::bind(paths.socket()).map_err(|e| DaemonError::io("listen", e))?;
     restrict_socket(&paths.socket())?;
+    owner.record_socket()?;
     let session = Session::spawn(backend, config.clone(), instance);
     let mut publication = session.handle.status.clone();
     let publisher_paths = paths.clone();
+    let publication_health = session.handle.publication_health.clone();
     let legacy = config.legacy_compatibility;
     let publisher = tokio::spawn(async move {
         let mut previous = Vec::new();
@@ -85,11 +87,30 @@ pub async fn run(
                 let path = publisher_paths.state_file();
                 let clone = bytes.clone();
                 let result = tokio::task::spawn_blocking(move || atomic_write(&path, &clone)).await;
-                match result {
-                    Ok(Ok(())) => previous = bytes,
-                    Ok(Err(error)) => log::error!("status publication degraded: {error}"),
-                    Err(error) => log::error!("status publisher failed: {error}"),
-                }
+                let error = match result {
+                    Ok(Ok(())) => {
+                        previous = bytes;
+                        None
+                    }
+                    Ok(Err(error)) => Some(DaemonError::new(
+                        ErrorCode::PersistenceFailed,
+                        "status publication",
+                        error.to_string(),
+                    )),
+                    Err(error) => Some(DaemonError::new(
+                        ErrorCode::PersistenceFailed,
+                        "status publisher",
+                        error.to_string(),
+                    )),
+                };
+                publication_health.send_if_modified(|current| {
+                    if *current == error {
+                        false
+                    } else {
+                        *current = error;
+                        true
+                    }
+                });
                 if legacy {
                     let path = publisher_paths.legacy_state.clone();
                     let bytes = serde_json::to_vec(&snapshot.legacy()).unwrap_or_default();
@@ -100,7 +121,9 @@ pub async fn run(
                     }
                 }
             }
-            if publication.changed().await.is_err() {
+            if publication_health.borrow().is_some() {
+                tokio::select! {changed=publication.changed()=>{if changed.is_err(){break;}},_=tokio::time::sleep(Duration::from_secs(1))=>{}}
+            } else if publication.changed().await.is_err() {
                 break;
             }
         }
@@ -155,32 +178,38 @@ fn publication_instance(paths: &Paths) -> String {
 }
 
 async fn client_connection(
-    mut stream: UnixStream,
+    stream: UnixStream,
     handle: SessionHandle,
     paths: Paths,
     mut config: Config,
 ) -> Result<(), DaemonError> {
+    let (mut reader, mut writer) = stream.into_split();
+    let mut buffered = Vec::new();
     loop {
-        let bytes =
-            match tokio::time::timeout(Duration::from_secs(5), read_frame(&mut stream)).await {
-                Ok(Ok(Some(bytes))) => bytes,
-                Ok(Ok(None)) => return Ok(()),
-                Ok(Err(error)) => {
-                    write_response(&mut stream, &Response::failed(0, error)).await?;
-                    return Ok(());
-                }
-                Err(_) => {
-                    return Err(DaemonError::new(
-                        ErrorCode::CommandTimeout,
-                        "ipc read",
-                        "client stopped sending",
-                    ))
-                }
-            };
+        let bytes = match tokio::time::timeout(
+            Duration::from_secs(5),
+            read_buffered_frame(&mut reader, &mut buffered),
+        )
+        .await
+        {
+            Ok(Ok(Some(bytes))) => bytes,
+            Ok(Ok(None)) => return Ok(()),
+            Ok(Err(error)) => {
+                write_response(&mut writer, &Response::failed(0, error)).await?;
+                return Ok(());
+            }
+            Err(_) => {
+                return Err(DaemonError::new(
+                    ErrorCode::CommandTimeout,
+                    "ipc read",
+                    "client stopped sending",
+                ))
+            }
+        };
         let request = match ipc::decode_request(&bytes) {
             Ok(request) => request,
             Err(error) => {
-                write_response(&mut stream, &Response::failed(0, error)).await?;
+                write_response(&mut writer, &Response::failed(0, error)).await?;
                 continue;
             }
         };
@@ -189,21 +218,80 @@ async fn client_connection(
             let mut snapshots = handle.status.clone();
             loop {
                 let snapshot = snapshots.borrow_and_update().clone();
-                write_response(&mut stream, &Response::snapshot(id, &snapshot)).await?;
-                if snapshots.changed().await.is_err() {
-                    return Ok(());
+                write_response(&mut writer, &Response::snapshot(id, &snapshot)).await?;
+                let mut probe = [0u8; 1];
+                tokio::select! {
+                    changed=snapshots.changed()=>{if changed.is_err(){return Ok(());}},
+                    _=reader.read(&mut probe)=>return Ok(()),
                 }
             }
         }
         if let Operation::EarPolicy(policy) = request.operation {
             config.ear_policy = policy;
             if let Err(error) = paths.save_config(&config) {
-                write_response(&mut stream, &Response::failed(request.id, error)).await?;
+                write_response(&mut writer, &Response::failed(request.id, error)).await?;
                 continue;
             }
         }
-        let response = handle.request(request).await;
-        write_response(&mut stream, &response).await?;
+        let pending = handle.request(request);
+        tokio::pin!(pending);
+        let response = loop {
+            let mut input = [0u8; 1024];
+            tokio::select! {
+                biased;
+                read=reader.read(&mut input)=>{
+                    let size=read.map_err(|e|DaemonError::io("IPC pending read",e))?;
+                    if size==0{return Ok(());}
+                    if buffered.len()+size>ipc::MAX_FRAME*2{return Err(DaemonError::new(ErrorCode::QueueFull,"IPC","too many pipelined bytes"));}
+                    buffered.extend_from_slice(&input[..size]);
+                },
+                response=&mut pending=>break response,
+            }
+        };
+        write_response(&mut writer, &response).await?;
+    }
+}
+
+async fn read_buffered_frame(
+    reader: &mut (impl AsyncRead + Unpin),
+    buffered: &mut Vec<u8>,
+) -> Result<Option<Vec<u8>>, DaemonError> {
+    loop {
+        if let Some(position) = buffered.iter().position(|byte| *byte == b'\n') {
+            if position > ipc::MAX_FRAME {
+                return Err(DaemonError::new(
+                    ErrorCode::InvalidInput,
+                    "IPC",
+                    "frame exceeds16KiB",
+                ));
+            }
+            let frame = buffered.drain(..=position).collect::<Vec<_>>();
+            return Ok(Some(frame[..position].to_vec()));
+        }
+        if buffered.len() > ipc::MAX_FRAME {
+            return Err(DaemonError::new(
+                ErrorCode::InvalidInput,
+                "IPC",
+                "frame exceeds16KiB",
+            ));
+        }
+        let mut input = [0u8; 1024];
+        let size = reader
+            .read(&mut input)
+            .await
+            .map_err(|e| DaemonError::io("IPC read", e))?;
+        if size == 0 {
+            return if buffered.is_empty() {
+                Ok(None)
+            } else {
+                Err(DaemonError::new(
+                    ErrorCode::MalformedFrame,
+                    "IPC",
+                    "EOF within frame",
+                ))
+            };
+        }
+        buffered.extend_from_slice(&input[..size]);
     }
 }
 
@@ -270,6 +358,15 @@ pub async fn write_response(
 
 pub async fn request(paths: &Paths, request: &Request) -> Result<Response, DaemonError> {
     let duration = Duration::from_millis(request.timeout_ms);
+    let mutation = !matches!(
+        request.operation,
+        Operation::Status
+            | Operation::Watch
+            | Operation::Capabilities
+            | Operation::Doctor
+            | Operation::AudioStatus
+    );
+    let mut dispatched = false;
     tokio::time::timeout(duration, async {
         let mut stream = UnixStream::connect(paths.socket())
             .await
@@ -288,6 +385,7 @@ pub async fn request(paths: &Paths, request: &Request) -> Result<Response, Daemo
             .write_all(&bytes)
             .await
             .map_err(|e| DaemonError::io("request write", e))?;
+        dispatched = true;
         let bytes = read_frame(&mut stream).await?.ok_or_else(|| {
             DaemonError::new(
                 ErrorCode::ServiceUnavailable,
@@ -309,9 +407,13 @@ pub async fn request(paths: &Paths, request: &Request) -> Result<Response, Daemo
     .await
     .map_err(|_| {
         DaemonError::new(
-            ErrorCode::OutcomeUnknown,
+            if mutation && dispatched {
+                ErrorCode::OutcomeUnknown
+            } else {
+                ErrorCode::CommandTimeout
+            },
             "request",
-            "request deadline elapsed; a dispatched mutation may have applied",
+            "request deadline elapsed; inspect status before retrying a dispatched mutation",
         )
     })?
 }

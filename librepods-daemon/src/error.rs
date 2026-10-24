@@ -26,7 +26,7 @@ pub enum ErrorCode {
     Internal,
 }
 
-#[derive(Debug, Clone, thiserror::Error, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
 #[error("{stage}: {message}")]
 pub struct DaemonError {
     pub code: ErrorCode,

@@ -34,6 +34,7 @@ struct Envelope {
     request: Request,
     deadline: Instant,
     reply: oneshot::Sender<Response>,
+    dispatched: Arc<AtomicBool>,
 }
 struct Active {
     envelope: Envelope,
@@ -44,7 +45,9 @@ struct Active {
 pub struct SessionHandle {
     sender: mpsc::SyncSender<Envelope>,
     backend: Arc<dyn Backend>,
-    audio_feed: watch::Sender<serde_json::Value>,
+    pub(crate) audio_feed: watch::Sender<serde_json::Value>,
+    pub(crate) publication_health: watch::Sender<Option<DaemonError>>,
+    pub(crate) manual_overrides: watch::Sender<u64>,
     pub status: watch::Receiver<Snapshot>,
     stopped: Arc<AtomicBool>,
     transport: Arc<Mutex<Option<Arc<dyn SessionTransport>>>>,
@@ -78,6 +81,10 @@ impl SessionHandle {
                 | Operation::Unmute
         ) {
             let address = self.status.borrow().device.address.clone();
+            if !matches!(request.operation, Operation::AudioStatus) {
+                self.manual_overrides
+                    .send_modify(|revision| *revision = revision.saturating_add(1));
+            }
             let result = tokio::time::timeout(
                 duration,
                 self.backend.audio_async(address, request.operation),
@@ -90,11 +97,13 @@ impl SessionHandle {
             };
         }
         let deadline = Instant::now() + duration;
+        let dispatched = Arc::new(AtomicBool::new(false));
         let (reply, rx) = oneshot::channel();
         match self.sender.try_send(Envelope {
             request,
             deadline,
             reply,
+            dispatched: dispatched.clone(),
         }) {
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(_)) => {
@@ -127,9 +136,13 @@ impl SessionHandle {
             Err(_) => Response::failed(
                 id,
                 DaemonError::new(
-                    ErrorCode::OutcomeUnknown,
+                    if dispatched.load(Ordering::SeqCst) {
+                        ErrorCode::OutcomeUnknown
+                    } else {
+                        ErrorCode::CommandTimeout
+                    },
                     "command",
-                    "request deadline elapsed; a dispatched change may have applied",
+                    "request deadline elapsed; inspect status before retrying a dispatched change",
                 ),
             ),
         }
@@ -159,12 +172,16 @@ impl Session {
         status.ear_policy = config.ear_policy;
         let (status_tx, status_rx) = watch::channel(status.clone());
         let (audio_feed, audio_updates) = watch::channel(status.audio.clone());
+        let (publication_health, publication_updates) = watch::channel(None);
+        let (manual_overrides, _) = watch::channel(0);
         let stopped = Arc::new(AtomicBool::new(false));
         let transport = Arc::new(Mutex::new(None));
         let handle = SessionHandle {
             sender,
             backend: backend.clone(),
             audio_feed,
+            publication_health,
+            manual_overrides,
             status: status_rx,
             stopped: stopped.clone(),
             transport: transport.clone(),
@@ -177,6 +194,7 @@ impl Session {
                 status,
                 status_tx,
                 audio_updates,
+                publication_updates,
                 receiver,
                 stopped,
                 transport,
@@ -221,6 +239,7 @@ struct Worker {
     status: Snapshot,
     status_tx: watch::Sender<Snapshot>,
     audio_updates: watch::Receiver<serde_json::Value>,
+    publication_updates: watch::Receiver<Option<DaemonError>>,
     receiver: mpsc::Receiver<Envelope>,
     stopped: Arc<AtomicBool>,
     transport: Arc<Mutex<Option<Arc<dyn SessionTransport>>>>,
@@ -276,7 +295,7 @@ impl Worker {
         let jitter = (u64::from(self.attempts) * 137 + self.generation * 71) % 500;
         let delay = Duration::from_millis((1000u64 << exponent) + jitter);
         self.retry_at = Instant::now()
-            + if self.attempts % 10 == 0 {
+            + if self.attempts.is_multiple_of(10) {
                 Duration::from_secs(30)
             } else {
                 delay
@@ -401,9 +420,11 @@ impl Worker {
             match action {
                 CommandAction::Wait => {
                     self.active = Some(active);
+                    self.publish();
                     return;
                 }
                 CommandAction::Send(packet) => {
+                    active.envelope.dispatched.store(true, Ordering::SeqCst);
                     let remaining = active
                         .envelope
                         .deadline
@@ -494,8 +515,19 @@ impl Worker {
                 serde_json::json!({"lifecycle":self.status.lifecycle,"last_error":self.status.last_error,"ble":self.status.ble,"queue_depth":self.status.queue_depth}),
             ),
             Operation::Change(change) => {
-                if !self.status.connected || !self.state.fresh("metadata") {
-                    self.queue.push_front(envelope);
+                if !self.status.connected {
+                    let _ = envelope.reply.send(Response::failed(
+                        id,
+                        DaemonError::new(
+                            ErrorCode::DeviceUnavailable,
+                            "command",
+                            "AirPods control connection is not ready",
+                        ),
+                    ));
+                    return;
+                }
+                if !self.state.fresh("metadata") {
+                    self.queue.push_back(envelope);
                     return;
                 }
                 let remaining = envelope.deadline.saturating_duration_since(Instant::now());
@@ -509,11 +541,13 @@ impl Worker {
                 return;
             }
             Operation::Reconnect => {
+                envelope.dispatched.store(true, Ordering::SeqCst);
                 self.disconnect();
                 self.retry_at = Instant::now();
                 Response::ok(id, serde_json::json!({"scheduled":true}))
             }
             Operation::EarPolicy(policy) => {
+                envelope.dispatched.store(true, Ordering::SeqCst);
                 self.config.ear_policy = *policy;
                 self.status.ear_policy = *policy;
                 self.publish();
@@ -532,6 +566,11 @@ impl Worker {
     }
     fn run(&mut self) {
         while !self.stopped.load(Ordering::SeqCst) {
+            if self.publication_updates.has_changed().unwrap_or(false) {
+                self.status.publication_error =
+                    self.publication_updates.borrow_and_update().clone();
+                self.publish();
+            }
             if self.audio_updates.has_changed().unwrap_or(false) {
                 self.status.audio = self.audio_updates.borrow_and_update().clone();
                 self.publish();

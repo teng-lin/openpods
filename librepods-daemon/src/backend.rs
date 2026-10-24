@@ -68,6 +68,7 @@ pub struct LinuxBackend {
     sleeping: std::sync::atomic::AtomicBool,
     monitor: Option<librepods_linux::bluez_monitor::BluezMonitor>,
     connecting: std::sync::Mutex<Option<librepods_linux::l2cap::Cancellation>>,
+    cancelled: std::sync::atomic::AtomicBool,
 }
 impl Default for LinuxBackend {
     fn default() -> Self {
@@ -76,12 +77,15 @@ impl Default for LinuxBackend {
             sleeping: std::sync::atomic::AtomicBool::new(false),
             monitor: librepods_linux::bluez_monitor::BluezMonitor::start().ok(),
             connecting: std::sync::Mutex::new(None),
+            cancelled: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
 
 impl Backend for LinuxBackend {
     fn cancel(&self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         if let Ok(connecting) = self.connecting.lock() {
             if let Some(cancel) = connecting.as_ref() {
                 cancel.cancel();
@@ -152,6 +156,9 @@ impl Backend for LinuxBackend {
         if let Ok(mut connecting) = self.connecting.lock() {
             *connecting = Some(cancel.clone());
         }
+        if self.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+            cancel.cancel();
+        }
         let result = librepods_linux::l2cap::L2capLinux::connect_with_cancel(
             &endpoint.address,
             librepods_core::protocol::packets::AAP_PSM,
@@ -191,7 +198,8 @@ impl Backend for LinuxBackend {
                         .map_err(|e| transport_error("audio status", e))?;
                     let name = snapshot
                         .outputs
-                        .first()
+                        .iter()
+                        .find(|node| node.selected_device && !node.monitor)
                         .ok_or_else(|| {
                             DaemonError::new(
                                 ErrorCode::DeviceUnavailable,

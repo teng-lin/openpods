@@ -145,6 +145,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), DaemonError> {
     private_directory(directory)?;
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temporary = directory.join(format!(".write-{}-{sequence}", std::process::id()));
+    let mut created = false;
     let result = (|| {
         let mut file = OpenOptions::new()
             .write(true)
@@ -153,6 +154,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), DaemonError> {
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&temporary)
             .map_err(|e| DaemonError::io("publish temporary", e))?;
+        created = true;
         file.write_all(bytes)
             .and_then(|_| file.write_all(b"\n"))
             .and_then(|_| file.sync_all())
@@ -163,7 +165,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), DaemonError> {
             .map_err(|e| DaemonError::io("publish sync", e))?;
         Ok(())
     })();
-    if result.is_err() {
+    if result.is_err() && created {
         let _ = fs::remove_file(&temporary);
     }
     result
@@ -174,6 +176,7 @@ pub struct OwnerGuard {
     socket: PathBuf,
     state: PathBuf,
     instance: String,
+    socket_identity: Option<(u64, u64)>,
 }
 
 impl OwnerGuard {
@@ -222,13 +225,35 @@ impl OwnerGuard {
             socket,
             state: paths.state_file(),
             instance: instance.into(),
+            socket_identity: None,
         })
+    }
+
+    pub fn record_socket(&mut self) -> Result<(), DaemonError> {
+        use std::os::unix::fs::FileTypeExt;
+        let metadata = fs::symlink_metadata(&self.socket)
+            .map_err(|e| DaemonError::io("socket identity", e))?;
+        if !metadata.file_type().is_socket() || metadata.uid() != uid() {
+            return Err(DaemonError::new(
+                ErrorCode::PermissionDenied,
+                "socket identity",
+                "unexpected socket owner or type",
+            ));
+        }
+        self.socket_identity = Some((metadata.dev(), metadata.ino()));
+        Ok(())
     }
 }
 
 impl Drop for OwnerGuard {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.socket);
+        if let (Some(identity), Ok(metadata)) =
+            (self.socket_identity, fs::symlink_metadata(&self.socket))
+        {
+            if (metadata.dev(), metadata.ino()) == identity {
+                let _ = fs::remove_file(&self.socket);
+            }
+        }
         if let Ok(bytes) = fs::read(&self.state) {
             if serde_json::from_slice::<Snapshot>(&bytes)
                 .is_ok_and(|s| s.daemon_instance == self.instance)
@@ -297,5 +322,18 @@ mod tests {
         atomic_write(&path, b"old").expect("old");
         assert!(atomic_write(&path.join("invalid"), b"new").is_err());
         assert_eq!(fs::read(&path).expect("old remains"), b"old\n");
+    }
+
+    #[test]
+    fn cleanup_does_not_remove_an_unexpected_replacement_file() {
+        let temp = tempfile::tempdir().expect("temp");
+        let paths = paths(temp.path());
+        let guard = OwnerGuard::acquire(&paths, "one").expect("owner");
+        fs::write(paths.socket(), b"replacement").expect("replace");
+        drop(guard);
+        assert_eq!(
+            fs::read(paths.socket()).expect("replacement survives"),
+            b"replacement"
+        );
     }
 }
