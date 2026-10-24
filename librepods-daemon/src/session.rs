@@ -6,7 +6,7 @@ use crate::{
     backend::{is_timeout, transport_error, Backend, SessionTransport},
     config::Config,
     ipc::{Operation, Request, Response},
-    snapshot::{DeviceStatus, Snapshot},
+    snapshot::Snapshot,
     telemetry::{KeyRead, Telemetry},
     DaemonError, ErrorCode,
 };
@@ -301,7 +301,6 @@ impl Worker {
         self.started.elapsed().as_millis() as u64
     }
     fn publish(&mut self) {
-        self.status.device = DeviceStatus::from(&self.state);
         self.status.session_generation = self.generation;
         self.status.revision = self.status.revision.saturating_add(1);
         self.status.updated_unix_ms = SystemTime::now()
@@ -309,6 +308,11 @@ impl Worker {
             .unwrap_or_default()
             .as_millis() as u64;
         self.status.observed_monotonic_ms = self.now();
+        self.status.observe_device(
+            &self.state,
+            self.status.observed_monotonic_ms,
+            self.status.updated_unix_ms,
+        );
         self.status.queue_depth = self.queue.len()
             + usize::from(self.active.is_some())
             + usize::from(self.key_exchange.is_some());

@@ -311,6 +311,12 @@ impl Drop for OwnerGuard {
                 let _ = fs::remove_file(&self.state);
             }
         }
+        // A concurrently spawned child can briefly share this open description
+        // before exec closes its CLOEXEC copy. Release ownership explicitly.
+        // Safety: the lock descriptor remains valid until this guard is dropped.
+        unsafe {
+            libc::flock(self._lock.as_raw_fd(), libc::LOCK_UN);
+        }
     }
 }
 

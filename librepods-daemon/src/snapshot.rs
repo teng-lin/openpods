@@ -41,6 +41,9 @@ pub struct Snapshot {
     pub connected: bool,
     pub updated_unix_ms: u64,
     pub observed_monotonic_ms: u64,
+    /// Receipt times in wall-clock milliseconds, retained through disconnects.
+    #[serde(default)]
+    pub observation_unix_ms: BTreeMap<String, u64>,
     pub device: DeviceStatus,
     pub ear_policy: EarPolicy,
     pub retry_count: u32,
@@ -65,6 +68,7 @@ impl Snapshot {
             connected: state.connected,
             updated_unix_ms: 0,
             observed_monotonic_ms: 0,
+            observation_unix_ms: BTreeMap::new(),
             device: DeviceStatus::from(state),
             ear_policy: EarPolicy::Off,
             retry_count: 0,
@@ -77,6 +81,25 @@ impl Snapshot {
             ble: json!({"compiled":cfg!(feature="ble"),"enabled":false,"health":"disabled"}),
             ble_enabled: false,
         }
+    }
+
+    pub(crate) fn observe_device(&mut self, state: &DeviceState, monotonic_ms: u64, unix_ms: u64) {
+        self.observation_unix_ms
+            .retain(|field, _| state.observations.contains_key(field));
+        for (field, observation) in &state.observations {
+            let same_receipt = self.device.observations.get(field).is_some_and(|previous| {
+                previous.generation == observation.generation
+                    && previous.observed_at_ms == observation.observed_at_ms
+                    && previous.source == observation.source
+            });
+            if !same_receipt || !self.observation_unix_ms.contains_key(field) {
+                self.observation_unix_ms.insert(
+                    field.clone(),
+                    unix_ms.saturating_sub(monotonic_ms.saturating_sub(observation.observed_at_ms)),
+                );
+            }
+        }
+        self.device = DeviceStatus::from(state);
     }
 
     pub fn legacy(&self) -> Value {
@@ -164,6 +187,27 @@ impl From<&DeviceState> for DeviceStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn observation_wall_times_survive_clock_changes_and_stale_publication() {
+        let mut state = DeviceState::default();
+        state.begin_session(1);
+        let packet =
+            librepods_core::protocol::parser::parse(&[4, 0, 4, 0, 4, 0, 1, 4, 1, 42, 2, 1])
+                .expect("battery");
+        state.apply_packet(&packet, 1, 10);
+        let mut snapshot = Snapshot::new("test".into(), &state);
+        snapshot.observe_device(&state, 20, 1000);
+        assert_eq!(snapshot.observation_unix_ms["battery.left"], 990);
+        snapshot.observe_device(&state, 30, 500);
+        assert_eq!(snapshot.observation_unix_ms["battery.left"], 990);
+        state.end_session(1);
+        snapshot.observe_device(&state, 40, 2000);
+        assert_eq!(snapshot.observation_unix_ms["battery.left"], 990);
+        state.begin_session(2);
+        state.apply_packet(&packet, 2, 50);
+        snapshot.observe_device(&state, 60, 3000);
+        assert_eq!(snapshot.observation_unix_ms["battery.left"], 2990);
+    }
     #[test]
     fn legacy_battery_does_not_present_stale_cached_readings_as_available() {
         let mut state = DeviceState::default();
