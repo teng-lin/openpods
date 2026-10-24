@@ -77,6 +77,7 @@ fn parse_bdaddr(addr: &str) -> Result<u64, TransportError> {
 pub struct L2capWindows {
     sock: SOCKET,
     connected: AtomicBool,
+    closed: AtomicBool,
 }
 
 impl L2capWindows {
@@ -139,6 +140,7 @@ impl L2capWindows {
         Ok(Self {
             sock,
             connected: AtomicBool::new(true),
+            closed: AtomicBool::new(false),
         })
     }
 }
@@ -191,10 +193,23 @@ impl L2capTransport for L2capWindows {
     }
 
     fn close(&self) -> Result<(), TransportError> {
-        if self.connected.swap(false, Ordering::Relaxed) {
+        self.connected.store(false, Ordering::Release);
+        if !self.closed.swap(true, Ordering::AcqRel) {
             unsafe { ws_close(self.sock) };
         }
         Ok(())
+    }
+
+    fn recv_timeout(
+        &self,
+        _buf: &mut [u8],
+        _timeout: std::time::Duration,
+    ) -> Result<usize, TransportError> {
+        Err(crate::error::PlatformError::new(
+            "deadline-bounded Windows L2CAP is not implemented",
+            crate::error::ErrorKind::Unsupported,
+        )
+        .into())
     }
 
     fn is_connected(&self) -> bool {
@@ -204,7 +219,7 @@ impl L2capTransport for L2capWindows {
 
 impl Drop for L2capWindows {
     fn drop(&mut self) {
-        if self.connected.swap(false, Ordering::Relaxed) {
+        if !self.closed.swap(true, Ordering::AcqRel) {
             unsafe { ws_close(self.sock) };
         }
     }

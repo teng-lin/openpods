@@ -50,6 +50,7 @@ pub struct AudioStream {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct AudioSnapshot {
     pub server_name: String,
+    pub card_name: Option<String>,
     pub default_output: Option<String>,
     pub default_input: Option<String>,
     pub profile: Option<String>,
@@ -59,6 +60,7 @@ pub struct AudioSnapshot {
     pub playback_streams: Vec<AudioStream>,
     pub recording_streams: Vec<AudioStream>,
     pub capture_active: bool,
+    pub capture_known: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -94,7 +96,22 @@ pub enum AudioAction {
 }
 
 async fn pactl(arguments: &[&str]) -> Result<Vec<u8>, TransportError> {
-    let mut command = Command::new("pactl");
+    run_program(
+        std::ffi::OsStr::new("pactl"),
+        arguments,
+        TIMEOUT,
+        MAX_OUTPUT,
+    )
+    .await
+}
+
+async fn run_program(
+    program: &std::ffi::OsStr,
+    arguments: &[&str],
+    timeout: Duration,
+    max_output: u64,
+) -> Result<Vec<u8>, TransportError> {
+    let mut command = Command::new(program);
     command
         .args(arguments)
         .stdin(Stdio::null())
@@ -112,10 +129,10 @@ async fn pactl(arguments: &[&str]) -> Result<Vec<u8>, TransportError> {
         .stderr
         .take()
         .ok_or_else(|| PlatformError::new("capture audio API error", ErrorKind::Io))?;
-    let result = tokio::time::timeout(TIMEOUT, async {
+    let result = tokio::time::timeout(timeout, async {
         let mut output = Vec::new();
         let mut error = Vec::new();
-        let mut stdout = stdout.take(MAX_OUTPUT + 1);
+        let mut stdout = stdout.take(max_output + 1);
         let mut stderr = stderr.take(64 * 1024);
         let (out, err, status) = tokio::join!(
             stdout.read_to_end(&mut output),
@@ -129,7 +146,7 @@ async fn pactl(arguments: &[&str]) -> Result<Vec<u8>, TransportError> {
     .await
     .map_err(|_| PlatformError::new("audio API operation", ErrorKind::Timeout))?
     .map_err(|error| PlatformError::io("audio API operation", error))?;
-    if result.1.len() > MAX_OUTPUT as usize {
+    if result.1.len() > max_output as usize {
         return Err(PlatformError::new(
             "audio API output exceeds size limit",
             ErrorKind::Truncated,
@@ -260,6 +277,17 @@ pub async fn audio_snapshot(address: &str) -> Result<AudioSnapshot, TransportErr
         json(&["list", "sink-inputs"]),
         json(&["list", "source-outputs"])
     )?;
+    if !info.is_object()
+        || [&cards, &outputs, &inputs, &playback, &recording]
+            .iter()
+            .any(|value| !value.is_array())
+    {
+        return Err(PlatformError::new(
+            "audio API returned an invalid snapshot shape",
+            ErrorKind::Unavailable,
+        )
+        .into());
+    }
     Ok(decode_audio(
         address, info, cards, outputs, inputs, playback, recording,
     ))
@@ -304,7 +332,16 @@ fn decode_audio(
                 input.selected_device && !input.monitor && Some(input.index) == stream.target_index
             })
     });
+    let capture_known = recording_streams
+        .iter()
+        .filter(|stream| !stream.corked)
+        .all(|stream| {
+            stream
+                .target_index
+                .is_some_and(|index| inputs.iter().any(|input| input.index == index))
+        });
     AudioSnapshot {
+        card_name: card.and_then(|card| string(card, "name")),
         server_name: string(&info, "server_name").unwrap_or_default(),
         default_output: string(&info, "default_sink_name"),
         default_input: string(&info, "default_source_name"),
@@ -315,12 +352,22 @@ fn decode_audio(
         playback_streams: streams(&playback, "sink"),
         recording_streams,
         capture_active,
+        capture_known,
     }
 }
 
 /// Perform only the requested mutation, after resolving current node/profile state.
 pub async fn audio_action(address: &str, action: AudioAction) -> Result<(), TransportError> {
     let state = audio_snapshot(address).await?;
+    let args = action_arguments(&state, action)?;
+    pactl(&args.iter().map(String::as_str).collect::<Vec<_>>()).await?;
+    Ok(())
+}
+
+fn action_arguments(
+    state: &AudioSnapshot,
+    action: AudioAction,
+) -> Result<Vec<String>, TransportError> {
     let valid_node = |name: &str, input: bool| -> bool {
         (if input { &state.inputs } else { &state.outputs })
             .iter()
@@ -339,16 +386,9 @@ pub async fn audio_action(address: &str, action: AudioAction) -> Result<(), Tran
                 .iter()
                 .any(|candidate| candidate.name == profile && candidate.available) =>
         {
-            let cards = json(&["list", "cards"]).await?;
-            let name = cards
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|card| device_matches(card, address))
-                .and_then(|card| string(card, "name"))
-                .ok_or_else(|| {
-                    PlatformError::new("selected audio card unavailable", ErrorKind::Unavailable)
-                })?;
+            let name = state.card_name.clone().ok_or_else(|| {
+                PlatformError::new("selected audio card unavailable", ErrorKind::Unavailable)
+            })?;
             vec!["set-card-profile".into(), name, profile]
         }
         AudioAction::SetMute { name, input, muted } if valid_node(&name, input) => vec![
@@ -401,8 +441,7 @@ pub async fn audio_action(address: &str, action: AudioAction) -> Result<(), Tran
             .into())
         }
     };
-    pactl(&args.iter().map(String::as_str).collect::<Vec<_>>()).await?;
-    Ok(())
+    Ok(args)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -617,6 +656,190 @@ pub async fn notify(summary: &str, body: &str) -> Result<(), TransportError> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn explicit_audio_actions_validate_targets_and_preserve_argument_boundaries() {
+        let state = AudioSnapshot {
+            card_name: Some("selected-card".into()),
+            profiles: vec![AudioProfile {
+                name: "a2dp".into(),
+                available: true,
+                sinks: 1,
+                sources: 0,
+            }],
+            outputs: vec![AudioNode {
+                index: 1,
+                name: "output with spaces".into(),
+                ..Default::default()
+            }],
+            inputs: vec![AudioNode {
+                index: 2,
+                name: "external microphone".into(),
+                ..Default::default()
+            }],
+            playback_streams: vec![AudioStream {
+                index: 3,
+                ..Default::default()
+            }],
+            recording_streams: vec![AudioStream {
+                index: 4,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let cases = [
+            (
+                AudioAction::SetDefaultOutput {
+                    name: "output with spaces".into(),
+                },
+                vec!["set-default-sink", "output with spaces"],
+            ),
+            (
+                AudioAction::SetDefaultInput {
+                    name: "external microphone".into(),
+                },
+                vec!["set-default-source", "external microphone"],
+            ),
+            (
+                AudioAction::SetProfile {
+                    profile: "a2dp".into(),
+                },
+                vec!["set-card-profile", "selected-card", "a2dp"],
+            ),
+            (
+                AudioAction::SetMute {
+                    name: "external microphone".into(),
+                    input: true,
+                    muted: true,
+                },
+                vec!["set-source-mute", "external microphone", "1"],
+            ),
+            (
+                AudioAction::SetMute {
+                    name: "output with spaces".into(),
+                    input: false,
+                    muted: false,
+                },
+                vec!["set-sink-mute", "output with spaces", "0"],
+            ),
+            (
+                AudioAction::SetVolume {
+                    name: "external microphone".into(),
+                    input: true,
+                    percent: 20,
+                },
+                vec!["set-source-volume", "external microphone", "20%"],
+            ),
+            (
+                AudioAction::SetVolume {
+                    name: "output with spaces".into(),
+                    input: false,
+                    percent: 40,
+                },
+                vec!["set-sink-volume", "output with spaces", "40%"],
+            ),
+            (
+                AudioAction::MovePlayback {
+                    index: 3,
+                    output: "output with spaces".into(),
+                },
+                vec!["move-sink-input", "3", "output with spaces"],
+            ),
+            (
+                AudioAction::MoveRecording {
+                    index: 4,
+                    input: "external microphone".into(),
+                },
+                vec!["move-source-output", "4", "external microphone"],
+            ),
+        ];
+        for (action, expected) in cases {
+            assert_eq!(
+                action_arguments(&state, action).expect("explicit target"),
+                expected
+            );
+        }
+        for action in [
+            AudioAction::SetProfile {
+                profile: "missing".into(),
+            },
+            AudioAction::SetVolume {
+                name: "output with spaces".into(),
+                input: false,
+                percent: 101,
+            },
+            AudioAction::SetDefaultInput {
+                name: "missing".into(),
+            },
+            AudioAction::MovePlayback {
+                index: 99,
+                output: "output with spaces".into(),
+            },
+        ] {
+            assert!(action_arguments(&state, action).is_err());
+        }
+    }
+
+    #[test]
+    fn unresolved_recording_target_does_not_claim_capture_is_idle() {
+        let state = decode_audio(
+            "AA:BB:CC:DD:EE:FF",
+            json!({}),
+            json!([]),
+            json!([]),
+            json!([]),
+            json!([]),
+            json!([{"index":1,"corked":false}]),
+        );
+        assert!(!state.capture_known);
+    }
+
+    #[tokio::test]
+    async fn audio_process_output_deadlines_and_failures_are_bounded() {
+        use std::ffi::OsStr;
+        assert_eq!(
+            run_program(
+                OsStr::new("/usr/bin/printf"),
+                &["hello"],
+                Duration::from_secs(1),
+                8
+            )
+            .await
+            .expect("small output"),
+            b"hello"
+        );
+        let error = run_program(
+            OsStr::new("/usr/bin/printf"),
+            &["too long"],
+            Duration::from_secs(1),
+            2,
+        )
+        .await
+        .expect_err("output bound");
+        assert_eq!(crate::error::kind(&error), Some(ErrorKind::Truncated));
+        let error = run_program(
+            OsStr::new("/usr/bin/sleep"),
+            &["30"],
+            Duration::from_millis(20),
+            8,
+        )
+        .await
+        .expect_err("deadline");
+        assert_eq!(crate::error::kind(&error), Some(ErrorKind::Timeout));
+        assert!(
+            run_program(OsStr::new("/usr/bin/false"), &[], Duration::from_secs(1), 8)
+                .await
+                .is_err()
+        );
+        assert!(run_program(
+            OsStr::new("/no/such/audio-client"),
+            &[],
+            Duration::from_secs(1),
+            8
+        )
+        .await
+        .is_err());
+    }
 
     struct FakePlayer {
         playing: bool,

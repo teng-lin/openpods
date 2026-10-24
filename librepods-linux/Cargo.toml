@@ -10,7 +10,7 @@ license.workspace = true
 description = "Linux platform implementations for LibrePods (BlueZ, MPRIS, L2CAP)"
 
 [dependencies]
-librepods-core = { path = "../librepods-core" }
+librepods-core = { path = "../librepods-core", version = "0.1.0" }
 log = "0.4"
 thiserror = "2"
 

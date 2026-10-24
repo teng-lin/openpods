@@ -14,5 +14,6 @@
 
 pub mod ble;
 pub mod device_monitor;
+pub mod error;
 pub mod l2cap;
 pub mod media;
