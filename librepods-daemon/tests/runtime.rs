@@ -2777,3 +2777,49 @@ async fn ephemeral_sessions_reject_key_persistence_before_requesting_secrets() {
     assert_eq!(shared.key_requests.load(Ordering::SeqCst), 0);
     session.stop();
 }
+
+#[cfg(feature = "ble")]
+#[tokio::test]
+async fn private_key_persistence_failure_never_acknowledges_or_exposes_received_secrets() {
+    let shared = Arc::new(Shared::default());
+    shared.key_reply.store(1, Ordering::SeqCst);
+    let harness = Harness::start(shared.clone(), Config::default()).await;
+    harness.ready().await;
+    let store = harness.paths.state.join("ble-keys.json");
+    std::fs::create_dir(&store).unwrap();
+    let response = harness.request(930, Operation::FetchKeys, 1000).await;
+    assert!(
+        response.error.is_some(),
+        "received keys cannot imply durable availability"
+    );
+    assert!(response.result.is_none());
+    assert_eq!(shared.key_requests.load(Ordering::SeqCst), 1);
+    let forgotten = harness.request(931, Operation::ForgetKeys, 1000).await;
+    assert!(
+        forgotten.error.is_some(),
+        "unsafe existing keystore cannot be silently replaced"
+    );
+    assert!(store.is_dir());
+    let status = harness.ready().await;
+    for public in [
+        serde_json::to_string(&response).unwrap(),
+        serde_json::to_string(&status).unwrap(),
+        status.legacy().to_string(),
+    ] {
+        assert!(!public.contains("\"irk\""));
+        assert!(!public.contains("encryption_key"));
+        assert!(!public.contains("17,17,17"));
+    }
+    let change = harness
+        .request(
+            932,
+            Operation::Change(SettingChange::ListeningMode(NoiseControlMode::Transparency)),
+            1000,
+        )
+        .await;
+    assert!(
+        change.error.is_none(),
+        "key persistence failure must leave AACP usable: {change:?}"
+    );
+    harness.stop().await;
+}
