@@ -114,7 +114,27 @@ impl Snapshot {
             json!({
             "available":available(reading) && fresh(field),"level":reading.level,
             "charging":matches!(reading.status,BatteryStatus::Charging),
-            "in_ear":in_ear.unwrap_or(false)})
+            "in_ear":in_ear.unwrap_or(false),"in_ear_known":in_ear.is_some()})
+        };
+        let absolute_wear = |left: bool| match d.wear_primary_side {
+            Some(librepods_core::device::battery::Component::Left) => {
+                if left {
+                    d.primary_in_ear
+                } else {
+                    d.secondary_in_ear
+                }
+            }
+            Some(librepods_core::device::battery::Component::Right) => {
+                if left {
+                    d.secondary_in_ear
+                } else {
+                    d.primary_in_ear
+                }
+            }
+            _ => match (d.primary_in_ear, d.secondary_in_ear) {
+                (Some(primary), Some(secondary)) if primary == secondary => Some(primary),
+                _ => None,
+            },
         };
         let toggle = |id: u8| {
             d.reported_controls
@@ -131,8 +151,8 @@ impl Snapshot {
             "supports_conversational_awareness":capabilities["conversational_awareness"],
             "supports_one_bud_anc":capabilities["one_bud_anc"],
             "noise_mode":d.listening_mode.map(|m|i32::from(m.as_byte())-1).unwrap_or(-1),
-            "left":pod(d.battery.left,match d.wear_primary_side {Some(librepods_core::device::battery::Component::Left)=>d.primary_in_ear,Some(librepods_core::device::battery::Component::Right)=>d.secondary_in_ear,_=>None},"battery.left"),
-            "right":pod(d.battery.right,match d.wear_primary_side {Some(librepods_core::device::battery::Component::Left)=>d.secondary_in_ear,Some(librepods_core::device::battery::Component::Right)=>d.primary_in_ear,_=>None},"battery.right"),
+            "left":pod(d.battery.left,absolute_wear(true),"battery.left"),
+            "right":pod(d.battery.right,absolute_wear(false),"battery.right"),
             "case":{"available":available(d.battery.case_) && fresh("battery.case"),"level":d.battery.case_.level,
                 "charging":matches!(d.battery.case_.status,BatteryStatus::Charging)},
             "headset":{"available":available(d.battery.headset) && fresh("battery.headset"),"level":d.battery.headset.level,"charging":matches!(d.battery.headset.status,BatteryStatus::Charging)},
@@ -306,7 +326,10 @@ mod tests {
         advert.primary_left = true;
         state.apply_verified_ble(&advert, 1, 102, 5000);
         let snapshot = Snapshot::new("test".into(), &state);
-        assert_eq!(snapshot.legacy()["right"]["in_ear"], true);
+        assert_eq!(snapshot.device.primary_in_ear, Some(true));
+        assert_eq!(snapshot.device.wear_primary_side, None);
+        assert_eq!(snapshot.legacy()["right"]["in_ear_known"], false);
+        assert_eq!(snapshot.legacy()["left"]["in_ear_known"], false);
         assert_eq!(snapshot.legacy()["left"]["in_ear"], false);
     }
     #[test]
@@ -342,6 +365,49 @@ mod tests {
         let snapshot = Snapshot::new("test".into(), &state);
         assert_eq!(snapshot.device.primary_in_ear, None);
         assert_eq!(snapshot.device.wear_primary_side, None);
+    }
+    #[test]
+    fn documented_aacp_role_switch_never_claims_an_unproven_absolute_ear() {
+        use librepods_core::{
+            device::state::WearState,
+            protocol::parser::{self, ParsedPacket},
+        };
+        let mut state = DeviceState::default();
+        state.begin_session(1);
+        state.apply_packet(
+            &parser::parse(&[4, 0, 4, 0, 4, 0, 1, 2, 1, 99, 2, 1]).unwrap(),
+            1,
+            0,
+        );
+        // The protocol permits a microphone/primary switch on removal. This same
+        // asymmetric frame can describe either physical ear without a role ID.
+        state.apply_packet(
+            &ParsedPacket::EarStatus {
+                primary: WearState::InEar,
+                secondary: WearState::OutOfEar,
+            },
+            1,
+            1,
+        );
+        let asymmetric = Snapshot::new("test".into(), &state);
+        assert_eq!(asymmetric.device.primary_in_ear, Some(true));
+        assert_eq!(asymmetric.device.secondary_in_ear, Some(false));
+        assert_eq!(asymmetric.device.wear_primary_side, None);
+        assert_eq!(asymmetric.legacy()["left"]["in_ear_known"], false);
+        assert_eq!(asymmetric.legacy()["right"]["in_ear_known"], false);
+        state.apply_packet(
+            &ParsedPacket::EarStatus {
+                primary: WearState::InEar,
+                secondary: WearState::InEar,
+            },
+            1,
+            2,
+        );
+        let symmetric = Snapshot::new("test".into(), &state);
+        for side in ["left", "right"] {
+            assert_eq!(symmetric.legacy()[side]["in_ear"], true);
+            assert_eq!(symmetric.legacy()[side]["in_ear_known"], true);
+        }
     }
     #[test]
     fn public_status_never_exposes_keys_or_invents_connected_measurements() {

@@ -248,14 +248,13 @@ pub struct DeviceState {
     pub observations: BTreeMap<String, ObservationMeta>,
     #[serde(default)]
     pub wear: Option<WearReport>,
-    /// Absolute orientation associated with this wear report, not later battery updates.
-    /// AACP uses the preceding AACP pod-battery primary within the same session;
-    /// BLE uses that advertisement's explicit primary bit. A later battery packet
-    /// never relabels an older report or retroactively fills unknown orientation.
+    /// Absolute orientation proved by the wear report's source (currently verified BLE).
+    /// AACP wear has no absolute side identifier. A preceding battery primary is
+    /// historical context, not proof: the microphone/primary role can switch.
     #[serde(default)]
     pub wear_primary_side: Option<Component>,
     /// Last primary side observed through AACP in this session. BLE never changes it.
-    /// An AACP wear report before an AACP pod battery packet has unknown orientation.
+    /// This historical battery context never establishes a later wear report's orientation.
     #[serde(skip)]
     pub aacp_primary_side: Option<Component>,
     #[serde(default)]
@@ -605,7 +604,7 @@ impl DeviceState {
                 }
             }
             ParsedPacket::EarStatus { primary, secondary } => {
-                self.wear_primary_side = self.aacp_primary_side;
+                self.wear_primary_side = None;
                 self.wear = Some(WearReport {
                     primary: *primary,
                     secondary: *secondary,
@@ -631,7 +630,7 @@ impl DeviceState {
                         WearState::OutOfEar
                     },
                 });
-                self.wear_primary_side = self.aacp_primary_side;
+                self.wear_primary_side = None;
                 self.primary_in_ear = *primary_in_ear;
                 self.secondary_in_ear = *secondary_in_ear;
                 self.ear_detection_reported = true;
@@ -1020,19 +1019,19 @@ mod ble_reducer_tests {
         assert_eq!(state.aacp_primary_side, Some(Component::Right));
         assert_eq!(state.wear_primary_side, None); // A later battery frame cannot orient the earlier report.
         state.apply_packet(&wear, 1, 13);
-        assert_eq!(state.wear_primary_side, Some(Component::Right));
+        assert_eq!(state.wear_primary_side, None);
         let left = crate::protocol::parser::parse(&[4, 0, 4, 0, 4, 0, 1, 4, 1, 80, 2, 1]).unwrap();
         state.apply_packet(&left, 1, 14);
         assert_eq!(state.aacp_primary_side, Some(Component::Left));
-        assert_eq!(state.wear_primary_side, Some(Component::Right));
+        assert_eq!(state.wear_primary_side, None);
         state.apply_verified_ble(&advertisement, 1, 15, 5000);
-        assert_eq!(state.wear_primary_side, Some(Component::Right));
+        assert_eq!(state.wear_primary_side, None);
         state.apply_verified_ble(&advertisement, 1, 6000, 5000);
         assert_eq!(state.wear_primary_side, Some(Component::Left));
         state.apply_packet(&right, 1, 6001);
         assert_eq!(state.wear_primary_side, Some(Component::Left));
         state.apply_packet(&wear, 1, 6002);
-        assert_eq!(state.wear_primary_side, Some(Component::Right));
+        assert_eq!(state.wear_primary_side, None);
         state.end_session(1);
         assert_eq!(state.wear_primary_side, None);
         assert_eq!(state.aacp_primary_side, None);
@@ -1059,7 +1058,7 @@ mod ble_reducer_tests {
             1,
             3,
         );
-        assert_eq!(state.wear_primary_side, Some(Component::Right));
+        assert_eq!(state.wear_primary_side, None);
     }
     #[test]
     fn verified_ble_enriches_disconnected_state_without_readying_control() {
