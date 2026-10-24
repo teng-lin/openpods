@@ -380,6 +380,7 @@ pub async fn request(paths: &Paths, request: &Request) -> Result<Response, Daemo
             | Operation::Capabilities
             | Operation::Doctor
             | Operation::AudioStatus
+            | Operation::FetchKeys
     );
     let mut dispatched = false;
     tokio::time::timeout(duration, async {

@@ -40,6 +40,13 @@ impl Telemetry {
         }
     }
 
+    pub fn pause_for_connection(&self) -> Result<(), DaemonError> {
+        match &self.coordinator {
+            Some(coordinator) => coordinator.pause_for_connection(Duration::from_millis(500)),
+            None => Ok(()),
+        }
+    }
+
     fn store(&self) -> Result<KeyStore, DaemonError> {
         let paths = self.paths.as_ref().ok_or_else(|| {
             DaemonError::new(
@@ -140,7 +147,7 @@ impl Telemetry {
         json!({
             "compiled": cfg!(feature="ble"), "enabled": enabled,
             "health": self.coordinator.as_ref().map(|scanner| scanner.health()).unwrap_or_default(),
-            "keys_available": self.keys.is_some(), "last_error": self.error,
+            "keys_available": self.keys.is_some(), "last_error": self.error.clone().or_else(|| self.coordinator.as_ref().and_then(|scanner| scanner.last_error())),
             "connected_scanning": false,
         })
     }
