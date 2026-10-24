@@ -58,6 +58,9 @@ impl RecoveryPolicy {
             watchdog_at_ms: 0,
         }
     }
+    pub fn is_desired(&self) -> bool {
+        self.desired
+    }
     pub fn ready(&mut self, now_ms: u64) {
         self.state = Lifecycle::Ready;
         self.due_ms = None;
@@ -146,7 +149,12 @@ impl RecoveryPolicy {
         self.due_ms = None;
     }
     pub fn resume(&mut self, now_ms: u64) -> RecoveryDecision {
-        if self.state != Lifecycle::Suspended || !self.desired {
+        if self.state != Lifecycle::Suspended {
+            return RecoveryDecision::Wait;
+        }
+        if !self.desired {
+            self.state = Lifecycle::WaitingForDevice;
+            self.due_ms = None;
             return RecoveryDecision::Wait;
         }
         self.state = Lifecycle::WaitingForAdapter;
@@ -271,6 +279,19 @@ mod tests {
         assert_eq!(
             policy.tick(10_104, true, true, true),
             RecoveryDecision::Reconcile
+        );
+    }
+    #[test]
+    fn resume_after_intentional_disconnect_leaves_suspend_without_reenabling_retries() {
+        let mut policy = RecoveryPolicy::new(DEFAULT_ABSENT_ATTEMPTS);
+        policy.disconnect_intentionally();
+        policy.suspend();
+        assert_eq!(policy.resume(10), RecoveryDecision::Wait);
+        assert_eq!(policy.state, Lifecycle::WaitingForDevice);
+        assert!(!policy.is_desired());
+        assert_eq!(
+            policy.tick(100_000, true, true, true),
+            RecoveryDecision::Wait
         );
     }
     #[test]

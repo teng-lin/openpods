@@ -12,8 +12,11 @@ use crate::{
 };
 use librepods_core::{
     device::state::DeviceState,
+    policy::recovery::{
+        Lifecycle, RecoveryDecision, RecoveryPolicy, DEFAULT_ABSENT_ATTEMPTS, RECONCILE_INTERVAL_MS,
+    },
     protocol::{
-        handshake::{Handshake, HandshakeAction},
+        handshake::{Handshake, HandshakeAction, HandshakeStage},
         parser,
         settings::{CommandAction, CommandOutcome, PendingChange},
     },
@@ -30,6 +33,7 @@ use tokio::sync::{oneshot, watch};
 
 const QUEUE_LIMIT: usize = 64;
 const READ_SLICE: Duration = Duration::from_millis(40);
+const AVAILABILITY_POLL_MS: u64 = 1000;
 
 struct Envelope {
     request: Request,
@@ -234,10 +238,14 @@ impl Session {
                 queue: VecDeque::new(),
                 started,
                 generation: 0,
-                retry_at: Instant::now(),
-                attempts: 0,
-                last_probe: Instant::now(),
-                suspended: false,
+                recovery: {
+                    let mut policy = RecoveryPolicy::new(DEFAULT_ABSENT_ATTEMPTS);
+                    policy.reconnect_explicitly(0);
+                    policy
+                },
+                next_probe_ms: 0,
+                adapter_ready: false,
+                bluez_connected: false,
             }
             .run();
         });
@@ -282,10 +290,10 @@ struct Worker {
     queue: VecDeque<Envelope>,
     started: Instant,
     generation: u64,
-    retry_at: Instant,
-    attempts: u32,
-    last_probe: Instant,
-    suspended: bool,
+    recovery: RecoveryPolicy,
+    next_probe_ms: u64,
+    adapter_ready: bool,
+    bluez_connected: bool,
 }
 
 impl Worker {
@@ -335,50 +343,174 @@ impl Worker {
         self.state.end_session(self.generation);
         self.status.connected = false;
     }
-    fn schedule_retry(&mut self) {
-        self.attempts = self.attempts.saturating_add(1);
-        let exponent = self.attempts.saturating_sub(1).min(4);
-        let jitter = (u64::from(self.attempts) * 137 + self.generation * 71) % 500;
-        let delay = Duration::from_millis((1000u64 << exponent) + jitter);
-        self.retry_at = Instant::now()
-            + if self.attempts.is_multiple_of(10) {
-                Duration::from_secs(30)
-            } else {
-                delay
-            };
-        self.status.retry_count = self.attempts;
-        self.status.retry_at_ms = Some(
-            self.now()
-                + self
-                    .retry_at
-                    .saturating_duration_since(Instant::now())
-                    .as_millis() as u64,
-        );
-        self.status.lifecycle = "recovering".into();
+    fn sync_recovery(&mut self) {
+        self.status.lifecycle = match self.recovery.state {
+            Lifecycle::WaitingForAdapter => "waiting_for_adapter",
+            Lifecycle::WaitingForDevice => "waiting_for_device",
+            Lifecycle::Connecting => "connecting",
+            Lifecycle::AwaitingHandshake => "awaiting_handshake",
+            Lifecycle::AwaitingFeatures => "awaiting_features",
+            Lifecycle::Subscribing => "subscribing",
+            Lifecycle::Ready => "ready",
+            Lifecycle::Recovering => "recovering",
+            Lifecycle::Suspended => "suspended",
+            Lifecycle::Stopping => "stopping",
+        }
+        .into();
+        self.status.retry_count = self
+            .recovery
+            .connected_attempts
+            .saturating_add(self.recovery.absent_attempts);
+        self.status.retry_at_ms = self.recovery.due_ms;
+    }
+    fn lifecycle(&mut self, state: Lifecycle) {
+        self.recovery.state = state;
+        self.sync_recovery();
         self.publish();
     }
-    fn connect(&mut self) -> Result<(), DaemonError> {
-        self.status.lifecycle = "waiting_for_device".into();
+    fn schedule_retry(&mut self) {
+        if matches!(
+            self.recovery.state,
+            Lifecycle::Suspended | Lifecycle::Stopping
+        ) {
+            return;
+        }
+        if !self.adapter_ready {
+            self.recovery.state = Lifecycle::WaitingForAdapter;
+            self.recovery.due_ms = None;
+        } else if self.status.last_error.as_ref().is_some_and(|error| {
+            matches!(
+                error.code,
+                ErrorCode::PermissionDenied
+                    | ErrorCode::Unsupported
+                    | ErrorCode::InvalidInput
+                    | ErrorCode::VersionMismatch
+            )
+        }) {
+            // A configuration/permission failure needs an explicit reconnect after correction.
+            self.recovery.disconnect_intentionally();
+        } else {
+            let attempt = u64::from(self.recovery.connected_attempts)
+                + u64::from(self.recovery.absent_attempts)
+                + 1;
+            let jitter = attempt
+                .wrapping_mul(137)
+                .wrapping_add(self.generation.wrapping_mul(71))
+                % 500;
+            self.recovery
+                .on_failure(self.now(), self.bluez_connected, jitter);
+        }
+        self.sync_recovery();
+        self.next_probe_ms = self.now();
         self.publish();
-        let endpoint = self.backend.discover(self.config.address.as_deref())?;
-        self.generation = self.generation.wrapping_add(1);
+    }
+    fn probe_availability(&mut self) {
+        let now = self.now();
+        if now < self.next_probe_ms {
+            return;
+        }
+        self.next_probe_ms = now.saturating_add(if self.connection.is_some() {
+            RECONCILE_INTERVAL_MS
+        } else {
+            AVAILABILITY_POLL_MS
+        });
+        let address = self.config.address.as_deref().or_else(|| {
+            (!self.state.bluetooth_address.is_empty())
+                .then_some(self.state.bluetooth_address.as_str())
+        });
+        let prior = (self.adapter_ready, self.bluez_connected);
+        let discovered = self.backend.discover(address);
+        self.adapter_ready = discovered
+            .as_ref()
+            .err()
+            .is_none_or(|error| error.code != ErrorCode::AdapterUnavailable);
+        self.bluez_connected = discovered.is_ok();
+        if let Err(error) = discovered {
+            let changed = prior != (self.adapter_ready, self.bluez_connected)
+                || self.status.last_error.as_ref() != Some(&error);
+            if self.connection.is_some() {
+                self.disconnect();
+                self.status.last_error = Some(error);
+                self.schedule_retry();
+                return;
+            }
+            if !self.adapter_ready {
+                self.recovery.state = Lifecycle::WaitingForAdapter;
+                self.recovery.due_ms = None;
+            }
+            if changed {
+                self.status.last_error = Some(error);
+                self.sync_recovery();
+                self.publish();
+            }
+        }
+        if self.recovery.is_desired()
+            && self.connection.is_none()
+            && ((!prior.0 && self.adapter_ready) || (!prior.1 && self.bluez_connected))
+        {
+            self.recovery.reconnect_explicitly(now);
+            self.sync_recovery();
+            self.publish();
+        }
+    }
+    fn connect(&mut self) -> Result<(), DaemonError> {
+        self.lifecycle(Lifecycle::WaitingForDevice);
+        let address = self.config.address.as_deref().or_else(|| {
+            (!self.state.bluetooth_address.is_empty())
+                .then_some(self.state.bluetooth_address.as_str())
+        });
+        let endpoint = match self.backend.discover(address) {
+            Ok(endpoint) => {
+                self.adapter_ready = true;
+                self.bluez_connected = true;
+                endpoint
+            }
+            Err(error) => {
+                self.adapter_ready = error.code != ErrorCode::AdapterUnavailable;
+                self.bluez_connected = false;
+                return Err(error);
+            }
+        };
+        self.generation = self
+            .generation
+            .max(self.recovery.generation)
+            .saturating_add(1);
+        self.recovery.generation = self.generation;
         self.state
             .set_device_identity(&endpoint.address, &endpoint.name);
         self.state.begin_session(self.generation);
-        self.status.lifecycle = "connecting".into();
+        self.recovery.state = Lifecycle::Connecting;
+        self.sync_recovery();
         self.poll_telemetry(false);
+        self.telemetry.pause_for_connection()?;
         self.publish();
         let connection = self.backend.connect(&endpoint, Duration::from_secs(3))?;
         if let Ok(mut transport) = self.transport.lock() {
             *transport = Some(connection.clone());
         }
         self.connection = Some(connection.clone());
-        self.status.lifecycle = "awaiting_handshake".into();
-        self.publish();
+        self.lifecycle(Lifecycle::AwaitingHandshake);
         let mut handshake = Handshake::new(self.generation, self.now(), 3000);
         let mut action = handshake.start();
         let mut bytes = [0u8; 1024];
         loop {
+            let stage = match handshake.stage {
+                HandshakeStage::Features => Lifecycle::AwaitingFeatures,
+                HandshakeStage::Subscription | HandshakeStage::Ready => Lifecycle::Subscribing,
+                _ => Lifecycle::AwaitingHandshake,
+            };
+            if self.recovery.state != stage {
+                self.lifecycle(stage);
+            }
+            if self.backend.sleeping() {
+                self.recovery.suspend();
+                self.sync_recovery();
+                return Err(DaemonError::new(
+                    ErrorCode::Cancelled,
+                    "handshake",
+                    "suspend interrupted handshake",
+                ));
+            }
             if self.stopped.load(Ordering::SeqCst) {
                 return Err(DaemonError::new(
                     ErrorCode::Cancelled,
@@ -428,12 +560,11 @@ impl Worker {
                 Err(error) => return Err(transport_error("handshake receive", error)),
             }
         }
-        self.status.lifecycle = "ready".into();
+        self.recovery.ready(self.now());
+        self.sync_recovery();
         self.status.connected = true;
         self.status.last_error = None;
-        self.status.retry_at_ms = None;
-        self.attempts = 0;
-        self.last_probe = Instant::now();
+        self.next_probe_ms = self.now().saturating_add(RECONCILE_INTERVAL_MS);
         self.publish();
         Ok(())
     }
@@ -669,7 +800,9 @@ impl Worker {
             Operation::Reconnect => {
                 envelope.dispatched.store(true, Ordering::SeqCst);
                 self.disconnect();
-                self.retry_at = Instant::now();
+                self.recovery.reconnect_explicitly(self.now());
+                self.next_probe_ms = 0;
+                self.sync_recovery();
                 Response::ok(id, serde_json::json!({"scheduled":true}))
             }
             Operation::EarPolicy(policy) => {
@@ -746,28 +879,43 @@ impl Worker {
                 self.enqueue(envelope);
             }
             let sleeping = self.backend.sleeping();
-            if sleeping && !self.suspended {
-                self.suspended = true;
+            if sleeping && self.recovery.state != Lifecycle::Suspended {
                 self.disconnect();
-                self.status.lifecycle = "suspended".into();
+                self.recovery.suspend();
+                self.sync_recovery();
                 self.publish();
             }
-            if !sleeping && self.suspended {
-                self.suspended = false;
-                self.retry_at = Instant::now();
+            if !sleeping && self.recovery.state == Lifecycle::Suspended {
+                self.recovery.resume(self.now());
+                self.next_probe_ms = 0;
+                self.sync_recovery();
+                self.publish();
             }
             self.expire_key_exchange();
             self.dispatch();
             self.poll_telemetry(
-                !self.suspended
+                !sleeping
+                    && self.recovery.state != Lifecycle::Suspended
                     && self.connection.is_none()
                     && self.status.lifecycle == "waiting_for_device",
             );
-            if !self.suspended && self.connection.is_none() && Instant::now() >= self.retry_at {
-                if let Err(error) = self.connect() {
-                    self.disconnect();
-                    self.error(error);
-                    self.schedule_retry();
+            if !sleeping && self.recovery.state != Lifecycle::Suspended {
+                self.probe_availability();
+                let have_address =
+                    self.config.address.is_some() || !self.state.bluetooth_address.is_empty();
+                if self.connection.is_none()
+                    && self.recovery.tick(
+                        self.now(),
+                        self.adapter_ready,
+                        self.bluez_connected,
+                        have_address,
+                    ) == RecoveryDecision::Reconcile
+                {
+                    if let Err(error) = self.connect() {
+                        self.disconnect();
+                        self.error(error);
+                        self.schedule_retry();
+                    }
                 }
             }
             if let Some(mut active) = self.active.take() {
@@ -834,19 +982,12 @@ impl Worker {
                         self.schedule_retry();
                     }
                 }
-                if self.last_probe.elapsed() > Duration::from_secs(30) {
-                    self.last_probe = Instant::now();
-                    if let Err(error) = self.backend.discover(Some(&self.state.bluetooth_address)) {
-                        self.disconnect();
-                        self.error(error);
-                        self.schedule_retry();
-                    }
-                }
             } else {
                 thread::park_timeout(READ_SLICE);
             }
         }
-        self.status.lifecycle = "stopping".into();
+        self.recovery.stop();
+        self.sync_recovery();
         self.disconnect();
         self.publish();
         while let Some(envelope) = self.queue.pop_front() {
