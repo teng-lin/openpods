@@ -1646,4 +1646,372 @@ mod dispatch_tests {
             }
         }
     }
+    #[derive(Default)]
+    struct SuspendFacts {
+        epoch: std::sync::atomic::AtomicU64,
+        acknowledged: std::sync::atomic::AtomicU64,
+        actual: AtomicBool,
+        block_once: AtomicBool,
+        entered: AtomicBool,
+        release: Mutex<bool>,
+        wake: std::sync::Condvar,
+        cycle_on_sleep_read: AtomicUsize,
+        sleep_reads: AtomicUsize,
+        audio_started: AtomicUsize,
+    }
+    struct SuspendBackend(Arc<SuspendFacts>);
+    impl Backend for SuspendBackend {
+        fn discover(&self, _: Option<&str>) -> Result<crate::backend::Endpoint, DaemonError> {
+            Err(DaemonError::transient(
+                ErrorCode::DeviceUnavailable,
+                "fake discovery",
+                "not connected",
+            ))
+        }
+        fn connect(
+            &self,
+            _: &crate::backend::Endpoint,
+            _: Duration,
+        ) -> Result<Arc<dyn SessionTransport>, DaemonError> {
+            panic!("suspend fixture must not open Bluetooth")
+        }
+        fn sleeping(&self) -> bool {
+            if self.0.block_once.swap(false, Ordering::SeqCst) {
+                self.0.entered.store(true, Ordering::SeqCst);
+                let mut released = self.0.release.lock().unwrap();
+                while !*released {
+                    released = self.0.wake.wait(released).unwrap();
+                }
+            }
+            let current = self.0.actual.load(Ordering::SeqCst)
+                || self.suspend_epoch() != self.0.acknowledged.load(Ordering::SeqCst);
+            let read = self.0.sleep_reads.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.0.cycle_on_sleep_read.load(Ordering::SeqCst) == read {
+                let next = self.0.epoch.fetch_add(1, Ordering::SeqCst) + 1;
+                self.0.acknowledged.store(next, Ordering::SeqCst);
+            }
+            current
+        }
+        fn suspend_epoch(&self) -> u64 {
+            self.0.epoch.load(Ordering::SeqCst)
+        }
+        fn acknowledge_suspend(&self, epoch: u64) {
+            self.0
+                .acknowledged
+                .fetch_max(epoch.min(self.suspend_epoch()), Ordering::SeqCst);
+        }
+        fn audio_async(&self, _: String, _: Operation) -> crate::backend::AudioFuture {
+            let facts = self.0.clone();
+            Box::pin(async move {
+                facts.audio_started.fetch_add(1, Ordering::SeqCst);
+                let next = facts.epoch.fetch_add(1, Ordering::SeqCst) + 1;
+                facts.acknowledged.store(next, Ordering::SeqCst);
+                Ok(serde_json::json!({"old_audio_result":true}))
+            })
+        }
+    }
+    fn sleep_envelope(epoch: u64, id: u64) -> (Envelope, oneshot::Receiver<Response>) {
+        let (reply, receiver) = oneshot::channel();
+        (
+            Envelope {
+                suspend_epoch: epoch,
+                peer: None,
+                target_address: None,
+                request: Request {
+                    version: 1,
+                    id,
+                    timeout_ms: 5000,
+                    operation: Operation::Change(SettingChange::ListeningMode(
+                        NoiseControlMode::NoiseCancellation,
+                    )),
+                },
+                deadline: Instant::now() + Duration::from_secs(5),
+                reply,
+                dispatched: Arc::new(AtomicBool::new(false)),
+            },
+            receiver,
+        )
+    }
+    struct IdleSpy(AtomicUsize);
+    impl SessionTransport for IdleSpy {
+        fn send(&self, _: &[u8], _: Duration) -> Result<(), TransportError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn recv(&self, _: &mut [u8], timeout: Duration) -> Result<usize, TransportError> {
+            std::thread::sleep(timeout.min(Duration::from_millis(5)));
+            Err(TransportError::Timeout)
+        }
+        fn close(&self) {}
+    }
+    struct RunningOwner {
+        stopped: Arc<AtomicBool>,
+        facts: Arc<SuspendFacts>,
+        join: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Drop for RunningOwner {
+        fn drop(&mut self) {
+            self.stopped.store(true, Ordering::SeqCst);
+            *self.facts.release.lock().unwrap() = true;
+            self.facts.wake.notify_all();
+            if let Some(join) = self.join.take() {
+                join.join().unwrap();
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn actual_owner_discards_channel_pending_mutations_after_unpolled_sleep_cycle() {
+        let facts = Arc::new(SuspendFacts::default());
+        facts.block_once.store(true, Ordering::SeqCst);
+        let transport = Arc::new(IdleSpy(AtomicUsize::new(0)));
+        let mut worker = owner(Arc::new(Spy(AtomicUsize::new(0))));
+        worker.backend = Arc::new(SuspendBackend(facts.clone()));
+        worker.status.connected = true;
+        worker.connection = Some(transport.clone());
+        worker.transport = Arc::new(Mutex::new(Some(transport.clone())));
+        let (sender, receiver) = mpsc::sync_channel(QUEUE_LIMIT);
+        worker.receiver = receiver;
+        let (already_queued, already_queued_reply) = sleep_envelope(0, 0);
+        worker.queue.push_back(already_queued);
+        let stopped = worker.stopped.clone();
+        let mut running = RunningOwner {
+            stopped,
+            facts: facts.clone(),
+            join: Some(std::thread::spawn(move || worker.run())),
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !facts.entered.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let (first, first_reply) = sleep_envelope(0, 1);
+        let (second, second_reply) = sleep_envelope(0, 2);
+        sender
+            .try_send(first)
+            .unwrap_or_else(|_| panic!("first admitted request"));
+        sender
+            .try_send(second)
+            .unwrap_or_else(|_| panic!("second admitted request"));
+        // Complete true→false while the owner has not polled either edge.
+        facts.epoch.store(1, Ordering::SeqCst);
+        facts.actual.store(false, Ordering::SeqCst);
+        *facts.release.lock().unwrap() = true;
+        facts.wake.notify_all();
+        for reply in [already_queued_reply, first_reply, second_reply] {
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(1), reply)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .error
+                    .unwrap()
+                    .code,
+                ErrorCode::Cancelled
+            );
+        }
+        assert_eq!(
+            transport.0.load(Ordering::SeqCst),
+            0,
+            "pre-suspend requests must never reach the existing transport"
+        );
+        assert_eq!(facts.acknowledged.load(Ordering::SeqCst), 1);
+        running.stopped.store(true, Ordering::SeqCst);
+        running.join.take().unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn acknowledged_cycles_reject_late_admission_at_enqueue_dispatch_and_write() {
+        for boundary in 0..3 {
+            let facts = Arc::new(SuspendFacts::default());
+            facts.epoch.store(1, Ordering::SeqCst);
+            facts.acknowledged.store(1, Ordering::SeqCst);
+            let transport = Arc::new(Spy(AtomicUsize::new(0)));
+            let mut worker = owner(transport.clone());
+            worker.status.connected = true;
+            worker.backend = Arc::new(SuspendBackend(facts));
+            let (envelope, mut reply) = sleep_envelope(0, 1);
+            match boundary {
+                0 => worker.enqueue(envelope),
+                1 => {
+                    worker.queue.push_back(envelope);
+                    worker.dispatch();
+                }
+                _ => {
+                    let mut pending = PendingChange::new(
+                        SettingChange::ListeningMode(NoiseControlMode::NoiseCancellation),
+                        1,
+                        10_000,
+                    );
+                    let action = pending.begin(&worker.state, 0);
+                    worker.handle_action(Active { envelope, pending }, action);
+                }
+            }
+            assert_eq!(
+                reply.try_recv().unwrap().error.unwrap().code,
+                ErrorCode::Cancelled
+            );
+            assert_eq!(transport.0.load(Ordering::SeqCst), 0);
+            assert!(
+                worker.state.connected,
+                "rejecting an old request must not tear down a healthy resumed session"
+            );
+        }
+    }
+
+    #[test]
+    fn suspend_ack_keeps_actual_sleep_and_handles_a_new_epoch_while_already_suspended() {
+        let facts = Arc::new(SuspendFacts::default());
+        facts.epoch.store(1, Ordering::SeqCst);
+        facts.actual.store(true, Ordering::SeqCst);
+        let backend = Arc::new(SuspendBackend(facts.clone()));
+        let mut worker = owner(Arc::new(Spy(AtomicUsize::new(0))));
+        worker.backend = backend.clone();
+        worker.handle_suspend();
+        let first_generation = worker.recovery.generation;
+        assert!(backend.sleeping());
+        assert!(!worker.state.connected);
+        worker.handle_suspend();
+        assert_eq!(
+            worker.recovery.generation, first_generation,
+            "same epoch is idempotent"
+        );
+        facts.epoch.store(2, Ordering::SeqCst);
+        facts.actual.store(false, Ordering::SeqCst);
+        assert!(backend.sleeping());
+        worker.handle_suspend();
+        assert!(worker.recovery.generation > first_generation);
+        assert_eq!(facts.acknowledged.load(Ordering::SeqCst), 2);
+        assert!(!backend.sleeping());
+        assert_eq!(
+            worker.recovery.state,
+            Lifecycle::Suspended,
+            "resume is a separate later owner iteration"
+        );
+    }
+
+    #[tokio::test]
+    async fn audio_success_after_an_acknowledged_cycle_is_never_published_as_current() {
+        for (operation, before_dispatch) in [
+            (Operation::AudioStatus, false),
+            (Operation::Unmute, false),
+            (Operation::AudioStatus, true),
+            (Operation::Unmute, true),
+        ] {
+            let facts = Arc::new(SuspendFacts::default());
+            if before_dispatch {
+                facts.cycle_on_sleep_read.store(2, Ordering::SeqCst);
+            }
+            let (sender, _receiver) = mpsc::sync_channel(QUEUE_LIMIT);
+            let (status_tx, status) =
+                watch::channel(Snapshot::new("audio-epoch".into(), &DeviceState::default()));
+            let (audio_feed, _) = watch::channel(serde_json::Value::Null);
+            let (publication_health, _) = watch::channel(None);
+            let (manual_overrides, _) = watch::channel(0);
+            let handle = SessionHandle {
+                sender,
+                backend: Arc::new(SuspendBackend(facts.clone())),
+                audio_feed,
+                publication_health,
+                manual_overrides,
+                status,
+                stopped: Arc::new(AtomicBool::new(false)),
+                transport: Arc::new(Mutex::new(None)),
+            };
+            let readonly = matches!(operation, Operation::AudioStatus);
+            let response = handle
+                .request(Request {
+                    version: 1,
+                    id: 1,
+                    timeout_ms: 1000,
+                    operation,
+                })
+                .await;
+            assert_eq!(
+                response.error.unwrap().code,
+                if readonly || before_dispatch {
+                    ErrorCode::Cancelled
+                } else {
+                    ErrorCode::OutcomeUnknown
+                }
+            );
+            assert_eq!(*handle.audio_feed.borrow(), serde_json::Value::Null);
+            assert_eq!(
+                facts.audio_started.load(Ordering::SeqCst),
+                usize::from(!before_dispatch)
+            );
+            drop(status_tx);
+        }
+    }
+    #[test]
+    fn suspend_cancels_written_active_as_unknown_without_replaying_it() {
+        let facts = Arc::new(SuspendFacts::default());
+        let transport = Arc::new(Spy(AtomicUsize::new(0)));
+        let mut worker = owner(transport.clone());
+        worker.backend = Arc::new(SuspendBackend(facts.clone()));
+        let (envelope, mut reply) = sleep_envelope(0, 1);
+        let mut pending = PendingChange::new(
+            SettingChange::ListeningMode(NoiseControlMode::NoiseCancellation),
+            1,
+            10_000,
+        );
+        let action = pending.begin(&worker.state, 0);
+        worker.handle_action(Active { envelope, pending }, action);
+        assert!(worker.active.is_some());
+        assert_eq!(transport.0.load(Ordering::SeqCst), 1);
+        facts.epoch.store(1, Ordering::SeqCst);
+        worker.handle_suspend();
+        assert_eq!(
+            reply.try_recv().unwrap().error.unwrap().code,
+            ErrorCode::OutcomeUnknown
+        );
+        assert_eq!(
+            transport.0.load(Ordering::SeqCst),
+            1,
+            "suspend must not resend an already written mutation"
+        );
+        assert!(worker.active.is_none());
+        assert!(!worker.state.connected);
+        assert_eq!(facts.acknowledged.load(Ordering::SeqCst), 1);
+    }
+    #[cfg(feature = "ble")]
+    #[test]
+    fn suspend_discards_an_inflight_key_exchange_without_persisting_or_replaying() {
+        let facts = Arc::new(SuspendFacts::default());
+        let transport = Arc::new(Spy(AtomicUsize::new(0)));
+        let mut worker = owner(transport.clone());
+        worker.status.connected = true;
+        worker.backend = Arc::new(SuspendBackend(facts.clone()));
+        let root = tempfile::tempdir().unwrap();
+        let paths = crate::storage::Paths {
+            runtime: root.path().join("run"),
+            state: root.path().join("state"),
+            config: root.path().join("config"),
+            legacy_state: root.path().join("legacy"),
+            legacy_socket: root.path().join("old.sock"),
+        };
+        worker.paths = Some(paths.clone());
+        worker.telemetry = Telemetry::new(worker.started, Some(paths.clone()));
+        let (mut envelope, mut reply) = sleep_envelope(0, 1);
+        envelope.request.operation = Operation::FetchKeys;
+        worker.enqueue(envelope);
+        worker.dispatch();
+        assert!(worker.key_exchange.is_some());
+        assert_eq!(transport.0.load(Ordering::SeqCst), 1);
+        facts.epoch.store(1, Ordering::SeqCst);
+        worker.handle_suspend();
+        assert_eq!(
+            reply.try_recv().unwrap().error.unwrap().code,
+            ErrorCode::Cancelled
+        );
+        assert!(worker.key_exchange.is_none());
+        assert!(!paths.state.join("ble-keys.json").exists());
+        assert_eq!(
+            transport.0.load(Ordering::SeqCst),
+            1,
+            "key request must not be replayed across suspend"
+        );
+    }
 }
