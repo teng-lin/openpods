@@ -1138,5 +1138,6 @@ mod ble_reducer_tests {
         advert.encrypted_left_battery = Some(42);
         state.apply_verified_ble(&advert, 1, 3, 100);
         assert_eq!(state.battery.headset.level, 42);
+        assert_eq!(state.wear_primary_side, None);
     }
 }
