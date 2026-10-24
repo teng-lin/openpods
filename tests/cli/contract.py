@@ -138,6 +138,20 @@ class CliContract(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout), snapshot)
         self.assertEqual(len(snapshot["device"]["reported_controls"]), 256)
 
+    def test_terminal_watch_preserves_unknown_settings_and_component_availability(self):
+        snapshot = json.loads((FIXTURES / "full-controls.json").read_text())
+        result, _ = self.exchange(["--status"], lambda req: {
+            "version": 1, "id": req["id"], "result": snapshot, "error": None}, machine=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("0xFE", result.stdout)
+        self.assertIn("Unknown setting", result.stdout)
+        self.assertIn("Disabled", result.stdout)
+        left = next(line for line in result.stdout.splitlines() if line.startswith("Left battery"))
+        right = next(line for line in result.stdout.splitlines() if line.startswith("Right battery"))
+        self.assertIn("100%", left)
+        self.assertIn("Unavailable", right)
+        self.assertNotIn("0% (", right)
+
     def test_terminal_watch_marks_retained_battery_as_stale_after_disconnect(self):
         snapshot = json.loads((FIXTURES / "disconnected.json").read_text())
         result, _ = self.exchange(["--status"], lambda req: {
