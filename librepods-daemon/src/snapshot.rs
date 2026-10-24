@@ -23,6 +23,9 @@ pub struct DeviceStatus {
     pub secondary_in_ear: Option<bool>,
     pub reported_controls: BTreeMap<u8, [u8; 4]>,
     pub wear: Option<librepods_core::device::state::WearReport>,
+    /// Orientation at wear-report receipt; None preserves unknown absolute side.
+    #[serde(default)]
+    pub wear_primary_side: Option<librepods_core::device::battery::Component>,
     pub observations: BTreeMap<String, librepods_core::device::state::ObservationMeta>,
     pub ca_event: Option<u8>,
     pub lid_state: Option<u8>,
@@ -105,8 +108,8 @@ impl Snapshot {
             "supports_conversational_awareness":capabilities["conversational_awareness"],
             "supports_one_bud_anc":capabilities["one_bud_anc"],
             "noise_mode":d.listening_mode.map(|m|i32::from(m.as_byte())-1).unwrap_or(-1),
-            "left":pod(d.battery.left,match d.battery.primary_side() {Some(librepods_core::device::battery::Component::Left)=>d.primary_in_ear,Some(librepods_core::device::battery::Component::Right)=>d.secondary_in_ear,_=>None},"battery.left"),
-            "right":pod(d.battery.right,match d.battery.primary_side() {Some(librepods_core::device::battery::Component::Left)=>d.secondary_in_ear,Some(librepods_core::device::battery::Component::Right)=>d.primary_in_ear,_=>None},"battery.right"),
+            "left":pod(d.battery.left,match d.wear_primary_side {Some(librepods_core::device::battery::Component::Left)=>d.primary_in_ear,Some(librepods_core::device::battery::Component::Right)=>d.secondary_in_ear,_=>None},"battery.left"),
+            "right":pod(d.battery.right,match d.wear_primary_side {Some(librepods_core::device::battery::Component::Left)=>d.secondary_in_ear,Some(librepods_core::device::battery::Component::Right)=>d.primary_in_ear,_=>None},"battery.right"),
             "case":{"available":available(d.battery.case_) && fresh("battery.case"),"level":d.battery.case_.level,
                 "charging":matches!(d.battery.case_.status,BatteryStatus::Charging)},
             "headset":{"available":available(d.battery.headset) && fresh("battery.headset"),"level":d.battery.headset.level,"charging":matches!(d.battery.headset.status,BatteryStatus::Charging)},
@@ -142,12 +145,11 @@ impl From<&DeviceState> for DeviceStatus {
             model: state.model,
             battery: state.battery.clone(),
             listening_mode: state.noise_control_reported.then_some(state.noise_control),
-            primary_in_ear: state.ear_detection_reported.then_some(state.primary_in_ear),
-            secondary_in_ear: state
-                .ear_detection_reported
-                .then_some(state.secondary_in_ear),
+            primary_in_ear: state.wear.and_then(|wear| wear.primary.in_ear()),
+            secondary_in_ear: state.wear.and_then(|wear| wear.secondary.in_ear()),
             reported_controls: state.reported_controls.clone(),
             wear: state.wear,
+            wear_primary_side: state.wear_primary_side,
             observations: state.observations.clone(),
             ca_event: state.ca_event,
             lid_state: match state.lid_state {
@@ -176,6 +178,66 @@ mod tests {
         let stale = Snapshot::new("test".into(), &state);
         assert_eq!(stale.device.battery.left.level, 0);
         assert_eq!(stale.legacy()["left"]["available"], false);
+    }
+    #[test]
+    fn mixed_source_battery_updates_cannot_relabel_fresh_aacp_wear() {
+        use librepods_core::{
+            device::{ble_advert::parse_advertisement, state::WearState},
+            protocol::parser::{self, ParsedPacket},
+        };
+        let mut state = DeviceState::default();
+        state.begin_session(1);
+        let right = parser::parse(&[4, 0, 4, 0, 4, 0, 1, 2, 1, 99, 2, 1]).unwrap();
+        state.apply_packet(&right, 1, 100);
+        state.apply_packet(
+            &ParsedPacket::EarStatus {
+                primary: WearState::InEar,
+                secondary: WearState::OutOfEar,
+            },
+            1,
+            101,
+        );
+        let mut advert =
+            parse_advertisement(&[7, 25, 1, 0x24, 0x20, 0x20, 0x65, 0x08, 0, 0, 4]).unwrap();
+        advert.primary_left = true;
+        state.apply_verified_ble(&advert, 1, 102, 5000);
+        let snapshot = Snapshot::new("test".into(), &state);
+        assert_eq!(snapshot.legacy()["right"]["in_ear"], true);
+        assert_eq!(snapshot.legacy()["left"]["in_ear"], false);
+    }
+    #[test]
+    fn verified_ble_wear_is_available_without_aacp_flags_and_unknown_wear_stays_unknown() {
+        use librepods_core::{
+            device::{battery::Component, ble_advert::parse_advertisement, state::WearState},
+            protocol::parser::ParsedPacket,
+        };
+        let mut state = DeviceState::default();
+        state.begin_session(1);
+        state.end_session(1);
+        let mut advert =
+            parse_advertisement(&[7, 25, 1, 0x24, 0x20, 0x20, 0x65, 0x08, 0, 0, 4]).unwrap();
+        advert.primary_left = true;
+        advert.left_in_ear = true;
+        advert.right_in_ear = false;
+        advert.both_pods_in_case = false;
+        state.apply_verified_ble(&advert, 1, 1, 5000);
+        assert!(!state.ear_detection_reported);
+        let snapshot = Snapshot::new("test".into(), &state);
+        assert_eq!(snapshot.device.wear_primary_side, Some(Component::Left));
+        assert_eq!(snapshot.device.primary_in_ear, Some(true));
+        assert_eq!(snapshot.legacy()["left"]["in_ear"], true);
+        state.begin_session(2);
+        state.apply_packet(
+            &ParsedPacket::EarStatus {
+                primary: WearState::Unknown(7),
+                secondary: WearState::OutOfEar,
+            },
+            2,
+            2,
+        );
+        let snapshot = Snapshot::new("test".into(), &state);
+        assert_eq!(snapshot.device.primary_in_ear, None);
+        assert_eq!(snapshot.device.wear_primary_side, None);
     }
     #[test]
     fn public_status_never_exposes_keys_or_invents_connected_measurements() {

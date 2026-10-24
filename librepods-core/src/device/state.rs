@@ -11,7 +11,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::device::battery::BatteryInfo;
+use crate::device::battery::{BatteryInfo, Component};
 use crate::device::ble_advert::{BleAdvertData, LidState};
 use crate::protocol::control_command::{ControlCommand, ControlCommandId};
 use crate::protocol::parser::{ParsedPacket, ProximityKeyType};
@@ -248,6 +248,16 @@ pub struct DeviceState {
     pub observations: BTreeMap<String, ObservationMeta>,
     #[serde(default)]
     pub wear: Option<WearReport>,
+    /// Absolute orientation associated with this wear report, not later battery updates.
+    /// AACP uses the preceding AACP pod-battery primary within the same session;
+    /// BLE uses that advertisement's explicit primary bit. A later battery packet
+    /// never relabels an older report or retroactively fills unknown orientation.
+    #[serde(default)]
+    pub wear_primary_side: Option<Component>,
+    /// Last primary side observed through AACP in this session. BLE never changes it.
+    /// An AACP wear report before an AACP pod battery packet has unknown orientation.
+    #[serde(skip)]
+    pub aacp_primary_side: Option<Component>,
     #[serde(default)]
     pub lid_state: LidState,
     #[serde(default)]
@@ -307,6 +317,8 @@ impl Default for DeviceState {
             connected: false,
             observations: BTreeMap::new(),
             wear: None,
+            wear_primary_side: None,
+            aacp_primary_side: None,
             lid_state: LidState::Unknown,
             ca_event: None,
             device_name: String::new(),
@@ -362,6 +374,8 @@ impl DeviceState {
         self.noise_control_reported = false;
         self.ear_detection_reported = false;
         self.wear = None;
+        self.wear_primary_side = None;
+        self.aacp_primary_side = None;
         self.ca_event = None;
         self.primary_in_ear = false;
         self.secondary_in_ear = false;
@@ -377,6 +391,8 @@ impl DeviceState {
         self.noise_control_reported = false;
         self.ear_detection_reported = false;
         self.wear = None;
+        self.wear_primary_side = None;
+        self.aacp_primary_side = None;
         self.ca_event = None;
         for observation in self.observations.values_mut() {
             observation.stale = true;
@@ -422,9 +438,9 @@ impl DeviceState {
             .encrypted_case_battery
             .or(advert.case_battery)
             .filter(|level| *level != 0 || advert.one_pod_in_case || advert.both_pods_in_case);
-        let readings = if self.capabilities().headset
-            || (self.model == AirPodsModel::Unknown && advert.model.capabilities().headset)
-        {
+        let is_headset = self.capabilities().headset
+            || (self.model == AirPodsModel::Unknown && advert.model.capabilities().headset);
+        let readings = if is_headset {
             vec![(
                 Component::Headset,
                 left.or(right),
@@ -489,6 +505,11 @@ impl DeviceState {
         };
         self.battery.merge(&patch);
         if self.accepts_ble("wear", observed_at_ms, aacp_fresh_for_ms) {
+            self.wear_primary_side = (!is_headset).then_some(if advert.primary_left {
+                Component::Left
+            } else {
+                Component::Right
+            });
             let left = if advert.both_pods_in_case {
                 WearState::InCase
             } else if advert.left_in_ear {
@@ -571,6 +592,10 @@ impl DeviceState {
         let mut fields = Vec::new();
         match packet {
             ParsedPacket::Battery(info) => {
+                if let Some(side) = info.primary_side() {
+                    self.aacp_primary_side = Some(side);
+                }
+                // A later battery notification does not retroactively orient an older wear report.
                 self.battery.merge(info);
                 for component in &info.present {
                     fields.push(format!("battery.{}", component.name().to_lowercase()));
@@ -580,6 +605,7 @@ impl DeviceState {
                 }
             }
             ParsedPacket::EarStatus { primary, secondary } => {
+                self.wear_primary_side = self.aacp_primary_side;
                 self.wear = Some(WearReport {
                     primary: *primary,
                     secondary: *secondary,
@@ -605,6 +631,7 @@ impl DeviceState {
                         WearState::OutOfEar
                     },
                 });
+                self.wear_primary_side = self.aacp_primary_side;
                 self.primary_in_ear = *primary_in_ear;
                 self.secondary_in_ear = *secondary_in_ear;
                 self.ear_detection_reported = true;
@@ -972,6 +999,67 @@ mod ble_reducer_tests {
     fn advert() -> BleAdvertData {
         let raw = [7, 25, 1, 0x24, 0x20, 0x20, 0x65, 0x08, 0, 0, 4];
         parse_advertisement(&raw).expect("proximity fixture")
+    }
+    #[test]
+    fn wear_orientation_is_report_scoped_and_never_inferred_from_another_source() {
+        let mut state = DeviceState::default();
+        state.begin_session(1);
+        let mut advertisement = advert();
+        advertisement.primary_left = true;
+        assert!(state.apply_verified_ble(&advertisement, 1, 10, 5000));
+        assert_eq!(state.wear_primary_side, Some(Component::Left));
+        assert_eq!(state.aacp_primary_side, None);
+        let wear = ParsedPacket::EarStatus {
+            primary: WearState::InEar,
+            secondary: WearState::OutOfEar,
+        };
+        state.apply_packet(&wear, 1, 11);
+        assert_eq!(state.wear_primary_side, None);
+        let right = crate::protocol::parser::parse(&[4, 0, 4, 0, 4, 0, 1, 2, 1, 90, 2, 1]).unwrap();
+        state.apply_packet(&right, 1, 12);
+        assert_eq!(state.aacp_primary_side, Some(Component::Right));
+        assert_eq!(state.wear_primary_side, None); // A later battery frame cannot orient the earlier report.
+        state.apply_packet(&wear, 1, 13);
+        assert_eq!(state.wear_primary_side, Some(Component::Right));
+        let left = crate::protocol::parser::parse(&[4, 0, 4, 0, 4, 0, 1, 4, 1, 80, 2, 1]).unwrap();
+        state.apply_packet(&left, 1, 14);
+        assert_eq!(state.aacp_primary_side, Some(Component::Left));
+        assert_eq!(state.wear_primary_side, Some(Component::Right));
+        state.apply_verified_ble(&advertisement, 1, 15, 5000);
+        assert_eq!(state.wear_primary_side, Some(Component::Right));
+        state.apply_verified_ble(&advertisement, 1, 6000, 5000);
+        assert_eq!(state.wear_primary_side, Some(Component::Left));
+        state.apply_packet(&right, 1, 6001);
+        assert_eq!(state.wear_primary_side, Some(Component::Left));
+        state.apply_packet(&wear, 1, 6002);
+        assert_eq!(state.wear_primary_side, Some(Component::Right));
+        state.end_session(1);
+        assert_eq!(state.wear_primary_side, None);
+        assert_eq!(state.aacp_primary_side, None);
+        state.begin_session(2);
+        state.apply_packet(&wear, 2, 0);
+        assert_eq!(state.wear_primary_side, None);
+    }
+    #[test]
+    fn case_only_battery_updates_do_not_establish_or_reset_aacp_orientation() {
+        let mut state = DeviceState::default();
+        state.begin_session(1);
+        let case = crate::protocol::parser::parse(&[4, 0, 4, 0, 4, 0, 1, 8, 1, 80, 2, 1]).unwrap();
+        state.apply_packet(&case, 1, 0);
+        assert_eq!(state.aacp_primary_side, None);
+        let right = crate::protocol::parser::parse(&[4, 0, 4, 0, 4, 0, 1, 2, 1, 90, 2, 1]).unwrap();
+        state.apply_packet(&right, 1, 1);
+        state.apply_packet(&case, 1, 2);
+        assert_eq!(state.aacp_primary_side, Some(Component::Right));
+        state.apply_packet(
+            &ParsedPacket::EarDetection {
+                primary_in_ear: true,
+                secondary_in_ear: false,
+            },
+            1,
+            3,
+        );
+        assert_eq!(state.wear_primary_side, Some(Component::Right));
     }
     #[test]
     fn verified_ble_enriches_disconnected_state_without_readying_control() {
