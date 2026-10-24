@@ -35,15 +35,16 @@ home storage; Unix-socket fixtures used the short private `/home/blackmyth/.cach
 
 ## Production coverage
 
-A fresh isolated instrumentation target on production checkpoint `495ea0f`
+A fully cleaned instrumentation target on checkpoint `f920fe3`
+(production identical to `08f24a9`)
 passed minimal and optional-BLE workspace suites and 22 actual CLI process
 checks for each feature executable. The current production metric is:
 
 | Scope | Covered / measured lines | Coverage | Required |
 | --- | ---: | ---: | ---: |
-| Core | 1937 / 2000 | 96.85% | 90% |
-| CLI, Linux adapters and daemon | 5100 / 5746 | 88.76% | 80% |
-| Changed critical production against `399e775` | 6280 / 6954 | 90.31% | 90% |
+| Core | 1938 / 2000 | 96.90% | 90% |
+| CLI, Linux adapters and daemon | 5284 / 5940 | 88.96% | 80% |
+| Changed critical production against `399e775` | 6465 / 7148 | 90.44% | 90% |
 
 All three production gates pass at this checkpoint. The earlier reused-target
 percentages recorded here are withdrawn: cargo-llvm-cov 0.9.1 selected different
@@ -56,7 +57,7 @@ persistence and lifecycle tests closed that gap; the historical percentages
 remain withdrawn.
 
 LLVM LCOV per-line counters and parsed Rust test-only spans define the metric.
-The fresh report excludes 1357 core and 3512 service test-only lines. No
+The fresh report excludes 1357 core and 3871 service test-only lines. No
 production function or failure path is excluded. Critical scopes and every
 uncovered changed production line remain in the audit JSON. The passing 90%
 aggregate does not imply every critical file independently reaches 90%.
@@ -66,18 +67,23 @@ handshake paths and some command rejection branches; runtime publisher worker
 panics and IPC stall expiry; telemetry scanner failure/event application paths;
 production desktop adapter startup and selected reversible restoration branches;
 Unix socket allocation failures; and successful direct CLI/interactive scan
-paths requiring real hardware. File figures are session 856/962, runtime
-384/428, storage 272/286, telemetry 103/131, daemon desktop 599/684 and Linux
+paths requiring real hardware. File figures are session 999/1116, runtime
+389/433, storage 272/286, telemetry 103/131, daemon desktop 599/684 and Linux
 desktop 557/569. The exact uncovered changed lines remain in the JSON artifact.
 Aggregate coverage cannot prove physical media continuity or real suspend/case
 behavior.
 
 Local temporary evidence (not portable repository artifacts):
-`/tmp/librepods-rs-495ea0f-production-coverage.{json,lcov}`,
-`/tmp/librepods-rs-495ea0f-production-coverage-test-spans.json`,
-`/tmp/librepods-rs-495ea0f-production-coverage.log`, and
-`/tmp/librepods-rs-495ea0f-changed-coverage.json`.
+`/tmp/librepods-rs-f920fe3-final-coverage.{json,lcov}`,
+`/tmp/librepods-rs-f920fe3-final-coverage-test-spans.json`,
+`/tmp/librepods-rs-f920fe3-final-coverage.log`, and
+`/tmp/librepods-rs-f920fe3-final-changed-coverage.json`.
 CI preserves these artifact types and enforces all three thresholds.
+
+The portable [production coverage record](evidence/2026-10-24/production-coverage.json)
+contains exact source/component trees, lock hash, counts, scope rationale and
+uncovered changed lines. The final run includes the synchronous native-peer
+dispatch guard and latched suspend epochs, with their semantic regressions.
 
 ## Bounded fuzz campaign
 

@@ -1,0 +1,1366 @@
+{
+  "schema_version": 1,
+  "checkpoint": {
+    "commit": "f920fe3c539a995b288f1ccbab7cea95f9625a2a",
+    "tree": "bbeae158ab6acd1fff3531e8ff4ec6638da88233",
+    "clean": true,
+    "production_reference": "08f24a9",
+    "crate_trees": {
+      "librepods-core": "1bec7489785fae97323e335818d3d4dd6c4bc431",
+      "librepods-daemon": "e8ca11892bfe9b4fb1b3eb790b6d87cd16e0a05f",
+      "librepods-cli": "d655abd3727d53187b83440b57a5239d0fa0006c",
+      "librepods-linux": "53608efd4cbf5ac91e3659bfaa3ac47367de2e7c",
+      "librepods-windows": "d3c6cb53d3718de541ea6c34e274d16de1bd8e25"
+    },
+    "src_trees": {
+      "librepods-core": "0f08619aee05d887c51aa52a1cc3db95be295032",
+      "librepods-daemon": "297cbf9c28c32868abe6fb001b50ba26c2a94fb7",
+      "librepods-cli": "aa741ac9ab3109e1bbbf5a78072116a6ddd65c42",
+      "librepods-linux": "9e62b70a0ff463186b66ac701a71fd9da3a5a7fc",
+      "librepods-windows": "7ab1c960b41044fbad4d708819eea9aae1b6a2bc"
+    },
+    "lock_sha256": "a07b8ee367ff6160c320c8b6195d85f4e9dcad40a6a2b949662d1f7014bb4134"
+  },
+  "method": {
+    "collector": "cargo-llvm-cov 0.9.1, LLVM LCOV DA counters, syn test-only span analysis",
+    "cleaning": "Export show-env before clean so the exact instrumentation directory is cleaned; entire measurement starts clean.",
+    "production_exclusions": [],
+    "test_only_lines_excluded": {
+      "core": 1357,
+      "service": 3871
+    },
+    "baseline_commit": "399e7759053d4b0dfe1d37813b0ca9d0bde7af5c"
+  },
+  "commands": [
+    "scripts/coverage.sh /tmp/librepods-rs-f920fe3-final-coverage.json",
+    "python3 scripts/coverage-audit.py --lcov /tmp/librepods-rs-f920fe3-final-coverage.lcov --test-spans /tmp/librepods-rs-f920fe3-final-coverage-test-spans.json --output /tmp/librepods-rs-f920fe3-final-changed-coverage.json --critical-min 90"
+  ],
+  "metrics": {
+    "core": {
+      "covered": 1938,
+      "count": 2000,
+      "percent": 96.9,
+      "required": 90
+    },
+    "service": {
+      "covered": 5284,
+      "count": 5940,
+      "percent": 88.95622895622895,
+      "required": 80
+    },
+    "changed_critical": {
+      "covered": 6465,
+      "count": 7148,
+      "percent": 90.44487968662563,
+      "required": 90
+    }
+  },
+  "matrix": {
+    "minimal_workspace": "pass",
+    "ble_workspace": "pass",
+    "minimal_cli_process_tests": 22,
+    "ble_cli_process_tests": 22,
+    "all_three_production_gates": "pass"
+  },
+  "critical_audit": {
+    "changed_production": {
+      "covered": 6465,
+      "count": 7148,
+      "percent": 90.44487968662563
+    },
+    "critical_changed_production": {
+      "covered": 6465,
+      "count": 7148,
+      "percent": 90.44487968662563
+    },
+    "critical_scope_rationale": {
+      "librepods-core/src/protocol/": "packet validation and confirmed command state machines",
+      "librepods-core/src/policy/": "recovery deadlines and reversible desktop ownership",
+      "librepods-core/src/device/state.rs": "generation, freshness and device identity reducer",
+      "librepods-core/src/device/ble_advert.rs": "untrusted optional advertisement decoding and identity",
+      "librepods-core/src/device/battery.rs": "unavailable versus genuine battery measurements",
+      "librepods-core/src/transport.rs": "classified transport errors and retry policy",
+      "librepods-daemon/src/": "IPC, connection ownership, persistence, keys and desktop coordination",
+      "librepods-linux/src/": "native bounded I/O, monitor cancellation and desktop side effects",
+      "librepods-cli/src/": "direct ownership, typed requests, uncertainty and truthful status"
+    },
+    "files": {
+      "librepods-cli/src/main.rs": {
+        "production": {
+          "covered": 198,
+          "count": 300,
+          "percent": 66.0
+        },
+        "changed_production": {
+          "covered": 181,
+          "count": 276,
+          "percent": 65.57971014492753
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          203,
+          204,
+          205,
+          206,
+          207,
+          325,
+          327,
+          328,
+          329,
+          330,
+          332,
+          333,
+          335,
+          336,
+          337,
+          339,
+          341,
+          342,
+          343,
+          346,
+          347,
+          348,
+          352,
+          354,
+          355,
+          356,
+          357,
+          358,
+          362,
+          363,
+          364,
+          365,
+          367,
+          368,
+          369,
+          372,
+          374,
+          375,
+          405,
+          407,
+          408,
+          436,
+          438,
+          439,
+          449,
+          450,
+          451,
+          452,
+          453,
+          456,
+          457,
+          458,
+          459,
+          460,
+          462,
+          463,
+          464,
+          465,
+          466,
+          470,
+          471,
+          472,
+          473,
+          474,
+          475,
+          476,
+          477,
+          478,
+          480,
+          481,
+          482,
+          483,
+          485,
+          487,
+          488,
+          489,
+          490,
+          491,
+          492,
+          493,
+          495,
+          496,
+          498,
+          499,
+          500,
+          501,
+          502,
+          503,
+          504,
+          505,
+          507,
+          508,
+          509,
+          510,
+          511
+        ]
+      },
+      "librepods-cli/src/status.rs": {
+        "production": {
+          "covered": 109,
+          "count": 119,
+          "percent": 91.59663865546219
+        },
+        "changed_production": {
+          "covered": 36,
+          "count": 40,
+          "percent": 90.0
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          42,
+          67,
+          136,
+          137
+        ]
+      },
+      "librepods-core/src/crossdevice/relay.rs": {
+        "production": {
+          "covered": 17,
+          "count": 19,
+          "percent": 89.47368421052632
+        },
+        "changed_production": {
+          "covered": 0,
+          "count": 0,
+          "percent": null
+        },
+        "critical_scope": false,
+        "uncovered_changed_lines": []
+      },
+      "librepods-core/src/device/battery.rs": {
+        "production": {
+          "covered": 122,
+          "count": 123,
+          "percent": 99.1869918699187
+        },
+        "changed_production": {
+          "covered": 51,
+          "count": 51,
+          "percent": 100.0
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": []
+      },
+      "librepods-core/src/device/ble_advert.rs": {
+        "production": {
+          "covered": 169,
+          "count": 169,
+          "percent": 100.0
+        },
+        "changed_production": {
+          "covered": 39,
+          "count": 39,
+          "percent": 100.0
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": []
+      },
+      "librepods-core/src/device/listening_mode.rs": {
+        "production": {
+          "covered": 29,
+          "count": 30,
+          "percent": 96.66666666666667
+        },
+        "changed_production": {
+          "covered": 0,
+          "count": 0,
+          "percent": null
+        },
+        "critical_scope": false,
+        "uncovered_changed_lines": []
+      },
+      "librepods-core/src/device/state.rs": {
+        "production": {
+          "covered": 464,
+          "count": 466,
+          "percent": 99.57081545064378
+        },
+        "changed_production": {
+          "covered": 395,
+          "count": 397,
+          "percent": 99.49622166246851
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          485,
+          522
+        ]
+      },
+      "librepods-core/src/policy/audio.rs": {
+        "production": {
+          "covered": 146,
+          "count": 147,
+          "percent": 99.31972789115646
+        },
+        "changed_production": {
+          "covered": 146,
+          "count": 147,
+          "percent": 99.31972789115646
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          138
+        ]
+      },
+      "librepods-core/src/policy/ear.rs": {
+        "production": {
+          "covered": 79,
+          "count": 83,
+          "percent": 95.18072289156626
+        },
+        "changed_production": {
+          "covered": 79,
+          "count": 83,
+          "percent": 95.18072289156626
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          91,
+          114,
+          115,
+          121
+        ]
+      },
+      "librepods-core/src/policy/media.rs": {
+        "production": {
+          "covered": 67,
+          "count": 70,
+          "percent": 95.71428571428571
+        },
+        "changed_production": {
+          "covered": 67,
+          "count": 70,
+          "percent": 95.71428571428571
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          60,
+          61,
+          62
+        ]
+      },
+      "librepods-core/src/policy/notification.rs": {
+        "production": {
+          "covered": 26,
+          "count": 26,
+          "percent": 100.0
+        },
+        "changed_production": {
+          "covered": 26,
+          "count": 26,
+          "percent": 100.0
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": []
+      },
+      "librepods-core/src/policy/recovery.rs": {
+        "production": {
+          "covered": 131,
+          "count": 131,
+          "percent": 100.0
+        },
+        "changed_production": {
+          "covered": 131,
+          "count": 131,
+          "percent": 100.0
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": []
+      },
+      "librepods-core/src/protocol/control_command.rs": {
+        "production": {
+          "covered": 97,
+          "count": 97,
+          "percent": 100.0
+        },
+        "changed_production": {
+          "covered": 0,
+          "count": 0,
+          "percent": null
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": []
+      },
+      "librepods-core/src/protocol/handshake.rs": {
+        "production": {
+          "covered": 61,
+          "count": 62,
+          "percent": 98.38709677419355
+        },
+        "changed_production": {
+          "covered": 61,
+          "count": 62,
+          "percent": 98.38709677419355
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          81
+        ]
+      },
+      "librepods-core/src/protocol/packets.rs": {
+        "production": {
+          "covered": 40,
+          "count": 40,
+          "percent": 100.0
+        },
+        "changed_production": {
+          "covered": 0,
+          "count": 0,
+          "percent": null
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": []
+      },
+      "librepods-core/src/protocol/parser.rs": {
+        "production": {
+          "covered": 217,
+          "count": 246,
+          "percent": 88.21138211382114
+        },
+        "changed_production": {
+          "covered": 80,
+          "count": 106,
+          "percent": 75.47169811320755
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          146,
+          148,
+          149,
+          150,
+          151,
+          152,
+          153,
+          154,
+          155,
+          156,
+          157,
+          158,
+          159,
+          160,
+          161,
+          162,
+          163,
+          164,
+          165,
+          166,
+          167,
+          168,
+          169,
+          180,
+          184,
+          185
+        ]
+      },
+      "librepods-core/src/protocol/settings.rs": {
+        "production": {
+          "covered": 244,
+          "count": 255,
+          "percent": 95.68627450980392
+        },
+        "changed_production": {
+          "covered": 235,
+          "count": 245,
+          "percent": 95.91836734693878
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          64,
+          142,
+          275,
+          281,
+          298,
+          312,
+          328,
+          343,
+          392,
+          403
+        ]
+      },
+      "librepods-core/src/transport.rs": {
+        "production": {
+          "covered": 29,
+          "count": 36,
+          "percent": 80.55555555555556
+        },
+        "changed_production": {
+          "covered": 17,
+          "count": 18,
+          "percent": 94.44444444444444
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          120
+        ]
+      },
+      "librepods-daemon/src/backend.rs": {
+        "production": {
+          "covered": 195,
+          "count": 251,
+          "percent": 77.68924302788845
+        },
+        "changed_production": {
+          "covered": 195,
+          "count": 251,
+          "percent": 77.68924302788845
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          46,
+          47,
+          48,
+          49,
+          50,
+          51,
+          52,
+          53,
+          54,
+          55,
+          56,
+          64,
+          65,
+          66,
+          67,
+          68,
+          69,
+          70,
+          71,
+          72,
+          103,
+          105,
+          140,
+          141,
+          145,
+          180,
+          181,
+          182,
+          187,
+          188,
+          189,
+          190,
+          191,
+          192,
+          193,
+          194,
+          205,
+          206,
+          210,
+          220,
+          221,
+          222,
+          223,
+          224,
+          233,
+          244,
+          318,
+          319,
+          321,
+          322,
+          323,
+          324,
+          325,
+          326,
+          327,
+          328
+        ]
+      },
+      "librepods-daemon/src/ble.rs": {
+        "production": {
+          "covered": 354,
+          "count": 410,
+          "percent": 86.34146341463415
+        },
+        "changed_production": {
+          "covered": 354,
+          "count": 410,
+          "percent": 86.34146341463415
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          80,
+          81,
+          82,
+          115,
+          116,
+          117,
+          118,
+          119,
+          120,
+          121,
+          122,
+          123,
+          124,
+          128,
+          131,
+          132,
+          133,
+          134,
+          135,
+          136,
+          137,
+          138,
+          141,
+          142,
+          143,
+          144,
+          145,
+          146,
+          234,
+          235,
+          239,
+          259,
+          260,
+          264,
+          282,
+          283,
+          284,
+          285,
+          286,
+          326,
+          327,
+          331,
+          333,
+          334,
+          340,
+          345,
+          349,
+          350,
+          452,
+          453,
+          454,
+          513,
+          514,
+          548,
+          553,
+          574
+        ]
+      },
+      "librepods-daemon/src/config.rs": {
+        "production": {
+          "covered": 64,
+          "count": 64,
+          "percent": 100.0
+        },
+        "changed_production": {
+          "covered": 64,
+          "count": 64,
+          "percent": 100.0
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": []
+      },
+      "librepods-daemon/src/desktop.rs": {
+        "production": {
+          "covered": 599,
+          "count": 684,
+          "percent": 87.57309941520468
+        },
+        "changed_production": {
+          "covered": 599,
+          "count": 684,
+          "percent": 87.57309941520468
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          38,
+          39,
+          40,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          74,
+          79,
+          80,
+          81,
+          82,
+          83,
+          84,
+          85,
+          86,
+          87,
+          88,
+          89,
+          90,
+          91,
+          92,
+          93,
+          94,
+          95,
+          96,
+          97,
+          136,
+          166,
+          203,
+          204,
+          258,
+          259,
+          335,
+          336,
+          354,
+          459,
+          460,
+          461,
+          462,
+          486,
+          488,
+          490,
+          496,
+          499,
+          500,
+          550,
+          551,
+          552,
+          604,
+          605,
+          606,
+          622,
+          638,
+          639,
+          640,
+          641,
+          650,
+          651,
+          652,
+          656,
+          657,
+          658,
+          659,
+          667,
+          674,
+          697,
+          698,
+          702,
+          703,
+          704,
+          714,
+          715,
+          722,
+          731,
+          732,
+          771,
+          772,
+          773,
+          774,
+          834,
+          876,
+          877
+        ]
+      },
+      "librepods-daemon/src/error.rs": {
+        "production": {
+          "covered": 23,
+          "count": 25,
+          "percent": 92.0
+        },
+        "changed_production": {
+          "covered": 23,
+          "count": 25,
+          "percent": 92.0
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          62,
+          63
+        ]
+      },
+      "librepods-daemon/src/ipc.rs": {
+        "production": {
+          "covered": 81,
+          "count": 89,
+          "percent": 91.01123595505618
+        },
+        "changed_production": {
+          "covered": 81,
+          "count": 89,
+          "percent": 91.01123595505618
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          113,
+          114,
+          115,
+          164,
+          165,
+          166,
+          167,
+          168
+        ]
+      },
+      "librepods-daemon/src/keys.rs": {
+        "production": {
+          "covered": 138,
+          "count": 145,
+          "percent": 95.17241379310344
+        },
+        "changed_production": {
+          "covered": 138,
+          "count": 145,
+          "percent": 95.17241379310344
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          211,
+          212,
+          214,
+          215,
+          216,
+          217,
+          218
+        ]
+      },
+      "librepods-daemon/src/runtime.rs": {
+        "production": {
+          "covered": 389,
+          "count": 433,
+          "percent": 89.83833718244804
+        },
+        "changed_production": {
+          "covered": 389,
+          "count": 433,
+          "percent": 89.83833718244804
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          47,
+          64,
+          65,
+          66,
+          67,
+          68,
+          102,
+          103,
+          104,
+          118,
+          119,
+          120,
+          121,
+          122,
+          135,
+          136,
+          137,
+          138,
+          139,
+          154,
+          198,
+          199,
+          249,
+          250,
+          251,
+          252,
+          253,
+          312,
+          313,
+          329,
+          330,
+          331,
+          332,
+          333,
+          454,
+          455,
+          456,
+          457,
+          458,
+          517,
+          518,
+          522,
+          540,
+          541
+        ]
+      },
+      "librepods-daemon/src/session.rs": {
+        "production": {
+          "covered": 999,
+          "count": 1116,
+          "percent": 89.51612903225806
+        },
+        "changed_production": {
+          "covered": 999,
+          "count": 1116,
+          "percent": 89.51612903225806
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          115,
+          116,
+          117,
+          118,
+          196,
+          197,
+          198,
+          199,
+          281,
+          282,
+          283,
+          284,
+          311,
+          412,
+          561,
+          562,
+          595,
+          614,
+          615,
+          616,
+          617,
+          663,
+          664,
+          665,
+          666,
+          667,
+          728,
+          743,
+          744,
+          776,
+          777,
+          778,
+          779,
+          780,
+          802,
+          803,
+          804,
+          805,
+          806,
+          817,
+          818,
+          819,
+          846,
+          850,
+          861,
+          862,
+          863,
+          944,
+          956,
+          964,
+          1020,
+          1021,
+          1029,
+          1030,
+          1031,
+          1032,
+          1063,
+          1064,
+          1065,
+          1066,
+          1067,
+          1068,
+          1069,
+          1070,
+          1071,
+          1090,
+          1091,
+          1092,
+          1095,
+          1096,
+          1097,
+          1098,
+          1099,
+          1100,
+          1101,
+          1102,
+          1103,
+          1106,
+          1107,
+          1139,
+          1140,
+          1141,
+          1142,
+          1150,
+          1153,
+          1154,
+          1155,
+          1156,
+          1157,
+          1158,
+          1159,
+          1160,
+          1161,
+          1164,
+          1165,
+          1166,
+          1167,
+          1168,
+          1169,
+          1170,
+          1171,
+          1172,
+          1173,
+          1195,
+          1196,
+          1197,
+          1198,
+          1212,
+          1241,
+          1247,
+          1248,
+          1249,
+          1250,
+          1251,
+          1253,
+          1357,
+          1358
+        ]
+      },
+      "librepods-daemon/src/snapshot.rs": {
+        "production": {
+          "covered": 172,
+          "count": 178,
+          "percent": 96.62921348314607
+        },
+        "changed_production": {
+          "covered": 172,
+          "count": 178,
+          "percent": 96.62921348314607
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          143,
+          144,
+          146,
+          238,
+          276,
+          277
+        ]
+      },
+      "librepods-daemon/src/storage.rs": {
+        "production": {
+          "covered": 272,
+          "count": 286,
+          "percent": 95.1048951048951
+        },
+        "changed_production": {
+          "covered": 272,
+          "count": 286,
+          "percent": 95.1048951048951
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          141,
+          142,
+          146,
+          335,
+          336,
+          337,
+          338,
+          339,
+          354,
+          355,
+          356,
+          357,
+          374,
+          376
+        ]
+      },
+      "librepods-daemon/src/telemetry.rs": {
+        "production": {
+          "covered": 103,
+          "count": 131,
+          "percent": 78.62595419847328
+        },
+        "changed_production": {
+          "covered": 103,
+          "count": 131,
+          "percent": 78.62595419847328
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          79,
+          86,
+          87,
+          88,
+          89,
+          90,
+          134,
+          138,
+          140,
+          141,
+          147,
+          148,
+          149,
+          150,
+          151,
+          152,
+          153,
+          154,
+          155,
+          156,
+          157,
+          160,
+          161,
+          162,
+          187,
+          188,
+          189,
+          190
+        ]
+      },
+      "librepods-linux/src/ble.rs": {
+        "production": {
+          "covered": 141,
+          "count": 154,
+          "percent": 91.55844155844156
+        },
+        "changed_production": {
+          "covered": 139,
+          "count": 151,
+          "percent": 92.05298013245033
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          21,
+          22,
+          23,
+          67,
+          86,
+          102,
+          104,
+          130,
+          211,
+          220,
+          223,
+          233
+        ]
+      },
+      "librepods-linux/src/bluez_monitor.rs": {
+        "production": {
+          "covered": 226,
+          "count": 246,
+          "percent": 91.869918699187
+        },
+        "changed_production": {
+          "covered": 214,
+          "count": 233,
+          "percent": 91.84549356223177
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          105,
+          144,
+          145,
+          147,
+          148,
+          149,
+          150,
+          182,
+          183,
+          184,
+          216,
+          234,
+          235,
+          236,
+          237,
+          238,
+          239,
+          240,
+          291
+        ]
+      },
+      "librepods-linux/src/desktop.rs": {
+        "production": {
+          "covered": 557,
+          "count": 569,
+          "percent": 97.89103690685413
+        },
+        "changed_production": {
+          "covered": 557,
+          "count": 569,
+          "percent": 97.89103690685413
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          194,
+          195,
+          196,
+          197,
+          287,
+          347,
+          348,
+          349,
+          350,
+          351,
+          452,
+          453
+        ]
+      },
+      "librepods-linux/src/error.rs": {
+        "production": {
+          "covered": 68,
+          "count": 76,
+          "percent": 89.47368421052632
+        },
+        "changed_production": {
+          "covered": 68,
+          "count": 76,
+          "percent": 89.47368421052632
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          48,
+          96,
+          99,
+          100,
+          101,
+          106,
+          126,
+          132
+        ]
+      },
+      "librepods-linux/src/l2cap.rs": {
+        "production": {
+          "covered": 244,
+          "count": 299,
+          "percent": 81.60535117056857
+        },
+        "changed_production": {
+          "covered": 226,
+          "count": 275,
+          "percent": 82.18181818181819
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          65,
+          66,
+          67,
+          141,
+          142,
+          143,
+          144,
+          145,
+          156,
+          157,
+          158,
+          159,
+          206,
+          211,
+          216,
+          217,
+          218,
+          223,
+          224,
+          225,
+          226,
+          227,
+          230,
+          231,
+          233,
+          235,
+          262,
+          276,
+          277,
+          278,
+          279,
+          280,
+          324,
+          325,
+          326,
+          327,
+          335,
+          374,
+          375,
+          376,
+          377,
+          380,
+          381,
+          382,
+          394,
+          408,
+          409,
+          410,
+          411
+        ]
+      },
+      "librepods-linux/src/media.rs": {
+        "production": {
+          "covered": 121,
+          "count": 125,
+          "percent": 96.8
+        },
+        "changed_production": {
+          "covered": 97,
+          "count": 101,
+          "percent": 96.03960396039604
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          31,
+          32,
+          37,
+          38
+        ]
+      },
+      "librepods-linux/src/player_monitor.rs": {
+        "production": {
+          "covered": 135,
+          "count": 141,
+          "percent": 95.74468085106383
+        },
+        "changed_production": {
+          "covered": 135,
+          "count": 141,
+          "percent": 95.74468085106383
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          127,
+          128,
+          129,
+          174,
+          205,
+          212
+        ]
+      },
+      "librepods-linux/src/sleep.rs": {
+        "production": {
+          "covered": 96,
+          "count": 99,
+          "percent": 96.96969696969697
+        },
+        "changed_production": {
+          "covered": 96,
+          "count": 99,
+          "percent": 96.96969696969697
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": [
+          88,
+          143,
+          146
+        ]
+      },
+      "librepods-linux/src/test_bus.rs": {
+        "production": {
+          "covered": 0,
+          "count": 0,
+          "percent": null
+        },
+        "changed_production": {
+          "covered": 0,
+          "count": 0,
+          "percent": null
+        },
+        "critical_scope": true,
+        "uncovered_changed_lines": []
+      }
+    },
+    "base_commit": "399e7759053d4b0dfe1d37813b0ca9d0bde7af5c",
+    "head_commit": "f920fe3c539a995b288f1ccbab7cea95f9625a2a",
+    "critical_target_percent": 90.0,
+    "critical_target_met": true
+  },
+  "local_artifact_sha256": {
+    "librepods-rs-f920fe3-final-coverage.json": "e60430618f10beb3f1f396e8dfdcff55cf322a0ecb3fbab453592a16c0cbb4ee",
+    "librepods-rs-f920fe3-final-coverage.lcov": "f09f3502dd7e48989e6cb56c2e9d2f018240be27ec44ddf3094a719466dd22be",
+    "librepods-rs-f920fe3-final-coverage.log": "56a72a55a9c2d68cd9446941bec7a1fa9a7be0a56ba5194ab0abe3fd0f2b1deb",
+    "librepods-rs-f920fe3-final-coverage-test-spans.json": "cf913da47c68e5379b81ccaea58bd34654d1a9a1f63e2ece46ad05979af34ca7",
+    "librepods-rs-f920fe3-final-changed-coverage.json": "ac43cf6a04115c193092eb5218e6fa198e8c31d4f4263d7d1509c81668e8ab2c"
+  },
+  "limits": [
+    "Raw LCOV/JSON/log evidence remains in local temporary files; this portable record preserves exact counts, source identity and uncovered production lines.",
+    "Historical percentages from stale reused instrumentation targets are withdrawn.",
+    "Passing aggregate coverage does not imply every critical file independently reaches 90 percent.",
+    "No physical suspend, audio, Windows/Android runtime or 24-hour soak claim follows from automated fake/private-bus tests.",
+    "Manual testing is deferred at the user request; this record authorizes no additional manual tests."
+  ]
+}
