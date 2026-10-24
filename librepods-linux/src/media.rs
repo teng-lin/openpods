@@ -195,4 +195,69 @@ mod tests {
     async fn compatibility_calls_can_run_inside_a_runtime() {
         assert_eq!(run(async { Ok(42) }).expect("separate runtime"), 42);
     }
+    #[test]
+    fn compatibility_routes_and_volume_use_only_the_selected_existing_device() {
+        const CHILD: &str = "LIBREPODS_MEDIA_TEST_LOG";
+        if let Some(log) = std::env::var_os(CHILD) {
+            let mut media = LinuxMediaControl::new();
+            MediaControl::set_device_address(&mut media, "AA:BB:CC:DD:EE:FF");
+            assert_eq!(media.get_volume().expect("selected volume"), 50);
+            assert!(media.is_airpods_active_sink());
+            MediaControl::activate_audio(&media).expect("explicit route");
+            media.set_volume(25).expect("selected volume mutation");
+            assert_eq!(
+                crate::error::kind(&media.set_volume(101).expect_err("invalid volume")),
+                Some(ErrorKind::InvalidInput)
+            );
+            MediaControl::remove_audio_output(&media).expect("no profile cleanup");
+            media.set_device_address("11:22:33:44:55:66");
+            assert!(!media.is_airpods_active_sink());
+            assert_eq!(
+                crate::error::kind(&media.get_volume().expect_err("missing volume")),
+                Some(ErrorKind::Unavailable)
+            );
+            assert_eq!(
+                crate::error::kind(&media.activate_audio().expect_err("missing output")),
+                Some(ErrorKind::Unavailable)
+            );
+            assert_eq!(
+                crate::error::kind(&media.set_volume(20).expect_err("missing output")),
+                Some(ErrorKind::Unavailable)
+            );
+            assert_eq!(std::fs::read_to_string(log).expect("mutations"), "set-default-sink bluez_output.AA_BB_CC_DD_EE_FF\nset-sink-volume bluez_output.AA_BB_CC_DD_EE_FF 25%\n");
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().expect("fake audio directory");
+        let executable = directory.path().join("pactl");
+        std::fs::write(&executable, r##"#!/usr/bin/python3
+import json, os, sys
+args = sys.argv[1:]
+if args[0] == '--format=json':
+    operation = args[1:]
+    if operation == ['info']:
+        print(json.dumps({'server_name':'test','default_sink_name':'bluez_output.AA_BB_CC_DD_EE_FF','default_source_name':'external_microphone'}))
+    elif operation == ['list', 'sinks']:
+        print(json.dumps([{'index':1,'name':'speakers'}, {'index':2,'name':'bluez_output.AA_BB_CC_DD_EE_FF','volume':{'left':{'value':32768},'right':{'value':32768}}}]))
+    elif operation == ['list', 'cards']:
+        print(json.dumps([{'name':'bluez_card.AA_BB_CC_DD_EE_FF','active_profile':'a2dp-sink','profiles':{'a2dp-sink':{'available':True,'sinks':1,'sources':0}}}]))
+    else:
+        print('[]')
+else:
+    with open(os.environ['LIBREPODS_MEDIA_TEST_LOG'], 'a') as log:
+        log.write(' '.join(args) + '\n')
+"##).expect("fake executable");
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+            .expect("executable");
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", "media::tests::compatibility_routes_and_volume_use_only_the_selected_existing_device", "--nocapture"])
+            .env("PATH", directory.path()).env(CHILD, directory.path().join("mutations.log"))
+            .output().expect("child process");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

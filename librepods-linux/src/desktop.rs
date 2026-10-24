@@ -130,34 +130,46 @@ async fn run_program(
         .take()
         .ok_or_else(|| PlatformError::new("capture audio API error", ErrorKind::Io))?;
     let result = tokio::time::timeout(timeout, async {
-        let mut output = Vec::new();
-        let mut error = Vec::new();
-        let mut stdout = stdout.take(max_output + 1);
-        let mut stderr = stderr.take(64 * 1024);
-        let (out, err, status) = tokio::join!(
-            stdout.read_to_end(&mut output),
-            stderr.read_to_end(&mut error),
-            child.wait()
-        );
-        out?;
-        err?;
-        Ok::<_, std::io::Error>((status?, output, error))
+        async fn read_limited(
+            reader: impl tokio::io::AsyncRead + Unpin,
+            limit: u64,
+        ) -> Result<Vec<u8>, TransportError> {
+            let mut output = Vec::new();
+            reader
+                .take(limit.saturating_add(1))
+                .read_to_end(&mut output)
+                .await
+                .map_err(|error| PlatformError::io("read audio API output", error))?;
+            if output.len() as u64 > limit {
+                return Err(PlatformError::new(
+                    "audio API output exceeds size limit",
+                    ErrorKind::Truncated,
+                )
+                .into());
+            }
+            Ok(output)
+        }
+        let (output, error, status) = tokio::try_join!(
+            read_limited(stdout, max_output),
+            read_limited(stderr, 64 * 1024),
+            async {
+                child
+                    .wait()
+                    .await
+                    .map_err(|error| PlatformError::io("wait for audio API client", error).into())
+            }
+        )?;
+        Ok::<_, TransportError>((status, output, error))
     })
     .await
-    .map_err(|_| PlatformError::new("audio API operation", ErrorKind::Timeout))?
-    .map_err(|error| PlatformError::io("audio API operation", error))?;
-    if result.1.len() > max_output as usize {
-        return Err(PlatformError::new(
-            "audio API output exceeds size limit",
-            ErrorKind::Truncated,
-        )
-        .into());
-    }
+    .map_err(|_| PlatformError::new("audio API operation", ErrorKind::Timeout))??;
     if !result.0.success() {
-        return Err(TransportError::with_source(
-            "audio server rejected operation",
-            std::io::Error::other(String::from_utf8_lossy(&result.2).trim().to_owned()),
+        let mut error =
+            PlatformError::new("audio server rejected operation", ErrorKind::Unavailable);
+        error.source = Some(std::io::Error::other(
+            String::from_utf8_lossy(&result.2).trim().to_owned(),
         ));
+        return Err(error.into());
     }
     Ok(result.1)
 }
@@ -165,8 +177,11 @@ async fn run_program(
 async fn json(arguments: &[&str]) -> Result<Value, TransportError> {
     let mut args = vec!["--format=json"];
     args.extend_from_slice(arguments);
-    serde_json::from_slice(&pactl(&args).await?)
-        .map_err(|error| TransportError::with_source("decode audio API JSON", error))
+    serde_json::from_slice(&pactl(&args).await?).map_err(|source| {
+        let mut error = PlatformError::new("decode audio API JSON", ErrorKind::Unavailable);
+        error.source = Some(std::io::Error::new(std::io::ErrorKind::InvalidData, source));
+        error.into()
+    })
 }
 
 fn string(value: &Value, key: &str) -> Option<String> {
@@ -968,5 +983,52 @@ mod tests {
             json!([{"index":1,"source":4,"corked":false},{"index":2,"source":5,"corked":false}]),
         );
         assert!(!state.capture_active);
+    }
+    #[tokio::test]
+    async fn noisy_audio_subprocess_fails_as_truncated_before_its_deadline() {
+        let started = std::time::Instant::now();
+        let error = run_program(
+            std::ffi::OsStr::new("/usr/bin/python3"),
+            &[
+                "-c",
+                "import sys; sys.stdout.write('x'*1000000); sys.stdout.flush()",
+            ],
+            Duration::from_secs(2),
+            100,
+        )
+        .await
+        .expect_err("output flood");
+        assert_eq!(crate::error::kind(&error), Some(ErrorKind::Truncated));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let error = run_program(
+            std::ffi::OsStr::new("/usr/bin/python3"),
+            &[
+                "-c",
+                "import sys; sys.stderr.write('x'*1000000); sys.stderr.flush()",
+            ],
+            Duration::from_secs(2),
+            100,
+        )
+        .await
+        .expect_err("stderr flood");
+        assert_eq!(crate::error::kind(&error), Some(ErrorKind::Truncated));
+        let error = run_program(
+            std::ffi::OsStr::new("/usr/bin/python3"),
+            &[
+                "-c",
+                "import sys; sys.stderr.write('audio unavailable'); sys.exit(1)",
+            ],
+            Duration::from_secs(2),
+            100,
+        )
+        .await
+        .expect_err("server rejected");
+        assert_eq!(crate::error::kind(&error), Some(ErrorKind::Unavailable));
+        use std::error::Error;
+        let source = error
+            .source()
+            .and_then(|source| source.source())
+            .expect("original command failure retained");
+        assert!(source.to_string().contains("audio unavailable"));
     }
 }

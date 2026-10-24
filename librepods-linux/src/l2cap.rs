@@ -519,4 +519,104 @@ mod tests {
         drop(peer);
         assert!(socket.send_timeout(&[1], Duration::from_secs(1)).is_err());
     }
+    #[test]
+    fn blocked_send_deadline_and_cancellation_wake_without_dropping_descriptors() {
+        let (socket, peer) = pair();
+        let value: libc::c_int = 4096;
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    socket.fd.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    (&value as *const libc::c_int).cast(),
+                    std::mem::size_of_val(&value) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        let payload = [7u8; 1024];
+        loop {
+            let sent = unsafe {
+                libc::send(
+                    socket.fd.as_raw_fd(),
+                    payload.as_ptr().cast(),
+                    payload.len(),
+                    libc::MSG_NOSIGNAL,
+                )
+            };
+            if sent < 0 {
+                assert_eq!(io::Error::last_os_error().kind(), io::ErrorKind::WouldBlock);
+                break;
+            }
+        }
+        let started = Instant::now();
+        assert_eq!(
+            kind(
+                &socket
+                    .send_timeout(&payload, Duration::from_millis(20))
+                    .expect_err("full socket send deadline")
+            ),
+            Some(ErrorKind::Timeout)
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let pending = socket.clone();
+        let writer =
+            std::thread::spawn(move || pending.send_timeout(&payload, Duration::from_secs(30)));
+        std::thread::sleep(Duration::from_millis(10));
+        socket.cancellation().cancel();
+        assert_eq!(
+            kind(
+                &writer
+                    .join()
+                    .expect("writer thread")
+                    .expect_err("cancelled send")
+            ),
+            Some(ErrorKind::Cancelled)
+        );
+        assert!(!socket.is_connected());
+        drop(peer);
+    }
+
+    #[test]
+    fn pre_cancelled_connect_and_trait_receive_are_safe_without_bluetooth_hardware() {
+        let cancellation = Cancellation::new().expect("cancellation");
+        cancellation.cancel();
+        cancellation.cancel();
+        assert!(cancellation.is_cancelled());
+        let result = L2capLinux::connect_with_cancel(
+            "AA:BB:CC:DD:EE:FF",
+            0x1001,
+            Duration::from_secs(30),
+            cancellation,
+        );
+        assert!(matches!(result, Err(ref error) if kind(error) == Some(ErrorKind::Cancelled)));
+        assert!(L2capLinux::connect("invalid").is_err());
+        assert!(L2capLinux::connect_psm("invalid", 0x1001).is_err());
+        assert!(L2capLinux::connect_psm_timeout("invalid", 0x1001, Duration::MAX).is_err());
+        let (socket, peer) = pair();
+        L2capTransport::send(&*socket, &[4, 5]).expect("trait send");
+        let mut bytes = [0u8; 8];
+        assert_eq!(
+            unsafe { libc::recv(peer.as_raw_fd(), bytes.as_mut_ptr().cast(), bytes.len(), 0) },
+            2
+        );
+        assert_eq!(
+            unsafe { libc::send(peer.as_raw_fd(), [9u8].as_ptr().cast(), 1, 0) },
+            1
+        );
+        assert_eq!(
+            L2capTransport::recv(&*socket, &mut bytes).expect("trait receive"),
+            1
+        );
+        assert_eq!(bytes[0], 9);
+        drop(peer);
+        assert!(matches!(
+            L2capTransport::recv_timeout(&*socket, &mut bytes, Duration::from_secs(1)),
+            Err(TransportError::ConnectionClosed)
+        ));
+        assert!(!socket.is_connected());
+        socket.close().expect("close after peer EOF");
+        socket.close().expect("idempotent close");
+    }
 }
