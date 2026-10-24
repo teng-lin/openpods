@@ -18,37 +18,48 @@ home storage; Unix-socket fixtures used the short private `/home/blackmyth/.cach
 
 ## Production coverage
 
-A fresh isolated instrumentation target on production checkpoint `649b187`
-passed minimal and optional-BLE workspace suites and 19 actual CLI process
+A fresh isolated instrumentation target on production checkpoint `495ea0f`
+passed minimal and optional-BLE workspace suites and 22 actual CLI process
 checks for each feature executable. The current production metric is:
 
 | Scope | Covered / measured lines | Coverage | Required |
 | --- | ---: | ---: | ---: |
-| Core | 1938 / 2000 | 96.90% | 90% |
-| CLI, Linux adapters and daemon | 4974 / 5720 | 86.96% | 80% |
-| Changed critical production against `399e775` | 6156 / 6928 | 88.86% | 90% |
+| Core | 1937 / 2000 | 96.85% | 90% |
+| CLI, Linux adapters and daemon | 5100 / 5746 | 88.76% | 80% |
+| Changed critical production against `399e775` | 6280 / 6954 | 90.31% | 90% |
 
-**The changed-critical gate is currently unmet.** The earlier reused-target
+All three production gates pass at this checkpoint. The earlier reused-target
 percentages recorded here are withdrawn: cargo-llvm-cov 0.9.1 selected different
 default directories for `clean` and `show-env`, leaving stale instrumented
 objects/profiles in persistent local targets. The collector now exports
 `show-env` first, then cleans that exact instrumentation directory. The figures
-above come from a brand-new target and supersede those historical percentages.
+above come from a correctly cleaned target, following an independent brand-new-target
+measurement that exposed a genuine gap. Additional semantic ownership,
+persistence and lifecycle tests closed that gap; the historical percentages
+remain withdrawn.
 
 LLVM LCOV per-line counters and parsed Rust test-only spans define the metric.
 The fresh report excludes 1357 core and 3512 service test-only lines. No
 production function or failure path is excluded. Critical scopes and every
-uncovered changed production line remain in the audit JSON. Additional semantic
-failure tests and another clean measurement are required before claiming the
-90% gate. Hardware-only direct CLI success/interactive scan paths and uncommon
-kernel/worker/filesystem errors remain material limits; aggregate coverage
-cannot prove physical media continuity or real suspend/case behavior.
+uncovered changed production line remain in the audit JSON. The passing 90%
+aggregate does not imply every critical file independently reaches 90%.
+
+Remaining audited critical gaps include session handshake cancellation/malformed
+handshake paths and some command rejection branches; runtime publisher worker
+panics and IPC stall expiry; telemetry scanner failure/event application paths;
+production desktop adapter startup and selected reversible restoration branches;
+Unix socket allocation failures; and successful direct CLI/interactive scan
+paths requiring real hardware. File figures are session 856/962, runtime
+384/428, storage 272/286, telemetry 103/131, daemon desktop 599/684 and Linux
+desktop 557/569. The exact uncovered changed lines remain in the JSON artifact.
+Aggregate coverage cannot prove physical media continuity or real suspend/case
+behavior.
 
 Local temporary evidence (not portable repository artifacts):
-`/tmp/librepods-rs-649b187-isolated-coverage.{json,lcov}`,
-`/tmp/librepods-rs-649b187-isolated-coverage-test-spans.json`,
-`/tmp/librepods-rs-649b187-isolated-coverage.log`, and
-`/tmp/librepods-rs-649b187-isolated-changed-coverage.json`.
+`/tmp/librepods-rs-495ea0f-production-coverage.{json,lcov}`,
+`/tmp/librepods-rs-495ea0f-production-coverage-test-spans.json`,
+`/tmp/librepods-rs-495ea0f-production-coverage.log`, and
+`/tmp/librepods-rs-495ea0f-changed-coverage.json`.
 CI preserves these artifact types and enforces all three thresholds.
 
 ## Bounded fuzz campaign
@@ -74,12 +85,11 @@ This bounded campaign is not exhaustive proof. Scheduled CI uses a longer
 
 ## Interpreter, dependency and packaging checks
 
-The final pure-core Miri run passed 67 unit tests, 8 protocol regressions and
-1 doctest, including the final orientation fix. The regression suite took
-95.45 seconds. Exact core tree: `89c6312d8e9f5a91a43ae2813c3efae9dca5d752`.
-Evidence: `/tmp/librepods-rs-final-core-miri.log` and
-`/tmp/librepods-rs-final-core-miri-source.json`. This does not claim Miri coverage
-for OS Bluetooth/desktop adapters.
+The readback-checkpoint pure-core Miri run passed 71 unit tests, 8 protocol
+regressions and 1 doctest. The regression suite took 95.45 seconds. Exact core
+tree at `649b187`: `1bec7489785fae97323e335818d3d4dd6c4bc431`.
+Evidence: `/tmp/librepods-rs-649b187-core-miri.log`. This does not claim Miri
+coverage for OS Bluetooth/desktop adapters.
 
 The final `cargo deny --locked check` passed advisories, bans, licenses and
 sources with zero error records, against Cargo.lock SHA-256
