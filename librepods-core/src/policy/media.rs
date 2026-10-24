@@ -68,6 +68,20 @@ impl PauseOwnership {
                 .any(|p| p.id == *id && p.owner == *owner && p.playback == PlaybackState::Paused)
         });
     }
+    /// Ordered player events invalidate an earlier pause even if a later event is Paused.
+    /// Events never establish ownership; only a confirmed pause effect may do that.
+    pub fn observe_playback(&mut self, id: &str, owner: &str, playback: PlaybackState) {
+        let retain = |entries: &mut BTreeMap<String, String>| {
+            if entries
+                .get(id)
+                .is_some_and(|expected| expected != owner || playback != PlaybackState::Paused)
+            {
+                entries.remove(id);
+            }
+        };
+        retain(&mut self.pending);
+        retain(&mut self.owned);
+    }
     pub fn resume_targets(&mut self, players: &[PlayerSnapshot]) -> Vec<PlayerTarget> {
         self.observe(players);
         let targets = players
@@ -142,6 +156,31 @@ mod tests {
             policy.observe(&[player("a", ":1.1", PlaybackState::Paused)]);
             assert!(policy.resume_targets(&snapshot).is_empty());
         }
+    }
+    #[test]
+    fn ordered_events_cancel_manual_playback_without_reviving_ownership_or_affecting_others() {
+        let mut policy = PauseOwnership::default();
+        let a = player("a", ":1.1", PlaybackState::Playing);
+        let b = player("b", ":1.2", PlaybackState::Playing);
+        policy.request_pause(&[a, b]);
+        let a = player("a", ":1.1", PlaybackState::Paused);
+        let b = player("b", ":1.2", PlaybackState::Paused);
+        policy.observe(&[a.clone(), b.clone()]);
+        policy.observe_playback("a", ":1.1", PlaybackState::Paused);
+        assert!(policy.has_owned());
+        policy.observe_playback("a", ":1.1", PlaybackState::Playing);
+        policy.observe_playback("a", ":1.1", PlaybackState::Paused);
+        assert_eq!(
+            policy.resume_targets(&[a, b]),
+            vec![PlayerTarget {
+                id: "b".into(),
+                owner: ":1.2".into()
+            }]
+        );
+        policy.request_pause(&[player("a", ":1.1", PlaybackState::Playing)]);
+        policy.observe_playback("a", ":1.3", PlaybackState::Paused);
+        policy.observe(&[player("a", ":1.1", PlaybackState::Paused)]);
+        assert!(!policy.has_owned());
     }
     #[test]
     fn failed_and_unsupported_pause_never_record_ownership() {
