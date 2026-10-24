@@ -2,240 +2,310 @@
 // Copyright (C) 2025 LibrePods contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Bounded, confirmed changes to supported AirPods settings.
+//! Deterministic command confirmation; the daemon owns I/O and time.
 
-use std::time::{Duration, Instant};
-
+use crate::device::state::{DeviceState, NoiseControlMode};
+use crate::protocol::control_command::{ControlCommand, ControlCommandId};
+use crate::protocol::{packets, parser::ParsedPacket};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::device::state::NoiseControlMode;
-use crate::protocol::control_command::{ControlCommand, ControlCommandId};
-use crate::protocol::parser::{self, ParsedPacket};
-use crate::transport::{L2capTransport, TransportError};
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SettingChange {
     ListeningMode(NoiseControlMode),
     ConversationalAwareness(bool),
     SingleEarbudAnc(bool),
+    AdaptiveNoiseLevel(u8),
+    Rename(String),
+    LongPressModes(u8),
 }
 
 impl std::fmt::Display for SettingChange {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ListeningMode(mode) => write!(formatter, "listening mode {mode:?}"),
-            Self::ConversationalAwareness(enabled) => write!(
-                formatter,
+            Self::ListeningMode(mode) => write!(f, "listening mode {mode:?}"),
+            Self::ConversationalAwareness(on) => write!(
+                f,
                 "Conversational Awareness {}",
-                if *enabled { "on" } else { "off" }
+                if *on { "on" } else { "off" }
             ),
-            Self::SingleEarbudAnc(enabled) => write!(
-                formatter,
-                "single-earbud ANC {}",
-                if *enabled { "on" } else { "off" }
-            ),
+            Self::SingleEarbudAnc(on) => {
+                write!(f, "single-earbud ANC {}", if *on { "on" } else { "off" })
+            }
+            Self::AdaptiveNoiseLevel(value) => write!(f, "adaptive noise level {value}"),
+            Self::Rename(_) => write!(f, "device name"),
+            Self::LongPressModes(mask) => write!(f, "long-press listening modes {mask:#04x}"),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error, Serialize, Deserialize)]
+pub enum CommandRejection {
+    #[error("the device has not reported a supported model")]
+    UnknownModel,
+    #[error("the selected model does not support this setting")]
+    Unsupported,
+    #[error("the setting value is out of range")]
+    InvalidValue,
+    #[error("adaptive noise level requires confirmed Adaptive listening mode")]
+    NotAdaptive,
 }
 
 impl SettingChange {
-    fn command(self) -> (ControlCommandId, [u8; 4]) {
-        match self {
-            Self::ListeningMode(mode) => {
-                (ControlCommandId::ListeningMode, [mode.as_byte(), 0, 0, 0])
+    pub fn id(&self) -> Option<u8> {
+        Some(match self {
+            Self::ListeningMode(_) => ControlCommandId::ListeningMode.as_byte(),
+            Self::ConversationalAwareness(_) => {
+                ControlCommandId::ConversationDetectConfig.as_byte()
             }
-            Self::ConversationalAwareness(enabled) => (
-                ControlCommandId::ConversationDetectConfig,
-                [if enabled { 1 } else { 2 }, 0, 0, 0],
-            ),
-            Self::SingleEarbudAnc(enabled) => (
-                ControlCommandId::OneBudAncMode,
-                [if enabled { 1 } else { 2 }, 0, 0, 0],
-            ),
+            Self::SingleEarbudAnc(_) => ControlCommandId::OneBudAncMode.as_byte(),
+            Self::AdaptiveNoiseLevel(_) => ControlCommandId::AutoAncStrength.as_byte(),
+            Self::LongPressModes(_) => ControlCommandId::ListeningModeConfigs.as_byte(),
+            Self::Rename(_) => return None,
+        })
+    }
+
+    pub fn validate(&self, state: &DeviceState) -> Result<(), CommandRejection> {
+        use crate::device::state::AirPodsModel;
+        if state.model == AirPodsModel::Unknown {
+            return Err(CommandRejection::UnknownModel);
+        }
+        let caps = state.capabilities();
+        match self {
+            Self::ListeningMode(mode)
+                if !caps.noise_control
+                    || (*mode == NoiseControlMode::Off && !caps.noise_off)
+                    || (*mode == NoiseControlMode::Adaptive && !caps.adaptive) =>
+            {
+                Err(CommandRejection::Unsupported)
+            }
+            Self::ConversationalAwareness(_) if !caps.conversational_awareness => {
+                Err(CommandRejection::Unsupported)
+            }
+            Self::SingleEarbudAnc(_) if !caps.one_bud_anc => Err(CommandRejection::Unsupported),
+            Self::AdaptiveNoiseLevel(_) if !caps.adaptive => Err(CommandRejection::Unsupported),
+            Self::AdaptiveNoiseLevel(value) if *value > 100 => Err(CommandRejection::InvalidValue),
+            Self::AdaptiveNoiseLevel(_)
+                if !state.noise_control_reported
+                    || state.noise_control != NoiseControlMode::Adaptive =>
+            {
+                Err(CommandRejection::NotAdaptive)
+            }
+            Self::Rename(name)
+                if name.is_empty() || name.len() > 255 || name.chars().any(char::is_control) =>
+            {
+                Err(CommandRejection::InvalidValue)
+            }
+            Self::LongPressModes(mask) if *mask == 0 || *mask > 15 => {
+                Err(CommandRejection::InvalidValue)
+            }
+            Self::LongPressModes(mask)
+                if !caps.noise_control
+                    || (*mask & 1 != 0 && !caps.noise_off)
+                    || (*mask & 8 != 0 && !caps.adaptive) =>
+            {
+                Err(CommandRejection::Unsupported)
+            }
+            _ => Ok(()),
         }
     }
 
-    fn reported_value(self, packet: &ParsedPacket) -> Option<[u8; 4]> {
-        match packet {
-            ParsedPacket::NoiseControl(mode) if matches!(self, Self::ListeningMode(_)) => {
-                Some([mode.as_byte(), 0, 0, 0])
+    pub fn packet(&self) -> Vec<u8> {
+        if let Self::Rename(name) = self {
+            return packets::build_rename(name);
+        }
+        ControlCommand::create(self.id().unwrap_or_default(), &self.target()).to_vec()
+    }
+
+    fn target(&self) -> [u8; 4] {
+        let value = match self {
+            Self::ListeningMode(mode) => mode.as_byte(),
+            Self::ConversationalAwareness(on) | Self::SingleEarbudAnc(on) => {
+                if *on {
+                    1
+                } else {
+                    2
+                }
             }
-            ParsedPacket::ControlCommand { id, data } if *id == self.command().0 => Some(*data),
+            Self::AdaptiveNoiseLevel(value) | Self::LongPressModes(value) => *value,
+            Self::Rename(_) => 0,
+        };
+        [value, 0, 0, 0]
+    }
+
+    fn reported(&self, packet: &ParsedPacket) -> Option<bool> {
+        match (self, packet) {
+            (Self::Rename(target), ParsedPacket::Metadata { name, .. }) => Some(target == name),
+            (Self::ListeningMode(target), ParsedPacket::NoiseControl(mode)) => Some(target == mode),
+            (_, ParsedPacket::ControlCommand { id, data }) if Some(id.as_byte()) == self.id() => {
+                Some(*data == self.target())
+            }
             _ => None,
         }
     }
+
+    fn current(&self, state: &DeviceState) -> Option<bool> {
+        match self {
+            Self::Rename(target) if state.fresh("metadata") => Some(target == &state.device_name),
+            Self::ListeningMode(target)
+                if state.noise_control_reported && state.fresh("noise_control") =>
+            {
+                Some(*target == state.noise_control)
+            }
+            _ => self.id().and_then(|id| {
+                if !state.fresh(&format!("control.{id:02x}")) {
+                    return None;
+                }
+                state
+                    .reported_controls
+                    .get(&id)
+                    .map(|value| *value == self.target())
+            }),
+        }
+    }
 }
 
-#[derive(Debug, Error)]
-pub enum ChangeError {
-    #[error("AirPods did not report the requested setting before the deadline")]
-    Timeout,
-    #[error("AirPods setting exchange failed: {0}")]
-    Transport(#[from] TransportError),
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommandOutcome {
+    Confirmed,
+    AlreadySet,
+    TimedOut,
+    OutcomeUnknown,
+    Cancelled,
+    Superseded,
+    Rejected(CommandRejection),
+}
+
+pub type ChangeOutcome = CommandOutcome;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandAction {
+    Wait,
+    Send(Vec<u8>),
+    Complete(CommandOutcome),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChangeOutcome {
-    AlreadySet,
-    Confirmed,
+enum Phase {
+    New,
+    Baseline,
+    Dispatch,
+    Confirmation,
+    Complete(CommandOutcome),
 }
 
-/// Observe the initial setting before writing, then require a matching new
-/// notification. Unrelated packets remain available to the caller's state model.
-pub fn change_setting(
-    transport: &dyn L2capTransport,
-    change: SettingChange,
-    timeout: Duration,
-    mut observe: impl FnMut(ParsedPacket),
-) -> Result<ChangeOutcome, ChangeError> {
-    let started = Instant::now();
-    let mut buf = [0u8; 1024];
-    let (id, target) = change.command();
-    let mut sent = false;
-    loop {
-        let remaining = timeout.saturating_sub(started.elapsed());
-        if remaining.is_zero() {
-            return Err(ChangeError::Timeout);
-        }
-        let size = transport.recv_timeout(&mut buf, remaining)?;
-        let packet = match parser::parse(&buf[..size]) {
-            Ok(packet) => packet,
-            Err(_) => continue,
-        };
-        let value = change.reported_value(&packet);
-        observe(packet);
-        if let Some(value) = value {
-            if value == target {
-                return Ok(if sent {
-                    ChangeOutcome::Confirmed
-                } else {
-                    ChangeOutcome::AlreadySet
-                });
-            }
-            if !sent {
-                transport.send(&ControlCommand::create(id.as_byte(), &target))?;
-                sent = true;
-            }
-        }
-    }
+/// One command, scoped to a connection generation and an absolute deadline.
+pub struct PendingChange {
+    pub change: SettingChange,
+    pub generation: u64,
+    pub deadline_ms: u64,
+    phase: Phase,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::VecDeque;
-    use std::sync::Mutex;
-
-    struct Peer {
-        incoming: Mutex<VecDeque<Vec<u8>>>,
-        sent: Mutex<Vec<Vec<u8>>>,
+impl PendingChange {
+    pub fn new(change: SettingChange, generation: u64, deadline_ms: u64) -> Self {
+        Self {
+            change,
+            generation,
+            deadline_ms,
+            phase: Phase::New,
+        }
     }
 
-    impl Peer {
-        fn new(packets: Vec<Vec<u8>>) -> Self {
-            Self {
-                incoming: Mutex::new(packets.into()),
-                sent: Mutex::new(Vec::new()),
+    fn finish(&mut self, outcome: CommandOutcome) -> CommandAction {
+        self.phase = Phase::Complete(outcome);
+        CommandAction::Complete(outcome)
+    }
+
+    fn dispatch(&mut self) -> CommandAction {
+        self.phase = Phase::Dispatch;
+        CommandAction::Send(self.change.packet())
+    }
+
+    pub fn begin(&mut self, state: &DeviceState, now_ms: u64) -> CommandAction {
+        let action = self.tick(state.session_generation, now_ms);
+        if action != CommandAction::Wait {
+            return action;
+        }
+        if self.phase != Phase::New {
+            return CommandAction::Wait;
+        }
+        if let Err(reason) = self.change.validate(state) {
+            return self.finish(CommandOutcome::Rejected(reason));
+        }
+        match self.change.current(state) {
+            Some(true) => self.finish(CommandOutcome::AlreadySet),
+            Some(false) => self.dispatch(),
+            None => {
+                self.phase = Phase::Baseline;
+                CommandAction::Wait
             }
         }
     }
 
-    impl L2capTransport for Peer {
-        fn send(&self, packet: &[u8]) -> Result<(), TransportError> {
-            self.sent.lock().expect("test lock").push(packet.to_vec());
-            Ok(())
+    pub fn on_packet(
+        &mut self,
+        packet: &ParsedPacket,
+        generation: u64,
+        now_ms: u64,
+    ) -> CommandAction {
+        let action = self.tick(generation, now_ms);
+        if action != CommandAction::Wait {
+            return action;
         }
-
-        fn recv(&self, _: &mut [u8]) -> Result<usize, TransportError> {
-            panic!("setting changes must use bounded reads")
-        }
-
-        fn recv_timeout(&self, buf: &mut [u8], _: Duration) -> Result<usize, TransportError> {
-            let packet = self
-                .incoming
-                .lock()
-                .expect("test lock")
-                .pop_front()
-                .ok_or_else(|| TransportError::new("simulated deadline"))?;
-            buf[..packet.len()].copy_from_slice(&packet);
-            Ok(packet.len())
-        }
-
-        fn close(&self) -> Result<(), TransportError> {
-            Ok(())
-        }
-        fn is_connected(&self) -> bool {
-            true
+        match (self.phase, self.change.reported(packet)) {
+            (Phase::Baseline, Some(true)) => self.finish(CommandOutcome::AlreadySet),
+            (Phase::Baseline, Some(false)) => self.dispatch(),
+            (Phase::Confirmation, Some(true)) => self.finish(CommandOutcome::Confirmed),
+            _ => CommandAction::Wait,
         }
     }
 
-    #[test]
-    fn mode_change_requires_a_new_matching_notification_and_preserves_other_events() {
-        use crate::protocol::packets;
-        let peer = Peer::new(vec![
-            packets::build_noise_control(NoiseControlMode::NoiseCancellation).to_vec(),
-            ControlCommand::enabled(ControlCommandId::ConversationDetectConfig.as_byte()).to_vec(),
-            packets::build_noise_control(NoiseControlMode::NoiseCancellation).to_vec(),
-            packets::build_noise_control(NoiseControlMode::Transparency).to_vec(),
-        ]);
-        let mut observed = 0;
-        let outcome = change_setting(
-            &peer,
-            SettingChange::ListeningMode(NoiseControlMode::Transparency),
-            Duration::from_secs(1),
-            |_| observed += 1,
-        )
-        .expect("confirmed");
-        assert_eq!(outcome, ChangeOutcome::Confirmed);
-        assert_eq!(observed, 4);
-        assert_eq!(
-            *peer.sent.lock().expect("test lock"),
-            vec![packets::build_noise_control(NoiseControlMode::Transparency).to_vec()]
-        );
+    pub fn mark_sent(&mut self, generation: u64, now_ms: u64) -> CommandAction {
+        let action = self.tick(generation, now_ms);
+        if action != CommandAction::Wait {
+            return action;
+        }
+        if self.phase == Phase::Dispatch {
+            self.phase = Phase::Confirmation;
+        }
+        CommandAction::Wait
     }
 
-    #[test]
-    fn existing_value_succeeds_without_writing() {
-        let peer = Peer::new(vec![ControlCommand::enabled(0x28).to_vec()]);
-        assert_eq!(
-            change_setting(
-                &peer,
-                SettingChange::ConversationalAwareness(true),
-                Duration::from_secs(1),
-                |_| {}
-            )
-            .expect("already enabled"),
-            ChangeOutcome::AlreadySet
-        );
-        assert!(peer.sent.lock().expect("test lock").is_empty());
+    pub fn tick(&mut self, generation: u64, now_ms: u64) -> CommandAction {
+        if let Phase::Complete(outcome) = self.phase {
+            return CommandAction::Complete(outcome);
+        }
+        if generation != self.generation {
+            return self.transport_lost();
+        }
+        if now_ms >= self.deadline_ms {
+            return self.finish(if self.phase == Phase::Confirmation {
+                CommandOutcome::OutcomeUnknown
+            } else {
+                CommandOutcome::TimedOut
+            });
+        }
+        CommandAction::Wait
     }
 
-    #[test]
-    fn missing_acknowledgement_is_an_error_and_does_not_repeat_the_mutation() {
-        let peer = Peer::new(vec![ControlCommand::disabled(0x1B).to_vec()]);
-        assert!(change_setting(
-            &peer,
-            SettingChange::SingleEarbudAnc(true),
-            Duration::from_secs(1),
-            |_| {}
-        )
-        .is_err());
-        assert_eq!(
-            *peer.sent.lock().expect("test lock"),
-            vec![ControlCommand::enabled(0x1B).to_vec()]
-        );
+    pub fn cancel(&mut self) -> CommandAction {
+        self.finish(if self.phase == Phase::Confirmation {
+            CommandOutcome::OutcomeUnknown
+        } else {
+            CommandOutcome::Cancelled
+        })
     }
 
-    #[test]
-    fn no_initial_report_means_no_write() {
-        let peer = Peer::new(vec![]);
-        assert!(change_setting(
-            &peer,
-            SettingChange::ConversationalAwareness(false),
-            Duration::ZERO,
-            |_| {}
-        )
-        .is_err());
-        assert!(peer.sent.lock().expect("test lock").is_empty());
+    pub fn supersede(&mut self) -> CommandAction {
+        self.finish(if self.phase == Phase::Confirmation {
+            CommandOutcome::OutcomeUnknown
+        } else {
+            CommandOutcome::Superseded
+        })
+    }
+
+    pub fn transport_lost(&mut self) -> CommandAction {
+        self.cancel()
     }
 }

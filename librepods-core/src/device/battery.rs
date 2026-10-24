@@ -16,6 +16,7 @@
 //! - `AAP Definitions.md` § Battery
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 use crate::protocol::packets;
@@ -28,6 +29,7 @@ use crate::protocol::packets;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum Component {
+    Headset = 0x01,
     Right = 0x02,
     Left = 0x04,
     Case = 0x08,
@@ -36,6 +38,7 @@ pub enum Component {
 impl Component {
     pub fn from_byte(b: u8) -> Option<Self> {
         match b {
+            0x01 => Some(Self::Headset),
             0x02 => Some(Self::Right),
             0x04 => Some(Self::Left),
             0x08 => Some(Self::Case),
@@ -45,6 +48,7 @@ impl Component {
 
     pub fn name(self) -> &'static str {
         match self {
+            Self::Headset => "Headset",
             Self::Right => "Right",
             Self::Left => "Left",
             Self::Case => "Case",
@@ -64,6 +68,7 @@ pub enum BatteryStatus {
     Discharging = 0x02,
     Disconnected = 0x04,
     OptimizedCharging = 0x05,
+    Unknown(u8),
 }
 
 impl BatteryStatus {
@@ -100,6 +105,13 @@ pub struct BatteryInfo {
     pub left: BatteryState,
     pub right: BatteryState,
     pub case_: BatteryState,
+    #[serde(default)]
+    pub headset: BatteryState,
+    /// Components carried by this packet; omitted components are not resets.
+    #[serde(default)]
+    pub present: Vec<Component>,
+    #[serde(default)]
+    pub unknown_records: BTreeMap<u8, BatteryState>,
     /// The first pod listed in the packet is the "primary" pod.
     pub primary_pod: Component,
 }
@@ -110,6 +122,9 @@ impl Default for BatteryInfo {
             left: BatteryState::default(),
             right: BatteryState::default(),
             case_: BatteryState::default(),
+            headset: BatteryState::default(),
+            present: Vec::new(),
+            unknown_records: BTreeMap::new(),
             primary_pod: Component::Left,
         }
     }
@@ -135,6 +150,12 @@ pub enum BatteryParseError {
 
     #[error("invalid spacer/end byte at offset {0}")]
     BadSpacer(usize),
+    #[error("battery payload length does not match component count")]
+    BadLength,
+    #[error("invalid battery level {0}")]
+    BadLevel(u8),
+    #[error("duplicate battery component 0x{0:02X}")]
+    DuplicateComponent(u8),
 }
 
 /// Parse a full 22-byte battery packet starting with `04 00 04 00 04 00`.
@@ -150,21 +171,26 @@ pub fn parse_battery(packet: &[u8]) -> Result<BatteryInfo, BatteryParseError> {
     }
 
     let count = packet[6];
-    if count > 3 {
+    if count > 32 {
         return Err(BatteryParseError::BadCount(count));
     }
 
     let expected_len = 7 + (5 * count as usize);
-    if packet.len() < expected_len {
-        return Err(BatteryParseError::TooShort(packet.len()));
+    if packet.len() != expected_len {
+        return Err(BatteryParseError::BadLength);
     }
 
     let mut info = BatteryInfo::default();
     let mut pods_seen: Vec<Component> = Vec::with_capacity(2);
+    let mut seen = [false; 256];
 
     for i in 0..count as usize {
         let offset = 7 + (5 * i);
         let comp_byte = packet[offset];
+        if seen[comp_byte as usize] {
+            return Err(BatteryParseError::DuplicateComponent(comp_byte));
+        }
+        seen[comp_byte as usize] = true;
 
         // Verify spacer (0x01) and end byte (0x01)
         if packet[offset + 1] != 0x01 {
@@ -174,14 +200,21 @@ pub fn parse_battery(packet: &[u8]) -> Result<BatteryInfo, BatteryParseError> {
             return Err(BatteryParseError::BadSpacer(offset + 4));
         }
 
-        let comp = Component::from_byte(comp_byte)
-            .ok_or(BatteryParseError::UnknownComponent(comp_byte))?;
         let level = packet[offset + 2];
-        let status =
-            BatteryStatus::from_byte(packet[offset + 3]).unwrap_or(BatteryStatus::Disconnected);
+        if level > 100 {
+            return Err(BatteryParseError::BadLevel(level));
+        }
+        let status = BatteryStatus::from_byte(packet[offset + 3])
+            .unwrap_or(BatteryStatus::Unknown(packet[offset + 3]));
 
         let state = BatteryState { level, status };
+        let Some(comp) = Component::from_byte(comp_byte) else {
+            info.unknown_records.insert(comp_byte, state);
+            continue;
+        };
+        info.present.push(comp);
         match comp {
+            Component::Headset => info.headset = state,
             Component::Left => info.left = state,
             Component::Right => info.right = state,
             Component::Case => info.case_ = state,
@@ -200,9 +233,58 @@ pub fn parse_battery(packet: &[u8]) -> Result<BatteryInfo, BatteryParseError> {
     Ok(info)
 }
 
+impl BatteryInfo {
+    pub fn primary_side(&self) -> Option<Component> {
+        if self.present.contains(&self.primary_pod)
+            && matches!(self.primary_pod, Component::Left | Component::Right)
+        {
+            Some(self.primary_pod)
+        } else {
+            None
+        }
+    }
+    pub fn get(&self, component: Component) -> BatteryState {
+        match component {
+            Component::Headset => self.headset,
+            Component::Right => self.right,
+            Component::Left => self.left,
+            Component::Case => self.case_,
+        }
+    }
+
+    /// Apply one validated partial packet without clearing absent components.
+    pub fn merge(&mut self, patch: &Self) {
+        for component in &patch.present {
+            match component {
+                Component::Headset => self.headset = patch.headset,
+                Component::Right => self.right = patch.right,
+                Component::Left => self.left = patch.left,
+                Component::Case => self.case_ = patch.case_,
+            }
+            if !self.present.contains(component) {
+                self.present.push(*component);
+            }
+        }
+        self.unknown_records.extend(patch.unknown_records.clone());
+        if patch.present.contains(&Component::Left) || patch.present.contains(&Component::Right) {
+            self.primary_pod = patch.primary_pod;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_levels_duplicates_and_trailing_bytes_are_rejected() {
+        let invalid_level = [4, 0, 4, 0, 4, 0, 1, 2, 1, 101, 2, 1];
+        assert!(parse_battery(&invalid_level).is_err());
+        let duplicate = [4, 0, 4, 0, 4, 0, 2, 2, 1, 80, 2, 1, 2, 1, 70, 2, 1];
+        assert!(parse_battery(&duplicate).is_err());
+        let extra = [4, 0, 4, 0, 4, 0, 1, 2, 1, 80, 2, 1, 0];
+        assert!(parse_battery(&extra).is_err());
+    }
 
     #[test]
     fn parse_example_from_docs() {

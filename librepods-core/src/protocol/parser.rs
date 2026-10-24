@@ -12,8 +12,8 @@
 //! - `main.cpp` `parseData()`
 
 use crate::device::battery::{self, BatteryInfo};
-use crate::device::state::NoiseControlMode;
-use crate::protocol::control_command::{ControlCommand, ControlCommandId};
+use crate::device::state::{NoiseControlMode, WearState};
+use crate::protocol::control_command::ControlCommandId;
 use crate::protocol::opcodes;
 use crate::protocol::packets;
 use thiserror::Error;
@@ -24,6 +24,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ParseError {
+    #[error("malformed packet: {0}")]
+    Malformed(&'static str),
     #[error("packet too short ({0} bytes)")]
     TooShort(usize),
 
@@ -87,6 +89,11 @@ pub enum ParsedPacket {
         primary_in_ear: bool,
         secondary_in_ear: bool,
     },
+    /// Full protocol wear states; unlike legacy booleans this preserves in-case/unknown.
+    EarStatus {
+        primary: WearState,
+        secondary: WearState,
+    },
 
     /// Noise control mode notification from AirPods (stem press or remote set).
     NoiseControl(NoiseControlMode),
@@ -129,6 +136,9 @@ pub enum ParsedPacket {
 
 /// Parse a raw AAP packet received from the L2CAP socket.
 pub fn parse(packet: &[u8]) -> Result<ParsedPacket, ParseError> {
+    if packet.len() > packets::MAX_PACKET_BYTES {
+        return Err(ParseError::Malformed("datagram exceeds control limit"));
+    }
     if packet.len() < 4 {
         return Err(ParseError::TooShort(packet.len()));
     }
@@ -158,6 +168,9 @@ pub fn parse(packet: &[u8]) -> Result<ParsedPacket, ParseError> {
     if packet.len() < 6 {
         return Err(ParseError::TooShort(packet.len()));
     }
+    if packet[5] != 0 {
+        return Err(ParseError::Malformed("nonzero standard reserved byte"));
+    }
 
     let opcode = packet[4];
 
@@ -168,12 +181,14 @@ pub fn parse(packet: &[u8]) -> Result<ParsedPacket, ParseError> {
         }
 
         opcodes::EAR_DETECTION => {
-            if packet.len() < 8 {
-                return Err(ParseError::TooShort(packet.len()));
+            if packet.len() != 8 {
+                return Err(ParseError::Malformed(
+                    "wear notification must be eight bytes",
+                ));
             }
-            Ok(ParsedPacket::EarDetection {
-                primary_in_ear: packet[6] == 0x00,
-                secondary_in_ear: packet[7] == 0x00,
+            Ok(ParsedPacket::EarStatus {
+                primary: WearState::from_byte(packet[6]),
+                secondary: WearState::from_byte(packet[7]),
             })
         }
 
@@ -212,21 +227,25 @@ pub fn parse(packet: &[u8]) -> Result<ParsedPacket, ParseError> {
 
 /// Parse a control command notification from AirPods.
 fn parse_control_command(packet: &[u8]) -> Result<ParsedPacket, ParseError> {
-    if packet.len() < 11 {
-        return Err(ParseError::TooShort(packet.len()));
+    if packet.len() != 11 {
+        return Err(ParseError::Malformed(
+            "control notification must be eleven bytes",
+        ));
     }
 
     let id_byte = packet[6];
     let id = match ControlCommandId::from_byte(id_byte) {
         Some(id) => id,
         None => {
-            log::warn!("Unknown control command identifier: 0x{:02X}", id_byte);
             return Ok(ParsedPacket::Unknown(packet.to_vec()));
         }
     };
 
     // If it's a noise control mode change, also return a typed variant
     if id == ControlCommandId::ListeningMode {
+        if packet[8..] != [0, 0, 0] {
+            return Ok(ParsedPacket::Unknown(packet.to_vec()));
+        }
         let mode = match NoiseControlMode::from_byte(packet[7]) {
             Some(m) => m,
             None => return Ok(ParsedPacket::Unknown(packet.to_vec())),
@@ -234,7 +253,7 @@ fn parse_control_command(packet: &[u8]) -> Result<ParsedPacket, ParseError> {
         return Ok(ParsedPacket::NoiseControl(mode));
     }
 
-    let data = ControlCommand::parse_data(packet).unwrap_or([0; 4]);
+    let data = [packet[7], packet[8], packet[9], packet[10]];
     Ok(ParsedPacket::ControlCommand { id, data })
 }
 
@@ -257,7 +276,9 @@ fn parse_metadata(packet: &[u8]) -> Result<ParsedPacket, ParseError> {
     let mut start = 0;
     for i in 0..data.len() {
         if data[i] == 0x00 {
-            let s = String::from_utf8_lossy(&data[start..i]).to_string();
+            let s = std::str::from_utf8(&data[start..i])
+                .map_err(|_| ParseError::Metadata("invalid UTF-8".into()))?
+                .to_owned();
             strings.push(s);
             start = i + 1;
             if strings.len() == 3 {
@@ -266,14 +287,13 @@ fn parse_metadata(packet: &[u8]) -> Result<ParsedPacket, ParseError> {
         }
     }
 
-    // Pad with empty strings if fewer than 3 null-terminated strings found
-    while strings.len() < 3 {
-        if start < data.len() {
-            strings.push(String::from_utf8_lossy(&data[start..]).to_string());
-            start = data.len();
-        } else {
-            strings.push(String::new());
-        }
+    if strings.len() != 3 {
+        return Err(ParseError::Metadata(
+            "three terminated strings required".into(),
+        ));
+    }
+    if data[start..].iter().any(|byte| *byte != 0) {
+        return Ok(ParsedPacket::Unknown(packet.to_vec()));
     }
 
     Ok(ParsedPacket::Metadata {
@@ -292,19 +312,25 @@ fn parse_proximity_keys(packet: &[u8]) -> Result<ParsedPacket, ParseError> {
     }
 
     let count = packet[6] as usize;
+    if count > 16 {
+        return Err(ParseError::Malformed("too many proximity keys"));
+    }
     let mut keys = Vec::with_capacity(count);
     let mut offset = 7;
 
     for _ in 0..count {
         if offset + 4 > packet.len() {
-            break;
+            return Err(ParseError::Malformed("truncated key header"));
         }
         let key_type_byte = packet[offset];
-        let key_len = packet[offset + 2] as usize;
+        let key_len = u16::from_be_bytes([packet[offset + 1], packet[offset + 2]]) as usize;
+        if packet[offset + 3] != 0 {
+            return Err(ParseError::Malformed("nonzero key reserved byte"));
+        }
         offset += 4; // type + len_hi + len_lo + reserved
 
         if offset + key_len > packet.len() {
-            break;
+            return Err(ParseError::Malformed("truncated key data"));
         }
 
         let data = packet[offset..offset + key_len].to_vec();
@@ -312,7 +338,12 @@ fn parse_proximity_keys(packet: &[u8]) -> Result<ParsedPacket, ParseError> {
 
         if let Some(kt) = ProximityKeyType::from_byte(key_type_byte) {
             keys.push(ProximityKey { key_type: kt, data });
+        } else {
+            return Ok(ParsedPacket::Unknown(packet.to_vec()));
         }
+    }
+    if offset != packet.len() {
+        return Err(ParseError::Malformed("unexpected trailing key bytes"));
     }
 
     Ok(ParsedPacket::ProximityKeys(keys))
@@ -322,8 +353,8 @@ fn parse_proximity_keys(packet: &[u8]) -> Result<ParsedPacket, ParseError> {
 ///
 /// Header: `04 00 04 00 31 00 02`, then two 16-byte TLV blocks.
 fn parse_magic_cloud_keys(packet: &[u8]) -> Result<ParsedPacket, ParseError> {
-    if packet.len() < 47 {
-        return Err(ParseError::TooShort(packet.len()));
+    if packet.len() != 47 {
+        return Err(ParseError::Malformed("magic key response must be 47 bytes"));
     }
 
     let mut idx = packets::MAGIC_CLOUD_KEYS_HEADER.len();
@@ -338,6 +369,9 @@ fn parse_magic_cloud_keys(packet: &[u8]) -> Result<ParsedPacket, ParseError> {
         return Err(ParseError::MagicCloudKeys(format!(
             "IRK length {len1}, expected 16"
         )));
+    }
+    if packet[idx + 2] != 0 {
+        return Err(ParseError::Malformed("nonzero key reserved byte"));
     }
     idx += 3; // len (2 bytes) + reserved (1 byte)
     let mut irk = [0u8; 16];
@@ -356,6 +390,9 @@ fn parse_magic_cloud_keys(packet: &[u8]) -> Result<ParsedPacket, ParseError> {
         return Err(ParseError::MagicCloudKeys(format!(
             "EncKey length {len2}, expected 16"
         )));
+    }
+    if packet[idx + 2] != 0 {
+        return Err(ParseError::Malformed("nonzero key reserved byte"));
     }
     idx += 3;
     let mut enc_key = [0u8; 16];
@@ -385,12 +422,9 @@ mod tests {
         // Primary in ear (0x00), secondary out (0x01)
         let pkt = [0x04, 0x00, 0x04, 0x00, 0x06, 0x00, 0x00, 0x01];
         match parse(&pkt).unwrap() {
-            ParsedPacket::EarDetection {
-                primary_in_ear,
-                secondary_in_ear,
-            } => {
-                assert!(primary_in_ear);
-                assert!(!secondary_in_ear);
+            ParsedPacket::EarStatus { primary, secondary } => {
+                assert_eq!(primary, WearState::InEar);
+                assert_eq!(secondary, WearState::OutOfEar);
             }
             other => panic!("expected EarDetection, got {:?}", other),
         }

@@ -17,6 +17,16 @@ use thiserror::Error;
 /// Transport-layer error.
 #[derive(Debug, Error)]
 pub enum TransportError {
+    #[error("operation timed out")]
+    Timeout,
+    #[error("operation cancelled")]
+    Cancelled,
+    #[error("operation unsupported by this transport")]
+    Unsupported,
+    #[error("datagram exceeded the {limit}-byte limit")]
+    Truncated { limit: usize },
+    #[error("permission denied")]
+    PermissionDenied,
     /// The socket / channel is not connected.
     #[error("not connected")]
     NotConnected,
@@ -43,6 +53,31 @@ pub enum TransportError {
 }
 
 impl TransportError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+            Self::Unsupported => "unsupported",
+            Self::Truncated { .. } => "truncated",
+            Self::PermissionDenied => "permission_denied",
+            Self::NotConnected => "not_connected",
+            Self::ConnectionClosed => "connection_closed",
+            Self::ChannelClosed => "channel_closed",
+            Self::Io { .. } => "io",
+            Self::Other(_) => "internal",
+        }
+    }
+
+    pub fn retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::Timeout
+                | Self::NotConnected
+                | Self::ConnectionClosed
+                | Self::ChannelClosed
+                | Self::Io { .. }
+        )
+    }
     /// Convenience: create an [`Other`](Self::Other) variant.
     pub fn new(message: impl Into<String>) -> Self {
         Self::Other(message.into())
@@ -82,9 +117,7 @@ pub trait L2capTransport: Send + Sync {
         _buf: &mut [u8],
         _timeout: std::time::Duration,
     ) -> Result<usize, TransportError> {
-        Err(TransportError::new(
-            "timed receive is unavailable on this transport",
-        ))
+        Err(TransportError::Unsupported)
     }
 
     /// Close the connection.

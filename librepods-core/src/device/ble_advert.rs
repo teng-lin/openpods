@@ -176,12 +176,12 @@ pub fn parse_advertisement(data: &[u8]) -> Option<BleAdvertData> {
         (pods_byte >> 4) & 0x0F
     };
 
-    let left_battery = if left_nibble == 0x0F {
+    let left_battery = if left_nibble > 10 {
         None
     } else {
         Some(left_nibble * 10)
     };
-    let right_battery = if right_nibble == 0x0F {
+    let right_battery = if right_nibble > 10 {
         None
     } else {
         Some(right_nibble * 10)
@@ -190,7 +190,7 @@ pub fn parse_advertisement(data: &[u8]) -> Option<BleAdvertData> {
     // Case battery + charging flags
     let flags_case = data[7];
     let case_nibble = flags_case & 0x0F;
-    let case_battery = if case_nibble == 0x0F {
+    let case_battery = if case_nibble > 10 {
         None
     } else {
         Some(case_nibble * 10)
@@ -264,6 +264,7 @@ pub fn parse_advertisement(data: &[u8]) -> Option<BleAdvertData> {
 ///
 /// Always succeeds for a well-formed 16-byte payload; the decrypted values are
 /// written into `advert` in place.
+#[cfg(feature = "ble")]
 pub fn decrypt_battery(
     advert: &mut BleAdvertData,
     encrypted_payload: &[u8; 16],
@@ -292,17 +293,36 @@ pub fn decrypt_battery(
     let (rc, rl) = parse_bat(decrypted[right_idx]);
     let (cc, cl) = parse_bat(decrypted[3]);
 
-    advert.encrypted_left_battery = Some(ll);
-    advert.encrypted_right_battery = Some(rl);
-    advert.encrypted_left_charging = Some(lc);
-    advert.encrypted_right_charging = Some(rc);
+    advert.encrypted_left_battery = (ll <= 100).then_some(ll);
+    advert.encrypted_right_battery = (rl <= 100).then_some(rl);
+    advert.encrypted_left_charging = (ll <= 100).then_some(lc);
+    advert.encrypted_right_charging = (rl <= 100).then_some(rc);
 
     // Case battery: 0xFF or (charging && level==127) means unavailable
     let raw = decrypted[3];
-    if raw != 0xFF && !(cc && cl == 127) {
+    if raw != 0xFF && cl <= 100 && (cl != 0 || advert.one_pod_in_case || advert.both_pods_in_case) {
         advert.encrypted_case_battery = Some(cl);
         advert.encrypted_case_charging = Some(cc);
     }
+}
+
+/// Resolve a Bluetooth private address before assigning advertisements to a device.
+/// Byte ordering follows the reference daemon's BLEUtils::verifyRPA.
+#[cfg(feature = "ble")]
+pub fn verify_rpa(irk: &[u8; 16], address: &[u8; 6]) -> bool {
+    use aes::cipher::{BlockEncrypt, KeyInit};
+    use aes::Aes128;
+    if address[0] & 0xc0 != 0x40 {
+        return false;
+    }
+    let mut key = *irk;
+    key.reverse();
+    let mut plain = [0u8; 16];
+    plain[13..].copy_from_slice(&address[..3]);
+    let cipher = Aes128::new((&key).into());
+    let mut block = aes::Block::from(plain);
+    cipher.encrypt_block(&mut block);
+    block[13..] == address[3..]
 }
 
 #[cfg(test)]

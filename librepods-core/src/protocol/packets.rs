@@ -21,6 +21,8 @@ use crate::protocol::control_command::ControlCommand;
 
 /// 4-byte header present at the start of every AAP data packet.
 pub const HEADER: [u8; 4] = [0x04, 0x00, 0x04, 0x00];
+/// Maximum accepted control datagram, bounding unknown-frame retention.
+pub const MAX_PACKET_BYTES: usize = 1024;
 
 /// L2CAP PSM used by AAP.
 pub const AAP_PSM: u16 = 0x1001;
