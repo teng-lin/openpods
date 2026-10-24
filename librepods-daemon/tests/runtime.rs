@@ -2671,3 +2671,109 @@ async fn combined_finite_protocol_state_and_large_audio_fit_status_watch_and_own
         "test directory vanished before cleanup check"
     );
 }
+
+#[tokio::test]
+async fn persistence_failure_keeps_the_running_policy_and_aacp_usable() {
+    let harness = Harness::start(Arc::new(Shared::default()), Config::default()).await;
+    harness.ready().await;
+    // A regular file where a config directory is required causes an actual OS
+    // failure without relying on root-sensitive chmod or filling a filesystem.
+    let config_parent = harness.paths.config.parent().expect("config parent");
+    std::fs::create_dir_all(config_parent.parent().expect("config root")).unwrap();
+    std::fs::write(config_parent, b"foreign regular file").unwrap();
+    let response = harness
+        .request(900, Operation::EarPolicy(EarPolicy::BothRemoved), 1000)
+        .await;
+    assert!(
+        response.error.is_some(),
+        "failed persistence must not be acknowledged"
+    );
+    let status = harness.ready().await;
+    assert_eq!(status.ear_policy, EarPolicy::Off);
+    let disabled = harness
+        .request(901, Operation::BleEnabled(false), 1000)
+        .await;
+    assert!(
+        disabled.error.is_some(),
+        "BLE policy persistence must also fail honestly"
+    );
+    assert!(!harness.ready().await.ble_enabled);
+    let change = harness
+        .request(
+            902,
+            Operation::Change(SettingChange::ListeningMode(NoiseControlMode::Transparency)),
+            1000,
+        )
+        .await;
+    assert!(
+        change.error.is_none(),
+        "storage failure must not break AACP: {change:?}"
+    );
+    assert_eq!(
+        std::fs::read(config_parent).unwrap(),
+        b"foreign regular file"
+    );
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn retained_session_handle_rejects_commands_after_its_owner_stops() {
+    let shared = Arc::new(Shared::default());
+    let session = librepods_daemon::session::Session::spawn(
+        Arc::new(EmulatedBackend(shared.clone())),
+        Config::default(),
+        "stopped-owner".into(),
+    );
+    let handle = session.handle.clone();
+    session.stop();
+    let response = handle
+        .request(Request {
+            version: 1,
+            id: 910,
+            timeout_ms: 1000,
+            operation: Operation::Change(SettingChange::ConversationalAwareness(false)),
+        })
+        .await;
+    assert_eq!(response.error.unwrap().code, ErrorCode::ServiceUnavailable);
+    assert!(shared.changes.lock().unwrap().is_empty());
+    let nested = handle
+        .request(Request {
+            version: 1,
+            id: 911,
+            timeout_ms: 1000,
+            operation: Operation::ForDevice {
+                address: ADDRESS.into(),
+                operation: Box::new(Operation::ForDevice {
+                    address: ADDRESS.into(),
+                    operation: Box::new(Operation::Reconnect),
+                }),
+            },
+        })
+        .await;
+    assert_eq!(nested.error.unwrap().code, ErrorCode::InvalidInput);
+}
+
+#[cfg(feature = "ble")]
+#[tokio::test]
+async fn ephemeral_sessions_reject_key_persistence_before_requesting_secrets() {
+    let shared = Arc::new(Shared::default());
+    let session = librepods_daemon::session::Session::spawn(
+        Arc::new(EmulatedBackend(shared.clone())),
+        Config::default(),
+        "ephemeral-owner".into(),
+    );
+    for operation in [Operation::FetchKeys, Operation::ForgetKeys] {
+        let response = session
+            .handle
+            .request(Request {
+                version: 1,
+                id: 920,
+                timeout_ms: 1000,
+                operation,
+            })
+            .await;
+        assert_eq!(response.error.unwrap().code, ErrorCode::Unsupported);
+    }
+    assert_eq!(shared.key_requests.load(Ordering::SeqCst), 0);
+    session.stop();
+}

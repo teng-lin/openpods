@@ -104,6 +104,8 @@ class CliContract(unittest.TestCase):
             (["--conversation-awareness", "off"], {"type": "change", "value": {"ConversationalAwareness": False}}),
             (["compat", "onebud:on"], {"type": "change", "value": {"SingleEarbudAnc": True}}),
             (["ear", "both"], {"type": "ear_policy", "value": "both_removed"}),
+            (["ear", "off"], {"type": "ear_policy", "value": "off"}),
+            (["ear", "one"], {"type": "ear_policy", "value": "one_removed"}),
             (["audio", "input", "example-source"], {"type": "set_input", "value": "example-source"}),
             (["audio", "profile", "a2dp-sink"], {"type": "set_profile", "value": "a2dp-sink"}),
             (["audio", "move-stream", "17", "example-sink"], {"type": "move_stream", "value": {"stream": "17", "output": "example-sink"}}),
@@ -305,6 +307,22 @@ class CliContract(unittest.TestCase):
             if server.poll() is None:
                 server.kill()
                 server.communicate(timeout=2)
+
+    def test_human_output_and_no_media_override_keep_client_protocol_unchanged(self):
+        result, request = self.exchange(["--no-media", "status"], self.ok, machine=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"marker": "ok"})
+        self.assertIn("\n", result.stdout.strip())
+        self.assertEqual(request["operation"], {"type": "status"})
+        failure = self.call("compat", "invalid-command", machine=False)
+        self.assertEqual(failure.returncode, 1)
+        self.assertIn("compat: unsupported legacy verb", failure.stderr)
+
+    def test_direct_serve_is_rejected_before_starting_an_owner(self):
+        result = self.call("--direct", "serve")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stderr)["code"], "invalid_input")
+        self.assertFalse(self.socket.exists())
 
     def test_invalid_compat_verb_is_rejected_before_connecting(self):
         result = self.call("compat", "adaptive:101")

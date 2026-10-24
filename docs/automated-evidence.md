@@ -18,36 +18,38 @@ home storage; Unix-socket fixtures used the short private `/home/blackmyth/.cach
 
 ## Production coverage
 
-Both minimal and optional-BLE workspace tests, plus 18 actual CLI process checks
-against each feature executable, passed. The production-only gates passed:
+A fresh isolated instrumentation target on production checkpoint `649b187`
+passed minimal and optional-BLE workspace suites and 19 actual CLI process
+checks for each feature executable. The current production metric is:
 
 | Scope | Covered / measured lines | Coverage | Required |
 | --- | ---: | ---: | ---: |
-| Core | 1875 / 1931 | 97.10% | 90% |
-| CLI, Linux adapters and daemon | 5610 / 6295 | 89.12% | 80% |
-| Changed critical production against `399e775` | 6727 / 7425 | 90.60% | 90% |
+| Core | 1938 / 2000 | 96.90% | 90% |
+| CLI, Linux adapters and daemon | 4974 / 5720 | 86.96% | 80% |
+| Changed critical production against `399e775` | 6156 / 6928 | 88.86% | 90% |
+
+**The changed-critical gate is currently unmet.** The earlier reused-target
+percentages recorded here are withdrawn: cargo-llvm-cov 0.9.1 selected different
+default directories for `clean` and `show-env`, leaving stale instrumented
+objects/profiles in persistent local targets. The collector now exports
+`show-env` first, then cleans that exact instrumentation directory. The figures
+above come from a brand-new target and supersede those historical percentages.
 
 LLVM LCOV per-line counters and parsed Rust test-only spans define the metric.
-Exclusions contain 1249 core and 3737 service test-only lines. No production
-function or failure path was excluded. The critical audit scopes/rationales and
-all uncovered changed lines are preserved in its JSON output. Individual files
-can remain below 90%; aggregate coverage is not proof of every error transition.
-
-Notable remaining limits include hardware-only direct CLI success/interactive
-scan paths, uncommon kernel/descriptor allocation errors, distinct-UID peer
-credentials, and some filesystem sync/worker-failure paths. The passing semantic
-suite separately checks uncertain outcomes/no replay, address changes, stale
-results, bounded cancellation, FIFO rejection, foreign-file ownership, split key
-acquisition/redaction, partial batteries and recovery. Native Bluetooth driver,
-physical media continuity and real suspend/case behavior still need their
-release acceptance records.
+The fresh report excludes 1357 core and 3512 service test-only lines. No
+production function or failure path is excluded. Critical scopes and every
+uncovered changed production line remain in the audit JSON. Additional semantic
+failure tests and another clean measurement are required before claiming the
+90% gate. Hardware-only direct CLI success/interactive scan paths and uncommon
+kernel/worker/filesystem errors remain material limits; aggregate coverage
+cannot prove physical media continuity or real suspend/case behavior.
 
 Local temporary evidence (not portable repository artifacts):
-`/tmp/librepods-rs-bc78c01-production-coverage.{json,lcov}`,
-`/tmp/librepods-rs-bc78c01-production-coverage-test-spans.json`,
-`/tmp/librepods-rs-bc78c01-production-coverage.log`, and
-`/tmp/librepods-rs-bc78c01-changed-coverage.json`.
-CI preserves the same artifact types and enforces all three thresholds.
+`/tmp/librepods-rs-649b187-isolated-coverage.{json,lcov}`,
+`/tmp/librepods-rs-649b187-isolated-coverage-test-spans.json`,
+`/tmp/librepods-rs-649b187-isolated-coverage.log`, and
+`/tmp/librepods-rs-649b187-isolated-changed-coverage.json`.
+CI preserves these artifact types and enforces all three thresholds.
 
 ## Bounded fuzz campaign
 
