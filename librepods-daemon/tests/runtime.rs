@@ -926,3 +926,140 @@ fn actual_serializer_generates_legacy_consumer_fixtures() {
     )
     .expect("disconnected fixture");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn newer_queued_setting_supersedes_old_desire_without_extra_writes() {
+    let shared = Arc::new(Shared::default());
+    let harness = Harness::start(shared.clone(), Config::default()).await;
+    harness.ready().await;
+    shared.lose_ack.store(true, Ordering::SeqCst);
+    let paths = harness.paths.clone();
+    let active = tokio::spawn(async move {
+        runtime::request(
+            &paths,
+            &Request {
+                version: 1,
+                id: 100,
+                timeout_ms: 2000,
+                operation: Operation::Change(SettingChange::ListeningMode(
+                    NoiseControlMode::Transparency,
+                )),
+            },
+        )
+        .await
+    });
+    wait_for_change_count(&shared, 1).await;
+    let paths = harness.paths.clone();
+    let older = tokio::spawn(async move {
+        runtime::request(
+            &paths,
+            &Request {
+                version: 1,
+                id: 101,
+                timeout_ms: 1500,
+                operation: Operation::Change(SettingChange::ConversationalAwareness(false)),
+            },
+        )
+        .await
+    });
+    harness.wait_for(|status| status.queue_depth >= 1).await;
+    let paths = harness.paths.clone();
+    let newer = tokio::spawn(async move {
+        runtime::request(
+            &paths,
+            &Request {
+                version: 1,
+                id: 102,
+                timeout_ms: 1500,
+                operation: Operation::Change(SettingChange::ConversationalAwareness(true)),
+            },
+        )
+        .await
+    });
+    let replaced = older.await.expect("older client").expect("response");
+    assert_eq!(
+        replaced.error.expect("superseded").code,
+        ErrorCode::Superseded
+    );
+    shared.lose_ack.store(false, Ordering::SeqCst);
+    shared
+        .peers
+        .lock()
+        .expect("peers")
+        .last()
+        .expect("peer")
+        .push(packets::build_noise_control(NoiseControlMode::Transparency).to_vec());
+    assert!(active
+        .await
+        .expect("active")
+        .expect("response")
+        .error
+        .is_none());
+    let latest = newer.await.expect("newer").expect("response");
+    assert_eq!(latest.result, Some(serde_json::json!("AlreadySet")));
+    assert_eq!(shared.changes.lock().expect("changes").len(), 1);
+    harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn saturated_actor_queue_rejects_excess_and_expires_without_late_reconnects() {
+    let shared = Arc::new(Shared::default());
+    let session = librepods_daemon::session::Session::spawn(
+        Arc::new(EmulatedBackend(shared.clone())),
+        Config::default(),
+        "queue-pressure".into(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while session.handle.status.borrow().device.listening_mode
+        != Some(NoiseControlMode::NoiseCancellation)
+    {
+        assert!(Instant::now() < deadline, "session did not become ready");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    shared.lose_ack.store(true, Ordering::SeqCst);
+    let handle = session.handle.clone();
+    let active = tokio::spawn(async move {
+        handle
+            .request(Request {
+                version: 1,
+                id: 200,
+                timeout_ms: 2000,
+                operation: Operation::Change(SettingChange::ListeningMode(
+                    NoiseControlMode::Transparency,
+                )),
+            })
+            .await
+    });
+    wait_for_change_count(&shared, 1).await;
+    let mut clients = tokio::task::JoinSet::new();
+    for id in 201..329 {
+        let handle = session.handle.clone();
+        clients.spawn(async move {
+            handle
+                .request(Request {
+                    version: 1,
+                    id,
+                    timeout_ms: 200,
+                    operation: Operation::Reconnect,
+                })
+                .await
+        });
+    }
+    let mut rejected = 0;
+    while let Some(result) = clients.join_next().await {
+        let error = result
+            .expect("client")
+            .error
+            .expect("bounded queue must not execute pending reconnects");
+        match error.code {
+            ErrorCode::QueueFull => rejected += 1,
+            ErrorCode::CommandTimeout => {}
+            code => panic!("unexpected overload result {code:?}"),
+        }
+    }
+    assert!(rejected > 0, "queue had no enforced capacity");
+    assert_eq!(shared.connections.load(Ordering::SeqCst), 1);
+    assert_eq!(shared.changes.lock().expect("changes").len(), 1);
+    active.abort();
+    session.stop();
+}
