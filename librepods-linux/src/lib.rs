@@ -11,5 +11,11 @@
 
 pub mod ble;
 pub mod bluez_monitor;
+pub mod desktop;
+pub mod error;
 pub mod l2cap;
 pub mod media;
+pub mod sleep;
+
+#[cfg(test)]
+mod test_bus;

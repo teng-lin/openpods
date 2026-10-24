@@ -2,416 +2,529 @@
 // Copyright (C) 2025 LibrePods contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! BlueZ D-Bus device monitor.
-//!
-//! Watches for AirPods connection/disconnection events by subscribing to
-//! `org.freedesktop.DBus.Properties.PropertiesChanged` on the system bus
-//! and filtering for devices whose UUIDs contain the AirPods service UUID.
-//!
-//! Key design: when a device connects, BlueZ often fires `Connected = true`
-//! **before** SDP service discovery has completed (so `UUIDs` is still empty).
-//! We therefore also watch for `ServicesResolved` and `UUIDs` property changes
-//! and keep a set of "pending" connected-but-unresolved device paths.
-//!
-//! Reference: `BluetoothMonitor.cpp`
+//! BlueZ snapshots and reconciled device events with bounded D-Bus operations.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{mpsc, Arc, Mutex, RwLock};
+use std::time::Duration;
 
+use futures::StreamExt;
 use librepods_core::protocol::packets;
 use librepods_core::transport::{DeviceEvent, DeviceMonitor, TransportError};
-use tokio::sync::mpsc;
+use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
+use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
-/// AirPods service UUID used for device identification (lowercase).
-const AIRPODS_UUID: &str = packets::AIRPODS_UUID;
+use crate::error::{ErrorKind, PlatformError};
 
-/// Case-insensitive check whether `uuids` contains the AirPods service UUID.
-fn contains_airpods_uuid(uuids: &[String]) -> bool {
-    let target = AIRPODS_UUID.to_ascii_lowercase();
-    uuids.iter().any(|u| u.to_ascii_lowercase() == target)
+const CALL_TIMEOUT: Duration = Duration::from_secs(2);
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+const EVENT_CAPACITY: usize = 32;
+type Properties = HashMap<String, OwnedValue>;
+type ManagedObjects = HashMap<OwnedObjectPath, HashMap<String, Properties>>;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterSnapshot {
+    pub path: String,
+    pub address: String,
+    pub powered: bool,
 }
 
-/// BlueZ D-Bus device monitor.
-pub struct BluezMonitor {
-    rx: Mutex<mpsc::UnboundedReceiver<DeviceEvent>>,
-    /// Keep the handle alive so the background task keeps running.
-    _handle: std::thread::JoinHandle<()>,
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceSnapshot {
+    pub path: String,
+    pub adapter: String,
+    pub address: String,
+    pub name: String,
+    pub paired: bool,
+    pub connected: bool,
+    pub services_resolved: bool,
+    pub airpods: bool,
 }
 
-impl BluezMonitor {
-    /// Create a new monitor and start watching for device events.
-    ///
-    /// Spawns a background thread with its own Tokio runtime for async zbus.
-    pub fn start() -> Result<Self, TransportError> {
-        let (tx, rx) = mpsc::unbounded_channel();
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BluezSnapshot {
+    pub available: bool,
+    pub adapters: Vec<AdapterSnapshot>,
+    pub devices: Vec<DeviceSnapshot>,
+}
 
-        let handle = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to build tokio runtime");
-            rt.block_on(async {
-                if let Err(e) = run_monitor(tx).await {
-                    log::error!("BlueZ monitor error: {e}");
-                }
+impl BluezSnapshot {
+    pub fn adapter_ready(&self) -> bool {
+        self.available && self.adapters.iter().any(|adapter| adapter.powered)
+    }
+}
+
+fn string(properties: &Properties, key: &str) -> String {
+    properties
+        .get(key)
+        .and_then(|value| <String>::try_from(value.clone()).ok())
+        .unwrap_or_default()
+}
+
+fn boolean(properties: &Properties, key: &str) -> bool {
+    properties
+        .get(key)
+        .and_then(|value| <bool>::try_from(value.clone()).ok())
+        .unwrap_or(false)
+}
+
+fn decode(objects: ManagedObjects) -> BluezSnapshot {
+    let mut snapshot = BluezSnapshot {
+        available: true,
+        ..BluezSnapshot::default()
+    };
+    for (path, interfaces) in objects {
+        if let Some(properties) = interfaces.get("org.bluez.Adapter1") {
+            snapshot.adapters.push(AdapterSnapshot {
+                path: path.to_string(),
+                address: string(properties, "Address"),
+                powered: boolean(properties, "Powered"),
             });
-        });
-
-        Ok(Self {
-            rx: Mutex::new(rx),
-            _handle: handle,
-        })
-    }
-}
-
-impl DeviceMonitor for BluezMonitor {
-    fn next_event(&self) -> Result<DeviceEvent, TransportError> {
-        let mut rx = self
-            .rx
-            .lock()
-            .map_err(|_| TransportError::new("lock poisoned"))?;
-        loop {
-            match rx.try_recv() {
-                Ok(event) => return Ok(event),
-                Err(mpsc::error::TryRecvError::Empty) => {
-                    drop(rx);
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    rx = self
-                        .rx
-                        .lock()
-                        .map_err(|_| TransportError::new("lock poisoned"))?;
-                }
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    return Err(TransportError::ChannelClosed);
-                }
-            }
         }
-    }
-}
-
-/// Async monitor implementation using zbus async API.
-async fn run_monitor(tx: mpsc::UnboundedSender<DeviceEvent>) -> Result<(), TransportError> {
-    log::debug!("Connecting to system D-Bus...");
-    let conn = zbus::Connection::system()
-        .await
-        .map_err(|e| TransportError::with_source("failed to connect to system D-Bus", e))?;
-    log::debug!("System D-Bus connected");
-
-    // Check already-connected devices
-    check_already_connected_async(&conn, &tx).await;
-
-    // Subscribe to PropertiesChanged on BlueZ
-    let rule = "type='signal',sender='org.bluez',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged'";
-    conn.call_method(
-        Some("org.freedesktop.DBus"),
-        "/org/freedesktop/DBus",
-        Some("org.freedesktop.DBus"),
-        "AddMatch",
-        &rule,
-    )
-    .await
-    .map_err(|e| TransportError::with_source("failed to add D-Bus match rule", e))?;
-
-    log::debug!("D-Bus match rule added, listening for PropertiesChanged signals...");
-
-    // Devices confirmed as AirPods (path → address).
-    let mut confirmed_devices: HashMap<String, String> = HashMap::new();
-    // Devices that are connected but whose UUIDs haven't resolved yet.
-    let mut pending_devices: HashSet<String> = HashSet::new();
-
-    // Use the message stream
-    let mut stream = zbus::MessageStream::from(&conn);
-    use futures::StreamExt;
-
-    while let Some(msg_result) = stream.next().await {
-        let msg = match msg_result {
-            Ok(m) => m,
-            Err(e) => {
-                log::warn!("D-Bus message error: {e}");
-                continue;
-            }
-        };
-
-        let header = msg.header();
-        let member_name = header.member().map(|m| m.to_string()).unwrap_or_default();
-        if member_name != "PropertiesChanged" {
-            continue;
-        }
-
-        let path = match header.path() {
-            Some(p) => p.to_string(),
-            None => continue,
-        };
-
-        if !path.starts_with("/org/bluez/") || !path.contains("/dev_") {
-            continue;
-        }
-
-        let body: Result<
-            (
-                String,
-                HashMap<String, zbus::zvariant::OwnedValue>,
-                Vec<String>,
-            ),
-            _,
-        > = msg.body().deserialize();
-        let (interface, changed, _) = match body {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-
-        if interface != "org.bluez.Device1" {
-            continue;
-        }
-
-        let changed_keys: Vec<&String> = changed.keys().collect();
-        log::debug!("PropertiesChanged on {path}: {changed_keys:?}");
-
-        // --- Handle Connected property change ---
-        if let Some(connected_val) = changed.get("Connected") {
-            let connected: bool = <bool>::try_from(connected_val.clone()).unwrap_or(false);
-
-            if connected {
-                let address = get_device_property_async(&conn, &path, "Address")
-                    .await
-                    .unwrap_or_default();
-                let name = get_device_property_async(&conn, &path, "Name")
-                    .await
-                    .unwrap_or_else(|| "Unknown".to_string());
-
-                log::debug!("Device connected: {name} ({address}) at {path}");
-
-                let uuids = get_device_uuids_async(&conn, &path).await;
-                log::debug!("  UUIDs (immediate): {uuids:?}");
-
-                if contains_airpods_uuid(&uuids) {
-                    log::info!("AirPods connected: {name} ({address})");
-                    confirmed_devices.insert(path.clone(), address.clone());
-                    pending_devices.remove(&path);
-                    let _ = tx.send(DeviceEvent::Connected { address, name });
+        if let Some(properties) = interfaces.get("org.bluez.Device1") {
+            let uuids: Vec<String> = properties
+                .get("UUIDs")
+                .and_then(|value| <Vec<String>>::try_from(value.clone()).ok())
+                .unwrap_or_default();
+            let adapter = properties
+                .get("Adapter")
+                .and_then(|value| <OwnedObjectPath>::try_from(value.clone()).ok())
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| {
+                    path.rsplit_once("/dev_")
+                        .map(|(prefix, _)| prefix.to_owned())
+                        .unwrap_or_default()
+                });
+            let alias = string(properties, "Alias");
+            snapshot.devices.push(DeviceSnapshot {
+                path: path.to_string(),
+                adapter,
+                address: string(properties, "Address"),
+                name: if alias.is_empty() {
+                    string(properties, "Name")
                 } else {
-                    // UUIDs not resolved yet — mark as pending and wait for
-                    // ServicesResolved / UUIDs property to arrive later.
-                    log::debug!(
-                        "Device {address} connected but AirPods UUID not found yet, \
-                         adding to pending list (will re-check on ServicesResolved/UUIDs change)"
-                    );
-                    pending_devices.insert(path.clone());
-                }
-            } else {
-                // Device disconnected
-                pending_devices.remove(&path);
-                if let Some(address) = confirmed_devices.remove(&path) {
-                    log::info!("AirPods disconnected: {address}");
-                    let _ = tx.send(DeviceEvent::Disconnected { address });
-                }
-            }
-        }
-
-        // --- Handle ServicesResolved / UUIDs change for pending devices ---
-        let services_resolved = changed
-            .get("ServicesResolved")
-            .and_then(|v| <bool>::try_from(v.clone()).ok());
-        let uuids_changed = changed.contains_key("UUIDs");
-
-        if (services_resolved == Some(true) || uuids_changed) && pending_devices.contains(&path) {
-            let uuids = if uuids_changed {
-                // Try to parse UUIDs directly from the signal payload first
-                let from_signal = changed
-                    .get("UUIDs")
-                    .and_then(|v| <Vec<String>>::try_from(v.clone()).ok())
-                    .unwrap_or_default();
-                if from_signal.is_empty() {
-                    // Signal parsing failed; re-read from D-Bus
-                    get_device_uuids_async(&conn, &path).await
-                } else {
-                    from_signal
-                }
-            } else {
-                get_device_uuids_async(&conn, &path).await
-            };
-
-            log::debug!("Re-checking pending device {path}, UUIDs: {uuids:?}");
-
-            if contains_airpods_uuid(&uuids) {
-                let address = get_device_property_async(&conn, &path, "Address")
-                    .await
-                    .unwrap_or_default();
-                let name = get_device_property_async(&conn, &path, "Name")
-                    .await
-                    .unwrap_or_else(|| "AirPods".to_string());
-                log::info!("AirPods identified after service resolution: {name} ({address})");
-                confirmed_devices.insert(path.clone(), address.clone());
-                pending_devices.remove(&path);
-                let _ = tx.send(DeviceEvent::Connected { address, name });
-            }
+                    alias
+                },
+                paired: boolean(properties, "Paired"),
+                connected: boolean(properties, "Connected"),
+                services_resolved: boolean(properties, "ServicesResolved"),
+                airpods: uuids
+                    .iter()
+                    .any(|uuid| uuid.eq_ignore_ascii_case(packets::AIRPODS_UUID)),
+            });
         }
     }
-
-    Ok(())
+    snapshot.adapters.sort_by(|a, b| a.path.cmp(&b.path));
+    snapshot.devices.sort_by(|a, b| a.address.cmp(&b.address));
+    snapshot
 }
 
-/// Check for already-connected AirPods at startup.
-async fn check_already_connected_async(
-    conn: &zbus::Connection,
-    tx: &mpsc::UnboundedSender<DeviceEvent>,
-) {
-    log::debug!("Checking for already-connected AirPods...");
-
-    let reply = match conn
-        .call_method(
+pub async fn snapshot_on(connection: &zbus::Connection) -> Result<BluezSnapshot, TransportError> {
+    let reply = tokio::time::timeout(
+        CALL_TIMEOUT,
+        connection.call_method(
             Some("org.bluez"),
             "/",
             Some("org.freedesktop.DBus.ObjectManager"),
             "GetManagedObjects",
             &(),
-        )
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            log::warn!("Failed to get managed objects: {e}");
-            return;
-        }
-    };
-
-    let objects: HashMap<
-        zbus::zvariant::OwnedObjectPath,
-        HashMap<String, HashMap<String, zbus::zvariant::OwnedValue>>,
-    > = match reply.body().deserialize() {
-        Ok(o) => o,
-        Err(e) => {
-            log::warn!("Failed to deserialize managed objects: {e}");
-            return;
-        }
-    };
-
-    let mut device_count = 0u32;
-    let mut connected_count = 0u32;
-
-    for (obj_path, interfaces) in &objects {
-        if let Some(props) = interfaces.get("org.bluez.Device1") {
-            device_count += 1;
-
-            let address = props
-                .get("Address")
-                .and_then(|v: &zbus::zvariant::OwnedValue| <String>::try_from(v.clone()).ok())
-                .unwrap_or_default();
-            let name = props
-                .get("Name")
-                .and_then(|v: &zbus::zvariant::OwnedValue| <String>::try_from(v.clone()).ok())
-                .unwrap_or_else(|| "Unknown".to_string());
-            let connected = props
-                .get("Connected")
-                .and_then(|v: &zbus::zvariant::OwnedValue| <bool>::try_from(v.clone()).ok())
-                .unwrap_or(false);
-            let uuids: Vec<String> = props
-                .get("UUIDs")
-                .and_then(|v: &zbus::zvariant::OwnedValue| <Vec<String>>::try_from(v.clone()).ok())
-                .unwrap_or_default();
-
-            log::debug!(
-                "  Device: {name} ({address}) connected={connected} uuids={} path={obj_path}",
-                uuids.len(),
-            );
-
-            if !connected {
-                continue;
-            }
-
-            connected_count += 1;
-
-            if uuids.is_empty() {
-                log::debug!(
-                    "    Skipping {address}: connected but UUIDs empty (SDP not resolved?)"
-                );
-                continue;
-            }
-
-            let is_airpods = contains_airpods_uuid(&uuids);
-            log::debug!("    AirPods UUID match: {is_airpods}");
-
-            if !is_airpods {
-                continue;
-            }
-
-            log::info!("Found already-connected AirPods: {name} ({address})");
-            let _ = tx.send(DeviceEvent::Connected { address, name });
-        }
-    }
-
-    log::debug!(
-        "Startup scan complete: {device_count} known device(s), {connected_count} connected"
-    );
-
-    if device_count == 0 {
-        log::warn!("No Bluetooth devices known to BlueZ at all. Is bluetoothd running?");
-    } else if connected_count == 0 {
-        log::warn!(
-            "No connected devices found. AirPods may need to be paired first.\n\
-             \n\
-             To pair AirPods with this machine:\n\
-             1. Open the AirPods case lid (keep pods inside)\n\
-             2. Press and hold the button on the back of the case until the LED flashes white\n\
-             3. Run:  bluetoothctl\n\
-             4. Type: scan on\n\
-             5. Wait for \"AirPods\" to appear, note the MAC address (e.g. AA:BB:CC:DD:EE:FF)\n\
-             6. Type: pair AA:BB:CC:DD:EE:FF\n\
-             7. Type: trust AA:BB:CC:DD:EE:FF\n\
-             8. Type: connect AA:BB:CC:DD:EE:FF\n\
-             9. Type: exit\n\
-             \n\
-             Tip: Run with --scan to detect nearby AirPods via BLE without pairing."
-        );
-    }
+        ),
+    )
+    .await
+    .map_err(|_| PlatformError::new("query BlueZ objects", ErrorKind::Timeout))?
+    .map_err(|error| TransportError::with_source("query BlueZ objects", error))?;
+    let objects: ManagedObjects = reply
+        .body()
+        .deserialize()
+        .map_err(|error| TransportError::with_source("decode BlueZ objects", error))?;
+    Ok(decode(objects))
 }
 
-async fn get_device_property_async(
-    conn: &zbus::Connection,
-    path: &str,
-    prop: &str,
-) -> Option<String> {
-    let msg = conn
-        .call_method(
-            Some("org.bluez"),
-            path,
-            Some("org.freedesktop.DBus.Properties"),
-            "Get",
-            &("org.bluez.Device1", prop),
-        )
+pub async fn snapshot() -> Result<BluezSnapshot, TransportError> {
+    let connection = tokio::time::timeout(CALL_TIMEOUT, zbus::Connection::system())
         .await
-        .map_err(|e| {
-            log::debug!("Failed to get property {prop} on {path}: {e}");
-            e
+        .map_err(|_| PlatformError::new("open system bus", ErrorKind::Timeout))?
+        .map_err(|error| TransportError::with_source("open system bus", error))?;
+    snapshot_on(&connection).await
+}
+
+pub struct BluezMonitor {
+    rx: Mutex<mpsc::Receiver<DeviceEvent>>,
+    latest: Arc<RwLock<BluezSnapshot>>,
+    cancel: watch::Sender<bool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl BluezMonitor {
+    pub fn start() -> Result<Self, TransportError> {
+        Self::start_with_bus(None)
+    }
+
+    /// An explicit address allows isolated fake-BlueZ integration tests.
+    pub fn start_at_bus(address: String) -> Result<Self, TransportError> {
+        Self::start_with_bus(Some(address))
+    }
+
+    fn start_with_bus(address: Option<String>) -> Result<Self, TransportError> {
+        let (tx, rx) = mpsc::sync_channel(EVENT_CAPACITY);
+        let (cancel, stop) = watch::channel(false);
+        let latest = Arc::new(RwLock::new(BluezSnapshot::default()));
+        let shared = latest.clone();
+        let worker = std::thread::Builder::new()
+            .name("librepods-bluez".into())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        log::error!("BlueZ runtime unavailable: {error}");
+                        return;
+                    }
+                };
+                runtime.block_on(run(address, shared, tx, stop));
+            })
+            .map_err(|error| PlatformError::io("start BlueZ monitor", error))?;
+        Ok(Self {
+            rx: Mutex::new(rx),
+            latest,
+            cancel,
+            worker: Some(worker),
         })
-        .ok()?;
-    let val: zbus::zvariant::OwnedValue = msg.body().deserialize().ok()?;
-    String::try_from(val).ok()
+    }
+
+    pub fn current_snapshot(&self) -> BluezSnapshot {
+        self.latest
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    pub fn next_event_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<DeviceEvent>, TransportError> {
+        let receiver = self
+            .rx
+            .lock()
+            .map_err(|_| TransportError::new("BlueZ event receiver lock poisoned"))?;
+        match receiver.recv_timeout(timeout) {
+            Ok(event) => Ok(Some(event)),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(TransportError::ChannelClosed),
+        }
+    }
+
+    pub fn shutdown(&mut self) {
+        let _ = self.cancel.send(true);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
-async fn get_device_uuids_async(conn: &zbus::Connection, path: &str) -> Vec<String> {
-    let msg = match conn
-        .call_method(
-            Some("org.bluez"),
-            path,
-            Some("org.freedesktop.DBus.Properties"),
-            "Get",
-            &("org.bluez.Device1", "UUIDs"),
-        )
-        .await
+impl Drop for BluezMonitor {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+impl DeviceMonitor for BluezMonitor {
+    fn next_event(&self) -> Result<DeviceEvent, TransportError> {
+        self.rx
+            .lock()
+            .map_err(|_| TransportError::new("BlueZ event receiver lock poisoned"))?
+            .recv()
+            .map_err(|_| TransportError::ChannelClosed)
+    }
+}
+
+fn connected(snapshot: &BluezSnapshot) -> BTreeMap<String, String> {
+    snapshot
+        .devices
+        .iter()
+        .filter(|device| device.connected && device.airpods)
+        .map(|device| (device.address.clone(), device.name.clone()))
+        .collect()
+}
+
+fn publish(
+    snapshot: BluezSnapshot,
+    latest: &RwLock<BluezSnapshot>,
+    sender: &mpsc::SyncSender<DeviceEvent>,
+) {
+    let previous = {
+        let mut state = latest.write().unwrap_or_else(|error| error.into_inner());
+        std::mem::replace(&mut *state, snapshot.clone())
+    };
+    let before = connected(&previous);
+    let after = connected(&snapshot);
+    for address in before
+        .keys()
+        .filter(|address| !after.contains_key(*address))
     {
-        Ok(m) => m,
-        Err(e) => {
-            log::debug!("Failed to get UUIDs for {path}: {e}");
-            return Vec::new();
+        // The authoritative snapshot remains current even if a slow legacy consumer drops an event.
+        let _ = sender.try_send(DeviceEvent::Disconnected {
+            address: address.clone(),
+        });
+    }
+    for (address, name) in after
+        .iter()
+        .filter(|(address, _)| !before.contains_key(*address))
+    {
+        let _ = sender.try_send(DeviceEvent::Connected {
+            address: address.clone(),
+            name: name.clone(),
+        });
+    }
+}
+
+async fn run(
+    address: Option<String>,
+    latest: Arc<RwLock<BluezSnapshot>>,
+    sender: mpsc::SyncSender<DeviceEvent>,
+    mut stop: watch::Receiver<bool>,
+) {
+    loop {
+        if *stop.borrow() {
+            return;
         }
-    };
-    let val: zbus::zvariant::OwnedValue = match msg.body().deserialize() {
-        Ok(v) => v,
-        Err(e) => {
-            log::debug!("Failed to deserialize UUIDs for {path}: {e}");
-            return Vec::new();
+        let connect = async {
+            match &address {
+                Some(address) => {
+                    zbus::connection::Builder::address(address.as_str())?
+                        .max_queued(128)
+                        .build()
+                        .await
+                }
+                None => {
+                    zbus::connection::Builder::system()?
+                        .max_queued(128)
+                        .build()
+                        .await
+                }
+            }
+        };
+        let connection = tokio::select! {
+            _ = stop.changed() => return,
+            result = tokio::time::timeout(CALL_TIMEOUT, connect) => match result { Ok(Ok(connection)) => connection, _ => {
+                publish(BluezSnapshot::default(), &latest, &sender);
+                tokio::select! { _ = stop.changed() => return, _ = tokio::time::sleep(Duration::from_secs(1)) => continue }
+            }}
+        };
+        let mut session_stop = stop.clone();
+        let session = monitor_session(&connection, &latest, &sender, &mut session_stop);
+        tokio::select! { _ = stop.changed() => return, _ = session => {} }
+        publish(BluezSnapshot::default(), &latest, &sender);
+        tokio::select! { _ = stop.changed() => return, _ = tokio::time::sleep(Duration::from_secs(1)) => {} }
+    }
+}
+
+async fn monitor_session(
+    connection: &zbus::Connection,
+    latest: &RwLock<BluezSnapshot>,
+    sender: &mpsc::SyncSender<DeviceEvent>,
+    stop: &mut watch::Receiver<bool>,
+) -> Result<(), TransportError> {
+    // Subscribe first, then snapshot. Queued signals trigger fresh reconciliation rather than stale patches.
+    let mut bluez = zbus::MessageStream::for_match_rule(
+        "type='signal',sender='org.bluez'",
+        connection,
+        Some(128),
+    )
+    .await
+    .map_err(|error| TransportError::with_source("subscribe BlueZ", error))?;
+    let mut owner = zbus::MessageStream::for_match_rule("type='signal',sender='org.freedesktop.DBus',interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0='org.bluez'", connection, Some(8)).await.map_err(|error| TransportError::with_source("subscribe BlueZ ownership", error))?;
+    let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
+    loop {
+        let current = tokio::select! { _ = stop.changed() => return Ok(()), result = snapshot_on(connection) => result };
+        publish(current.unwrap_or_default(), latest, sender);
+        tokio::select! {
+            _ = stop.changed() => return Ok(()),
+            message = bluez.next() => if !matches!(message, Some(Ok(_))) { return Err(TransportError::ChannelClosed); },
+            message = owner.next() => if !matches!(message, Some(Ok(_))) { return Err(TransportError::ChannelClosed); },
+            _ = interval.tick() => {},
         }
-    };
-    <Vec<String>>::try_from(val).unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FakeAdapter;
+    #[zbus::interface(name = "org.bluez.Adapter1")]
+    impl FakeAdapter {
+        #[zbus(property)]
+        fn address(&self) -> &str {
+            "00:11:22:33:44:55"
+        }
+        #[zbus(property)]
+        fn powered(&self) -> bool {
+            true
+        }
+    }
+
+    struct FakeDevice {
+        uuids: Vec<String>,
+    }
+    #[zbus::interface(name = "org.bluez.Device1")]
+    impl FakeDevice {
+        #[zbus(property)]
+        fn address(&self) -> &str {
+            "AA:BB:CC:DD:EE:FF"
+        }
+        #[zbus(property)]
+        fn alias(&self) -> &str {
+            "Renamed buds"
+        }
+        #[zbus(property)]
+        fn paired(&self) -> bool {
+            true
+        }
+        #[zbus(property)]
+        fn connected(&self) -> bool {
+            true
+        }
+        #[zbus(property)]
+        fn services_resolved(&self) -> bool {
+            !self.uuids.is_empty()
+        }
+        #[zbus(property, name = "UUIDs")]
+        fn uuids(&self) -> Vec<String> {
+            self.uuids.clone()
+        }
+    }
+
+    async fn wait_for(monitor: &BluezMonitor, predicate: impl Fn(&BluezSnapshot) -> bool) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if predicate(&monitor.current_snapshot()) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("monitor reconciles private bus state");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn private_bus_tracks_late_uuids_and_bluez_owner_restart() {
+        let bus = crate::test_bus::TestBus::start();
+        let service = zbus::connection::Builder::address(bus.address.as_str())
+            .expect("bus builder")
+            .name("org.bluez")
+            .expect("name")
+            .serve_at("/", zbus::fdo::ObjectManager)
+            .expect("object manager")
+            .serve_at("/org/bluez/hci0", FakeAdapter)
+            .expect("adapter")
+            .serve_at(
+                "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+                FakeDevice { uuids: vec![] },
+            )
+            .expect("device")
+            .build()
+            .await
+            .expect("fake BlueZ");
+        let mut monitor = BluezMonitor::start_at_bus(bus.address.clone()).expect("monitor");
+        wait_for(&monitor, |snapshot| {
+            snapshot.adapter_ready() && snapshot.devices.len() == 1
+        })
+        .await;
+        assert!(!monitor.current_snapshot().devices[0].airpods);
+        let device = service
+            .object_server()
+            .interface::<_, FakeDevice>("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF")
+            .await
+            .expect("device interface");
+        device.get_mut().await.uuids = vec![packets::AIRPODS_UUID.to_uppercase()];
+        device
+            .get()
+            .await
+            .u_u_i_ds_changed(device.signal_emitter())
+            .await
+            .expect("UUID signal");
+        wait_for(&monitor, |snapshot| {
+            snapshot
+                .devices
+                .first()
+                .is_some_and(|device| device.airpods)
+        })
+        .await;
+        assert!(matches!(
+            monitor.next_event_timeout(Duration::ZERO),
+            Ok(Some(DeviceEvent::Connected { .. }))
+        ));
+        service
+            .release_name("org.bluez")
+            .await
+            .expect("release BlueZ");
+        wait_for(&monitor, |snapshot| !snapshot.available).await;
+        assert!(matches!(
+            monitor.next_event_timeout(Duration::ZERO),
+            Ok(Some(DeviceEvent::Disconnected { .. }))
+        ));
+        service
+            .request_name("org.bluez")
+            .await
+            .expect("restart BlueZ");
+        wait_for(&monitor, |snapshot| {
+            snapshot.available
+                && snapshot
+                    .devices
+                    .first()
+                    .is_some_and(|device| device.airpods)
+        })
+        .await;
+        monitor.shutdown();
+    }
+
+    fn pods(connected: bool) -> BluezSnapshot {
+        BluezSnapshot {
+            available: true,
+            adapters: vec![AdapterSnapshot {
+                path: "/org/bluez/hci0".into(),
+                powered: true,
+                ..Default::default()
+            }],
+            devices: vec![DeviceSnapshot {
+                address: "AA:BB:CC:DD:EE:FF".into(),
+                name: "Renamed buds".into(),
+                connected,
+                airpods: true,
+                ..Default::default()
+            }],
+        }
+    }
+
+    #[test]
+    fn snapshots_deduplicate_and_service_loss_disconnects() {
+        let (tx, rx) = mpsc::sync_channel(8);
+        let state = RwLock::new(BluezSnapshot::default());
+        publish(pods(true), &state, &tx);
+        assert!(matches!(rx.try_recv(), Ok(DeviceEvent::Connected { .. })));
+        publish(pods(true), &state, &tx);
+        assert!(rx.try_recv().is_err());
+        publish(BluezSnapshot::default(), &state, &tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DeviceEvent::Disconnected { .. })
+        ));
+        assert!(!state.read().expect("state").adapter_ready());
+    }
+
+    #[test]
+    fn late_service_identification_is_reported_once_and_slow_consumers_do_not_block() {
+        let (tx, _rx) = mpsc::sync_channel(1);
+        let state = RwLock::new(BluezSnapshot::default());
+        let mut unknown = pods(true);
+        unknown.devices[0].airpods = false;
+        publish(unknown, &state, &tx);
+        publish(pods(true), &state, &tx);
+        publish(pods(false), &state, &tx);
+        assert!(!state.read().expect("state").devices[0].connected);
+    }
 }

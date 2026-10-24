@@ -1,3 +1,7 @@
+[features]
+default = []
+ble = ["dep:btleplug"]
+
 [package]
 name = "librepods-windows"
 version.workspace = true
@@ -12,7 +16,7 @@ librepods-core = { path = "../librepods-core" }
 log = "0.4"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
-btleplug = "0.12.0"
+btleplug = { version = "0.12.0", optional = true }
 
 # WinSock (raw L2CAP sockets) and WinRT (Bluetooth enumeration + SMTC media).
 windows-sys = { version = "0.61", features = [
