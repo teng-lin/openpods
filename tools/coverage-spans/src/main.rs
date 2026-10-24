@@ -45,6 +45,63 @@ struct Collector<'a> {
     external: Vec<PathBuf>,
 }
 impl<'ast> Visit<'ast> for Collector<'_> {
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        let attrs: &[Attribute] = match item {
+            syn::Item::Const(item) => &item.attrs,
+            syn::Item::Enum(item) => &item.attrs,
+            syn::Item::ExternCrate(item) => &item.attrs,
+            syn::Item::Fn(item) => &item.attrs,
+            syn::Item::ForeignMod(item) => &item.attrs,
+            syn::Item::Impl(item) => &item.attrs,
+            syn::Item::Macro(item) => &item.attrs,
+            syn::Item::Mod(_) => {
+                syn::visit::visit_item(self, item);
+                return;
+            }
+            syn::Item::Static(item) => &item.attrs,
+            syn::Item::Struct(item) => &item.attrs,
+            syn::Item::Trait(item) => &item.attrs,
+            syn::Item::TraitAlias(item) => &item.attrs,
+            syn::Item::Type(item) => &item.attrs,
+            syn::Item::Union(item) => &item.attrs,
+            syn::Item::Use(item) => &item.attrs,
+            _ => &[],
+        };
+        if test_only(attrs) {
+            self.ranges.push([
+                attrs
+                    .first()
+                    .map_or(item.span().start().line, |a| a.span().start().line),
+                item.span().end().line,
+            ]);
+        } else {
+            syn::visit::visit_item(self, item);
+        }
+    }
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if test_only(&item.attrs) {
+            self.ranges.push([
+                item.attrs
+                    .first()
+                    .map_or(item.span().start().line, |a| a.span().start().line),
+                item.span().end().line,
+            ]);
+        } else {
+            syn::visit::visit_impl_item_fn(self, item);
+        }
+    }
+    fn visit_trait_item_fn(&mut self, item: &'ast syn::TraitItemFn) {
+        if test_only(&item.attrs) {
+            self.ranges.push([
+                item.attrs
+                    .first()
+                    .map_or(item.span().start().line, |a| a.span().start().line),
+                item.span().end().line,
+            ]);
+        } else {
+            syn::visit::visit_trait_item_fn(self, item);
+        }
+    }
     fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
         if test_only(&item.attrs) {
             self.ranges.push([
@@ -152,7 +209,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         collector.visit_file(&syntax);
         ranges.insert(
             path.to_str().ok_or("non-UTF8 path")?.to_owned(),
-            collector.ranges,
+            if test_only(&syntax.attrs) {
+                vec![[1, source.lines().count()]]
+            } else {
+                collector.ranges
+            },
         );
         external.extend(collector.external);
     }
@@ -206,5 +267,16 @@ mod tests {
         };
         collector.visit_file(&syntax);
         assert_eq!(collector.ranges, vec![[2, 3], [4, 5]]);
+    }
+    #[test]
+    fn test_only_impls_and_methods_are_excluded_without_dropping_production_methods() {
+        let syntax = syn::parse_file("impl Thing {\n#[cfg(test)]\nfn helper() {}\nfn production() {}\n}\n#[cfg(test)]\nimpl Fake { fn helper() {} }\n").expect("syntax");
+        let mut collector = Collector {
+            path: Path::new("src/lib.rs"),
+            ranges: vec![],
+            external: vec![],
+        };
+        collector.visit_file(&syntax);
+        assert_eq!(collector.ranges, vec![[2, 3], [6, 7]]);
     }
 }
