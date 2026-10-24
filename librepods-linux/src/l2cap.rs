@@ -516,6 +516,11 @@ mod tests {
             1
         );
         assert_eq!(byte, 9);
+        // shutdown propagates even if another parallel test briefly forked before CLOEXEC.
+        assert_eq!(
+            unsafe { libc::shutdown(peer.as_raw_fd(), libc::SHUT_RDWR) },
+            0
+        );
         drop(peer);
         assert!(socket.send_timeout(&[1], Duration::from_secs(1)).is_err());
     }

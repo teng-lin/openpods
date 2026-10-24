@@ -160,7 +160,7 @@ async fn listen(
     .map_err(|error| TransportError::with_source("connect MPRIS history bus", error))?;
     let mut playback = zbus::MessageStream::for_match_rule("type='signal',path='/org/mpris/MediaPlayer2',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged',arg0='org.mpris.MediaPlayer2.Player'", &connection, Some(128)).await.map_err(|error| TransportError::with_source("subscribe MPRIS playback history", error))?;
     let mut owners = zbus::MessageStream::for_match_rule("type='signal',sender='org.freedesktop.DBus',interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0namespace='org.mpris.MediaPlayer2'", &connection, Some(64)).await.map_err(|error| TransportError::with_source("subscribe MPRIS owner history", error))?;
-    let mut names: HashMap<String, String> = HashMap::new();
+    let mut names: HashMap<String, Vec<String>> = HashMap::new();
     tokio::time::timeout(Duration::from_secs(2), async {
         let bus = zbus::fdo::DBusProxy::new(&connection).await?;
         for name in bus
@@ -174,7 +174,10 @@ async fn listen(
                 continue;
             };
             if let Ok(owner) = bus.get_name_owner(bus_name).await {
-                names.insert(owner.to_string(), name.to_string());
+                names
+                    .entry(owner.to_string())
+                    .or_default()
+                    .push(name.to_string());
             }
         }
         Ok::<(), zbus::Error>(())
@@ -189,21 +192,23 @@ async fn listen(
                 let message = message.ok_or(TransportError::ChannelClosed)?.map_err(|error| TransportError::with_source("read MPRIS playback history", error))?;
                 let header = message.header();
                 let Some(owner) = header.sender().map(|owner| owner.as_str()) else { shared.invalidate(); continue; };
-                let Some(bus_name) = names.get(owner) else { shared.invalidate(); continue; };
+                let Some(bus_names) = names.get(owner) else { shared.invalidate(); continue; };
                 let Ok((_, properties, invalidated)) = message.body().deserialize::<(String, HashMap<String, zbus::zvariant::OwnedValue>, Vec<String>)>() else { shared.invalidate(); continue; };
                 if invalidated.iter().any(|property| property == "PlaybackStatus") { shared.invalidate(); continue; }
                 if let Some(value) = properties.get("PlaybackStatus") {
                     let Ok(status) = <&str>::try_from(value) else { shared.invalidate(); continue; };
-                    let event = PlayerEvent::Playback { bus_name: bus_name.clone(), owner: owner.to_owned(), playback_status: status.to_owned() };
-                    let epoch = shared.epoch.load(Ordering::Acquire);
-                    if sender.try_send((epoch, event)).is_err() { shared.invalidate(); }
+                    for bus_name in bus_names {
+                        let event = PlayerEvent::Playback { bus_name: bus_name.clone(), owner: owner.to_owned(), playback_status: status.to_owned() };
+                        let epoch = shared.epoch.load(Ordering::Acquire);
+                        if sender.try_send((epoch, event)).is_err() { shared.invalidate(); break; }
+                    }
                 }
             },
             message = owners.next() => {
                 let message = message.ok_or(TransportError::ChannelClosed)?.map_err(|error| TransportError::with_source("read MPRIS owner history", error))?;
                 if let Ok((name, old, new)) = message.body().deserialize::<(String, String, String)>() {
-                    names.remove(&old);
-                    if !new.is_empty() { names.insert(new, name); }
+                    if let Some(aliases) = names.get_mut(&old) { aliases.retain(|alias| alias != &name); }
+                    if !new.is_empty() { names.entry(new).or_default().push(name); }
                 }
                 shared.invalidate();
             },
@@ -308,18 +313,64 @@ mod tests {
         .await
         .expect("overflow recorded");
         assert!(matches!(
-            monitor.next_event().await,
+            monitor.try_next_event(),
             Some(PlayerEvent::Invalidate { .. })
         ));
         // Old buffered Paused events cannot create a fresh ownership baseline.
-        assert!(
-            tokio::time::timeout(Duration::from_millis(30), monitor.next_event())
-                .await
-                .is_err()
-        );
+        while let Ok(event) =
+            tokio::time::timeout(Duration::from_millis(30), monitor.next_event()).await
+        {
+            assert!(
+                matches!(event, Some(PlayerEvent::Invalidate { .. })),
+                "stale playback survived overflow"
+            );
+        }
         emit(&player, "Playing").await;
         assert!(
             matches!(tokio::time::timeout(Duration::from_secs(1), monitor.next_event()).await.expect("fresh event deadline"), Some(PlayerEvent::Playback { playback_status, .. }) if playback_status == "Playing")
+        );
+        monitor.shutdown();
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn aliased_player_names_each_receive_the_same_ordered_transition() {
+        let bus = crate::test_bus::TestBus::start();
+        let player = zbus::connection::Builder::address(bus.address.as_str())
+            .expect("bus")
+            .name("org.mpris.MediaPlayer2.one")
+            .expect("name")
+            .build()
+            .await
+            .expect("player");
+        player
+            .request_name("org.mpris.MediaPlayer2.two")
+            .await
+            .expect("second player alias");
+        let mut monitor = PlayerMonitor::start_at_bus(bus.address.clone()).expect("monitor");
+        ready(&monitor).await;
+        assert!(monitor.try_next_event().is_none());
+        emit(&player, "Playing").await;
+        let mut observed = Vec::new();
+        for _ in 0..2 {
+            match tokio::time::timeout(Duration::from_secs(1), monitor.next_event())
+                .await
+                .expect("aliased event deadline")
+                .expect("aliased event")
+            {
+                PlayerEvent::Playback {
+                    bus_name,
+                    playback_status,
+                    ..
+                } => {
+                    assert_eq!(playback_status, "Playing");
+                    observed.push(bus_name);
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        observed.sort();
+        assert_eq!(
+            observed,
+            ["org.mpris.MediaPlayer2.one", "org.mpris.MediaPlayer2.two"]
         );
         monitor.shutdown();
     }
