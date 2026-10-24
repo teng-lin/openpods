@@ -599,26 +599,37 @@ pub async fn players_on(
             .list_names()
             .await
             .map_err(|error| TransportError::with_source("enumerate MPRIS players", error))?;
-        let mut players = Vec::new();
+        use futures::StreamExt;
+        let mut probes = futures::stream::FuturesUnordered::new();
         for name in names
             .into_iter()
             .filter(|name| name.as_str().starts_with("org.mpris.MediaPlayer2."))
             .take(64)
         {
-            let owner =
-                match bus
-                    .get_name_owner(name.as_str().try_into().map_err(|error| {
-                        TransportError::with_source("validate player name", error)
-                    })?)
-                    .await
-                {
-                    Ok(owner) => owner,
-                    Err(_) => continue,
-                };
-            if let Ok(player) = player_on(connection, name.as_str(), owner.as_str()).await {
+            let bus = &bus;
+            probes.push(async move {
+                // A nonresponsive advertised player must not hide responsive peers.
+                tokio::time::timeout(Duration::from_millis(500), async {
+                    let owner = bus
+                        .get_name_owner(name.as_str().try_into().ok()?)
+                        .await
+                        .ok()?;
+                    player_on(connection, name.as_str(), owner.as_str())
+                        .await
+                        .ok()
+                })
+                .await
+                .ok()
+                .flatten()
+            });
+        }
+        let mut players = Vec::new();
+        while let Some(player) = probes.next().await {
+            if let Some(player) = player {
                 players.push(player);
             }
         }
+        players.sort_by(|left, right| left.bus_name.cmp(&right.bus_name));
         Ok(players)
     })
     .await
@@ -941,8 +952,11 @@ mod tests {
         .is_err());
     }
 
+    #[derive(Default)]
     struct FakePlayer {
         playing: bool,
+        unsupported: bool,
+        stall: bool,
     }
     #[zbus::interface(name = "org.mpris.MediaPlayer2.Player")]
     impl FakePlayer {
@@ -956,14 +970,16 @@ mod tests {
         }
         #[zbus(property)]
         fn can_pause(&self) -> bool {
-            true
+            !self.unsupported
         }
         #[zbus(property)]
         fn can_play(&self) -> bool {
-            true
+            !self.unsupported
         }
         fn pause(&mut self) {
-            self.playing = false;
+            if !self.stall {
+                self.playing = false;
+            }
         }
         fn play(&mut self) {
             self.playing = true;
@@ -978,7 +994,13 @@ mod tests {
             .expect("bus builder")
             .name(name)
             .expect("name")
-            .serve_at("/org/mpris/MediaPlayer2", FakePlayer { playing: true })
+            .serve_at(
+                "/org/mpris/MediaPlayer2",
+                FakePlayer {
+                    playing: true,
+                    ..Default::default()
+                },
+            )
             .expect("player")
             .build()
             .await
@@ -999,7 +1021,13 @@ mod tests {
             .expect("replacement builder")
             .name(name)
             .expect("name")
-            .serve_at("/org/mpris/MediaPlayer2", FakePlayer { playing: true })
+            .serve_at(
+                "/org/mpris/MediaPlayer2",
+                FakePlayer {
+                    playing: true,
+                    ..Default::default()
+                },
+            )
             .expect("player")
             .build()
             .await
@@ -1392,5 +1420,161 @@ else:
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+    struct FakeNotifications(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    // This signature follows org.freedesktop.Notifications.Notify's standard eight arguments.
+    #[allow(clippy::too_many_arguments)]
+    #[zbus::interface(name = "org.freedesktop.Notifications")]
+    impl FakeNotifications {
+        fn notify(
+            &self,
+            app_name: &str,
+            replaces_id: u32,
+            app_icon: &str,
+            summary: &str,
+            body: &str,
+            actions: Vec<String>,
+            hints: HashMap<String, zbus::zvariant::OwnedValue>,
+            expire_timeout: i32,
+        ) -> u32 {
+            assert_eq!(app_name, "LibrePods");
+            assert_eq!(replaces_id, 0);
+            assert_eq!(app_icon, "audio-headphones");
+            assert_eq!(summary, "test summary");
+            assert_eq!(body, "test body");
+            assert!(actions.is_empty() && hints.is_empty());
+            assert_eq!(expire_timeout, 5000);
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            1
+        }
+    }
+
+    #[test]
+    fn user_bus_wrappers_confirm_playback_notify_and_bound_failed_actions() {
+        const CHILD: &str = "LIBREPODS_DESKTOP_PRIVATE_BUS";
+        if let Ok(case) = std::env::var(CHILD) {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("private userbus runtime");
+            runtime.block_on(async {
+                if case == "unavailable" {
+                    assert!(players().await.is_err());
+                    let player = PlayerSnapshot {
+                        bus_name: "org.mpris.MediaPlayer2.test".into(),
+                        owner: ":1.99".into(),
+                        playback_status: "Playing".into(),
+                        can_pause: true,
+                        can_play: true,
+                    };
+                    assert!(player_action(&player, PlayerAction::Pause).await.is_err());
+                    assert!(notify("test summary", "test body").await.is_err());
+                    return;
+                }
+                let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let service = zbus::connection::Builder::session()
+                    .expect("session builder")
+                    .name("org.mpris.MediaPlayer2.test")
+                    .expect("playername")
+                    .name("org.freedesktop.Notifications")
+                    .expect("notificationname")
+                    .serve_at(
+                        "/org/mpris/MediaPlayer2",
+                        FakePlayer {
+                            playing: true,
+                            ..Default::default()
+                        },
+                    )
+                    .expect("player")
+                    .serve_at(
+                        "/org/freedesktop/Notifications",
+                        FakeNotifications(calls.clone()),
+                    )
+                    .expect("notifications")
+                    .build()
+                    .await
+                    .expect("private service");
+                let _broken = zbus::connection::Builder::session()
+                    .expect("broken service builder")
+                    .name("org.mpris.MediaPlayer2.broken")
+                    .expect("bad player name")
+                    .build()
+                    .await
+                    .expect("player without MPRIS object");
+                let discovered = players()
+                    .await
+                    .expect("userbus enumeration skips malformed player");
+                assert_eq!(discovered.len(), 1);
+                let player = discovered
+                    .iter()
+                    .find(|player| player.bus_name == "org.mpris.MediaPlayer2.test")
+                    .expect("selected player");
+                let paused = player_action(player, PlayerAction::Pause)
+                    .await
+                    .expect("confirmed userbus pause");
+                assert_eq!(paused.playback_status, "Paused");
+                let playing = player_action(&paused, PlayerAction::Play)
+                    .await
+                    .expect("confirmed userbus play");
+                assert_eq!(playing.playback_status, "Playing");
+                notify("test summary", "test body")
+                    .await
+                    .expect("userbus notification");
+                assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+                let interface = service
+                    .object_server()
+                    .interface::<_, FakePlayer>("/org/mpris/MediaPlayer2")
+                    .await
+                    .expect("player interface");
+                interface.get_mut().await.unsupported = true;
+                assert_eq!(
+                    crate::error::kind(
+                        &player_action(&playing, PlayerAction::Pause)
+                            .await
+                            .expect_err("unsupported pause")
+                    ),
+                    Some(ErrorKind::Unsupported)
+                );
+                interface.get_mut().await.unsupported = false;
+                interface.get_mut().await.stall = true;
+                let started = std::time::Instant::now();
+                assert_eq!(
+                    crate::error::kind(
+                        &player_action(&playing, PlayerAction::Pause)
+                            .await
+                            .expect_err("unconfirmed pause")
+                    ),
+                    Some(ErrorKind::Timeout)
+                );
+                assert!(started.elapsed() < Duration::from_secs(3));
+                let invalid = PlayerSnapshot {
+                    bus_name: "not a bus name".into(),
+                    ..playing
+                };
+                assert!(player_action(&invalid, PlayerAction::Pause).await.is_err());
+                service
+                    .release_name("org.freedesktop.Notifications")
+                    .await
+                    .expect("notification service loss");
+                assert!(notify("test summary", "test body").await.is_err());
+            });
+            return;
+        }
+        for case in ["normal", "unavailable"] {
+            let bus = crate::test_bus::TestBus::start();
+            let address = if case == "normal" {
+                bus.address.as_str()
+            } else {
+                "unix:path=/no/such/librepods-private-bus"
+            };
+            let output=std::process::Command::new(std::env::current_exe().expect("test executable")).args(["--exact","desktop::tests::user_bus_wrappers_confirm_playback_notify_and_bound_failed_actions","--nocapture"]).env(CHILD,case).env("DBUS_SESSION_BUS_ADDRESS",address).output().expect("private userbus child");
+            assert!(
+                output.status.success(),
+                "{case}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 }

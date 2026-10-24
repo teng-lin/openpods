@@ -227,8 +227,29 @@ impl L2capLinux {
                 size_of::<SockAddrL2>() as libc::socklen_t,
             )
         };
-        if result != 0 {
-            let error = io::Error::last_os_error();
+        let result = if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        };
+        Self::complete_connect(fd, result, until, cancellation)
+    }
+
+    // Address-family independent completion makes the OS deadline/error/cancellation
+    // behavior testable with real local sockets while Bluetooth address setup stays above.
+    fn complete_connect(
+        fd: OwnedFd,
+        result: io::Result<()>,
+        until: Instant,
+        cancellation: Cancellation,
+    ) -> Result<Self, TransportError> {
+        if cancellation.is_cancelled() {
+            return Err(PlatformError::new("connect L2CAP", ErrorKind::Cancelled).into());
+        }
+        if Instant::now() >= until {
+            return Err(PlatformError::new("connect L2CAP", ErrorKind::Timeout).into());
+        }
+        if let Err(error) = result {
             if !matches!(error.raw_os_error(), Some(libc::EINPROGRESS | libc::EAGAIN)) {
                 return Err(PlatformError::io("connect L2CAP", error).into());
             }
@@ -623,5 +644,120 @@ mod tests {
         assert!(!socket.is_connected());
         socket.close().expect("close after peer EOF");
         socket.close().expect("idempotent close");
+    }
+    fn connecting_tcp_peer(address: std::net::SocketAddr) -> (OwnedFd, io::Result<()>) {
+        use std::net::SocketAddr;
+        let SocketAddr::V4(address) = address else {
+            panic!("IPv4 test listener");
+        };
+        let destination = libc::sockaddr_in {
+            sin_family: libc::AF_INET as libc::sa_family_t,
+            sin_port: address.port().to_be(),
+            sin_addr: libc::in_addr {
+                s_addr: u32::from_ne_bytes(address.ip().octets()),
+            },
+            sin_zero: [0; 8],
+        };
+        let raw = unsafe {
+            libc::socket(
+                libc::AF_INET,
+                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                0,
+            )
+        };
+        assert!(raw >= 0);
+        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        let result = unsafe {
+            libc::connect(
+                fd.as_raw_fd(),
+                (&destination as *const libc::sockaddr_in).cast(),
+                size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            )
+        };
+        let result = if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        };
+        (fd, result)
+    }
+
+    #[test]
+    fn real_nonblocking_connect_completion_reports_success_refusal_and_cancellation() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("local listener");
+        let address = listener.local_addr().expect("local address");
+        let (fd, result) = connecting_tcp_peer(address);
+        let socket = L2capLinux::complete_connect(
+            fd,
+            result,
+            deadline(Duration::from_secs(1)).expect("deadline"),
+            Cancellation::new().expect("cancel"),
+        )
+        .expect("OS connect completes");
+        assert!(socket.is_connected());
+        socket.close().expect("close successful socket");
+        let (fd, result) = connecting_tcp_peer(address);
+        let cancellation = Cancellation::new().expect("cancel");
+        cancellation.cancel();
+        assert_eq!(
+            kind(
+                &L2capLinux::complete_connect(
+                    fd,
+                    result,
+                    deadline(Duration::from_secs(1)).expect("deadline"),
+                    cancellation
+                )
+                .err()
+                .expect("cancelled connect")
+            ),
+            Some(ErrorKind::Cancelled)
+        );
+        let (fd, result) = connecting_tcp_peer(address);
+        let expired = Instant::now() - Duration::from_millis(1);
+        assert_eq!(
+            kind(
+                &L2capLinux::complete_connect(
+                    fd,
+                    result,
+                    expired,
+                    Cancellation::new().expect("cancel")
+                )
+                .err()
+                .expect("expired connection deadline")
+            ),
+            Some(ErrorKind::Timeout)
+        );
+        drop(listener);
+        let (fd, result) = connecting_tcp_peer(address);
+        let error = L2capLinux::complete_connect(
+            fd,
+            result,
+            deadline(Duration::from_secs(1)).expect("deadline"),
+            Cancellation::new().expect("cancel"),
+        )
+        .err()
+        .expect("connection refused");
+        let source = std::error::Error::source(&error)
+            .and_then(|error| error.downcast_ref::<PlatformError>())
+            .and_then(|error| error.source.as_ref())
+            .expect("original OS error");
+        assert_eq!(source.raw_os_error(), Some(libc::ECONNREFUSED));
+        let (socket, _peer) = pair();
+        let borrowed = unsafe { libc::fcntl(socket.fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+        assert!(borrowed >= 0);
+        let fd = unsafe { OwnedFd::from_raw_fd(borrowed) };
+        assert_eq!(
+            kind(
+                &L2capLinux::complete_connect(
+                    fd,
+                    Err(io::Error::from_raw_os_error(libc::EACCES)),
+                    deadline(Duration::from_secs(1)).expect("deadline"),
+                    Cancellation::new().expect("cancel")
+                )
+                .err()
+                .expect("synchronous permission failure")
+            ),
+            Some(ErrorKind::PermissionDenied)
+        );
     }
 }
