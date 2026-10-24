@@ -452,6 +452,9 @@ pub async fn request(paths: &Paths, request: &Request) -> Result<Response, Daemo
                 "unexpected version or request identifier",
             ));
         }
+        if response.result.is_some() == response.error.is_some() {
+            return Err(DaemonError::new(ErrorCode::MalformedFrame,"response","response must contain exactly one result or error"));
+        }
         Ok(response)
     })
     .await
@@ -466,6 +469,21 @@ pub async fn request(paths: &Paths, request: &Request) -> Result<Response, Daemo
             "request deadline elapsed; inspect status before retrying a dispatched mutation",
         )
     })?
+    .map_err(|error| {
+        if mutation && dispatched && error.code != ErrorCode::OutcomeUnknown {
+            DaemonError::new(
+                ErrorCode::OutcomeUnknown,
+                error.stage,
+                format!(
+                    "response unavailable after dispatch ({:?}): {}; inspect status before retrying",
+                    error.code,
+                    error.message
+                ),
+            )
+        } else {
+            error
+        }
+    })
 }
 
 pub async fn watch_status(
