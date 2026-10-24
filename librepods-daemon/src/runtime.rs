@@ -464,16 +464,7 @@ pub async fn request(paths: &Paths, request: &Request) -> Result<Response, Daemo
         })?;
         let response: Response = serde_json::from_slice(&bytes)
             .map_err(|e| DaemonError::new(ErrorCode::MalformedFrame, "response", e.to_string()))?;
-        if response.version != ipc::PROTOCOL_VERSION || response.id != request.id {
-            return Err(DaemonError::new(
-                ErrorCode::VersionMismatch,
-                "response",
-                "unexpected version or request identifier",
-            ));
-        }
-        if response.result.is_some() == response.error.is_some() {
-            return Err(DaemonError::new(ErrorCode::MalformedFrame,"response","response must contain exactly one result or error"));
-        }
+        response.validate(request.id)?;
         Ok(response)
     })
     .await
@@ -532,15 +523,9 @@ pub async fn watch_status(
     while let Some(bytes) = read_response_frame(&mut reader).await? {
         let response: Response = serde_json::from_slice(&bytes)
             .map_err(|e| DaemonError::new(ErrorCode::MalformedFrame, "watch", e.to_string()))?;
+        response.validate(request.id)?;
         if let Some(error) = response.error {
             return Err(error);
-        }
-        if response.version != ipc::PROTOCOL_VERSION || response.id != request.id {
-            return Err(DaemonError::new(
-                ErrorCode::VersionMismatch,
-                "watch",
-                "unexpected watch response",
-            ));
         }
         let snapshot = serde_json::from_value(response.result.ok_or_else(|| {
             DaemonError::new(ErrorCode::MalformedFrame, "watch", "missing status")

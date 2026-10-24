@@ -85,6 +85,23 @@ pub struct Response {
     pub error: Option<DaemonError>,
 }
 impl Response {
+    pub fn validate(&self, expected_id: u64) -> Result<(), DaemonError> {
+        if self.version != PROTOCOL_VERSION || self.id != expected_id {
+            return Err(DaemonError::new(
+                ErrorCode::VersionMismatch,
+                "response",
+                "unexpected version or request identifier",
+            ));
+        }
+        if self.result.is_some() == self.error.is_some() {
+            return Err(DaemonError::new(
+                ErrorCode::MalformedFrame,
+                "response",
+                "response must contain exactly one result or error",
+            ));
+        }
+        Ok(())
+    }
     pub fn ok(id: u64, result: impl Serialize) -> Self {
         match serde_json::to_value(result) {
             Ok(value) => Self {
