@@ -15,8 +15,8 @@ use librepods_core::{
     },
     policy::{
         audio::{
-            AudioAction as RecoveryAction, AudioRecoveryPolicy, AudioSnapshot as PolicyAudio,
-            CaptureState, DuckingPolicy,
+            valid_channel_volumes, AudioAction as RecoveryAction, AudioRecoveryPolicy,
+            AudioSnapshot as PolicyAudio, CaptureState, DuckingPolicy, VolumeChannel,
         },
         ear::{EarAction, EarMode, EarPolicy},
         media::{PauseOwnership, PlaybackState, PlayerSnapshot as PolicyPlayer},
@@ -263,7 +263,7 @@ fn policy_audio(audio: &AudioSnapshot) -> PolicyAudio {
 struct OwnedDucking {
     address: String,
     sink: String,
-    target: u8,
+    target: Vec<VolumeChannel>,
 }
 struct RouteOwnership {
     previous: String,
@@ -715,13 +715,13 @@ impl Coordinator {
             return;
         };
         let Some(volume) = output
-            .volume_percent
-            .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 100.0)
-            .map(|value| value.round() as u8)
+            .volume_channels
+            .as_ref()
+            .filter(|channels| valid_channel_volumes(channels))
         else {
             return;
         };
-        if volume != owned.target {
+        if *volume != owned.target {
             self.clear_volume_ownership();
             return;
         }
@@ -734,10 +734,11 @@ impl Coordinator {
         match adapter
             .audio_action(
                 &owned.address,
-                AudioAction::SetVolume {
+                AudioAction::SetRawVolume {
                     name: action.sink,
                     input: false,
-                    percent: action.percent,
+                    expected: action.expected,
+                    channels: action.target,
                 },
             )
             .await
@@ -781,9 +782,9 @@ impl Coordinator {
             return;
         };
         let Some(volume) = output
-            .volume_percent
-            .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 100.0)
-            .map(|value| value.round() as u8)
+            .volume_channels
+            .as_ref()
+            .filter(|channels| valid_channel_volumes(channels))
         else {
             self.request_volume_restore();
             self.last_ca = observed;
@@ -806,15 +807,16 @@ impl Coordinator {
                     self.ducked_volume = Some(OwnedDucking {
                         address: self.address.clone(),
                         sink: action.sink.clone(),
-                        target: action.percent,
+                        target: action.target.clone(),
                     });
                     match adapter
                         .audio_action(
                             &self.address,
-                            AudioAction::SetVolume {
+                            AudioAction::SetRawVolume {
                                 name: action.sink,
                                 input: false,
-                                percent: action.percent,
+                                expected: action.expected,
+                                channels: action.target,
                             },
                         )
                         .await
@@ -933,6 +935,16 @@ mod tests {
                             name: "pods".into(),
                             selected_device: true,
                             volume_percent: Some(50.0),
+                            volume_channels: Some(vec![
+                                VolumeChannel {
+                                    name: "front-left".into(),
+                                    value: 32768,
+                                },
+                                VolumeChannel {
+                                    name: "front-right".into(),
+                                    value: 32768,
+                                },
+                            ]),
                             ..AudioNode::default()
                         },
                         AudioNode {
@@ -962,7 +974,42 @@ mod tests {
             }
         }
     }
+    fn channel_percent(channels: &[VolumeChannel]) -> f64 {
+        channels
+            .iter()
+            .map(|channel| f64::from(channel.value))
+            .sum::<f64>()
+            / channels.len() as f64
+            / 65536.0
+            * 100.0
+    }
+    fn quantized_percent(percent: f64) -> f64 {
+        (percent * 65536.0 / 100.0).round() / 65536.0 * 100.0
+    }
+    fn ducked_percent() -> f64 {
+        f64::from(32768 / 5) / 65536.0 * 100.0
+    }
     impl Fake {
+        fn set_channels(&self, channels: Option<Vec<VolumeChannel>>) {
+            let mut audio = self.audio.lock().unwrap();
+            audio.outputs[0].volume_percent =
+                channels.as_ref().map(|channels| channel_percent(channels));
+            audio.outputs[0].volume_channels = channels;
+        }
+        fn set_volume(&self, percent: Option<f64>) {
+            self.set_channels(percent.map(|percent| {
+                vec![
+                    VolumeChannel {
+                        name: "front-left".into(),
+                        value: (percent * 65536.0 / 100.0).round() as u32,
+                    },
+                    VolumeChannel {
+                        name: "front-right".into(),
+                        value: (percent * 65536.0 / 100.0).round() as u32,
+                    },
+                ]
+            }));
+        }
         fn emit(&self, event: PlayerEvent) {
             self.events.lock().unwrap().push_back(event);
             self.event_notify.notify_one();
@@ -1012,6 +1059,23 @@ mod tests {
                     match action {
                         AudioAction::SetDefaultOutput { name } => audio.default_output = Some(name),
                         AudioAction::SetProfile { profile } => audio.profile = Some(profile),
+                        AudioAction::SetRawVolume {
+                            name,
+                            expected,
+                            channels,
+                            ..
+                        } => {
+                            let node = audio
+                                .outputs
+                                .iter_mut()
+                                .find(|node| node.name == name)
+                                .unwrap();
+                            if node.volume_channels.as_ref() != Some(&expected) {
+                                return Err(TransportError::Cancelled);
+                            }
+                            node.volume_percent = Some(channel_percent(&channels));
+                            node.volume_channels = Some(channels);
+                        }
                         AudioAction::SetVolume { name, percent, .. } => {
                             audio
                                 .outputs
@@ -1191,7 +1255,7 @@ mod tests {
         c.step(&s, 0, &fake).await;
         assert_eq!(
             fake.audio.lock().unwrap().outputs[0].volume_percent,
-            Some(10.0)
+            Some(ducked_percent())
         );
         s.device.ca_event = Some(8);
         observe(&mut s, "ca_event", 1);
@@ -1203,13 +1267,13 @@ mod tests {
         s.device.ca_event = Some(2);
         observe(&mut s, "ca_event", 2);
         c.step(&s, 2, &fake).await;
-        fake.audio.lock().unwrap().outputs[0].volume_percent = Some(35.0);
+        fake.set_volume(Some(35.0));
         s.device.ca_event = Some(9);
         observe(&mut s, "ca_event", 3);
         c.step(&s, 3, &fake).await;
         assert_eq!(
             fake.audio.lock().unwrap().outputs[0].volume_percent,
-            Some(35.0)
+            Some(quantized_percent(35.0))
         );
         s.device.ca_event = Some(1);
         observe(&mut s, "ca_event", 4);
@@ -1217,7 +1281,7 @@ mod tests {
         c.shutdown(&fake).await;
         assert_eq!(
             fake.audio.lock().unwrap().outputs[0].volume_percent,
-            Some(35.0)
+            Some(quantized_percent(35.0))
         );
     }
     #[tokio::test]
@@ -1375,12 +1439,12 @@ mod tests {
         s.device.ca_event = Some(255);
         observe(&mut s, "ca_event", 0);
         c.step(&s, 0, &fake).await;
-        fake.audio.lock().unwrap().outputs[0].volume_percent = None;
+        fake.set_volume(None);
         s.device.ca_event = Some(1);
         observe(&mut s, "ca_event", 1);
         c.step(&s, 1, &fake).await;
         assert!(fake.effects.lock().unwrap().is_empty());
-        fake.audio.lock().unwrap().outputs[0].volume_percent = Some(50.0);
+        fake.set_volume(Some(50.0));
         observe(&mut s, "ca_event", 2);
         c.step(&s, 2, &fake).await;
         fake.audio.lock().unwrap().default_output = Some("speakers".into());
@@ -1591,7 +1655,7 @@ mod tests {
         c.step(&s, 0, &fake).await;
         assert_eq!(
             fake.audio.lock().unwrap().outputs[0].volume_percent,
-            Some(10.0)
+            Some(ducked_percent())
         );
         s.session_generation = 2;
         s.device.ca_event = None;
@@ -1644,7 +1708,7 @@ mod tests {
         c.step(&s, 1, &fake).await;
         assert_eq!(
             fake.audio.lock().unwrap().outputs[0].volume_percent,
-            Some(10.0)
+            Some(ducked_percent())
         );
         assert!(c.restore_pending);
         fake.fail_effect.store(false, Ordering::SeqCst);
@@ -1670,17 +1734,21 @@ mod tests {
             c.step(&s, 0, &fake).await;
             assert_eq!(
                 fake.audio.lock().unwrap().outputs[0].volume_percent,
-                Some(10.0)
+                Some(ducked_percent())
             );
             assert!(c.restore_pending);
             fake.fail_after_effect.store(false, Ordering::SeqCst);
             if manual {
-                fake.audio.lock().unwrap().outputs[0].volume_percent = Some(35.0);
+                fake.set_volume(Some(35.0));
             }
             c.step(&s, 1, &fake).await;
             assert_eq!(
                 fake.audio.lock().unwrap().outputs[0].volume_percent,
-                Some(if manual { 35.0 } else { 50.0 })
+                Some(if manual {
+                    quantized_percent(35.0)
+                } else {
+                    50.0
+                })
             );
             assert!(c.ducked_volume.is_none());
         }
@@ -1706,7 +1774,7 @@ mod tests {
             c.step(&s, 1, &fake).await;
             assert_eq!(
                 fake.audio.lock().unwrap().outputs[0].volume_percent,
-                Some(10.0)
+                Some(ducked_percent())
             );
             assert!(c.restore_pending);
             {
@@ -1755,7 +1823,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             fake.audio.lock().unwrap().outputs[0].volume_percent,
-            Some(10.0)
+            Some(ducked_percent())
         );
         fake.stall_after_effect.store(false, Ordering::SeqCst);
         s.session_generation = 2;
@@ -1796,6 +1864,95 @@ mod tests {
             assert!(fake.effects.lock().unwrap().is_empty());
             assert!(!c.ducking.is_ducking());
         }
+    }
+    #[tokio::test]
+    async fn conversation_volume_preserves_asymmetric_fractional_channels_exactly() {
+        let fake = Fake::default();
+        let original = vec![
+            VolumeChannel {
+                name: "front-left".into(),
+                value: 32801,
+            },
+            VolumeChannel {
+                name: "front-right".into(),
+                value: 21475,
+            },
+        ];
+        fake.set_channels(Some(original.clone()));
+        let mut c = Coordinator::new(Config {
+            ca_ducking: true,
+            ..Config::default()
+        });
+        let mut s = snapshot(ConfigEar::Off);
+        s.device.ca_event = Some(1);
+        observe(&mut s, "ca_event", 0);
+        c.step(&s, 0, &fake).await;
+        let ducked = fake.audio.lock().unwrap().outputs[0]
+            .volume_channels
+            .clone()
+            .unwrap();
+        assert_eq!(
+            ducked
+                .iter()
+                .map(|channel| channel.value)
+                .collect::<Vec<_>>(),
+            vec![6560, 4295]
+        );
+        s.device.ca_event = Some(8);
+        observe(&mut s, "ca_event", 1);
+        c.step(&s, 1, &fake).await;
+        assert_eq!(
+            fake.audio.lock().unwrap().outputs[0].volume_channels,
+            Some(original)
+        );
+    }
+    #[tokio::test]
+    async fn a_single_raw_unit_manual_change_or_channel_reorder_invalidates_restoration() {
+        for reorder in [false, true] {
+            let fake = Fake::default();
+            let mut c = Coordinator::new(Config {
+                ca_ducking: true,
+                ..Config::default()
+            });
+            let mut s = snapshot(ConfigEar::Off);
+            s.device.ca_event = Some(1);
+            observe(&mut s, "ca_event", 0);
+            c.step(&s, 0, &fake).await;
+            let mut manual = fake.audio.lock().unwrap().outputs[0]
+                .volume_channels
+                .clone()
+                .unwrap();
+            if reorder {
+                manual.swap(0, 1);
+            } else {
+                manual[0].value += 1;
+                manual[1].value -= 1;
+            }
+            fake.set_channels(Some(manual.clone()));
+            s.device.ca_event = Some(8);
+            observe(&mut s, "ca_event", 1);
+            c.step(&s, 1, &fake).await;
+            assert_eq!(
+                fake.audio.lock().unwrap().outputs[0].volume_channels,
+                Some(manual)
+            );
+            assert_eq!(fake.effects.lock().unwrap().len(), 1);
+        }
+    }
+    #[tokio::test]
+    async fn unknown_channel_layout_suppresses_ducking_even_if_average_volume_is_known() {
+        let fake = Fake::default();
+        fake.audio.lock().unwrap().outputs[0].volume_channels = None;
+        let mut c = Coordinator::new(Config {
+            ca_ducking: true,
+            ..Config::default()
+        });
+        let mut s = snapshot(ConfigEar::Off);
+        s.device.ca_event = Some(1);
+        observe(&mut s, "ca_event", 0);
+        c.step(&s, 0, &fake).await;
+        assert!(fake.effects.lock().unwrap().is_empty());
+        assert!(!c.ducking.is_ducking());
     }
     #[tokio::test]
     async fn shutdown_cancels_stalled_observation_without_waiting_for_deadline() {

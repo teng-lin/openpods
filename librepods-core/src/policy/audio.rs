@@ -181,15 +181,21 @@ pub fn valid_channel_volumes(channels: &[VolumeChannel]) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VolumeAction {
     pub sink: String,
-    pub percent: u8,
+    pub expected: Vec<VolumeChannel>,
+    pub target: Vec<VolumeChannel>,
 }
 #[derive(Default, Clone)]
 pub struct DuckingPolicy {
-    owned: Option<(String, u8, u8)>,
+    owned: Option<(String, Vec<VolumeChannel>, Vec<VolumeChannel>)>,
 }
 impl DuckingPolicy {
     /// Upstream AirPodsService treats 1/2 as speech and 6/8/9 as restoration.
-    pub fn on_event(&mut self, event: u8, sink: &str, volume: u8) -> Option<VolumeAction> {
+    pub fn on_event(
+        &mut self,
+        event: u8,
+        sink: &str,
+        volume: &[VolumeChannel],
+    ) -> Option<VolumeAction> {
         match event {
             1 | 2 => self.speech_started(sink, volume),
             6 | 8 | 9 => self.speech_stopped(sink, volume),
@@ -199,21 +205,28 @@ impl DuckingPolicy {
     pub fn is_ducking(&self) -> bool {
         self.owned.is_some()
     }
-    pub fn speech_started(&mut self, sink: &str, volume: u8) -> Option<VolumeAction> {
-        if self.owned.is_some() || volume > 100 {
+    pub fn speech_started(&mut self, sink: &str, volume: &[VolumeChannel]) -> Option<VolumeAction> {
+        if self.owned.is_some() || !valid_channel_volumes(volume) {
             return None;
         }
-        let target = volume / 5;
-        self.owned = Some((sink.into(), volume, target));
+        let target = volume
+            .iter()
+            .map(|channel| VolumeChannel {
+                name: channel.name.clone(),
+                value: channel.value / 5,
+            })
+            .collect::<Vec<_>>();
+        self.owned = Some((sink.into(), volume.to_vec(), target.clone()));
         Some(VolumeAction {
             sink: sink.into(),
-            percent: target,
+            expected: volume.to_vec(),
+            target,
         })
     }
     pub fn speech_stopped(
         &mut self,
         current_sink: &str,
-        current_volume: u8,
+        current_volume: &[VolumeChannel],
     ) -> Option<VolumeAction> {
         let (sink, original, ducked) = self.owned.take()?;
         if sink != current_sink || ducked != current_volume {
@@ -221,7 +234,8 @@ impl DuckingPolicy {
         }
         Some(VolumeAction {
             sink,
-            percent: original,
+            expected: ducked,
+            target: original,
         })
     }
     pub fn cancel(&mut self) {
@@ -321,46 +335,91 @@ mod tests {
         policy.manual_override();
         assert_eq!(policy.observe(&snapshot, 2, 9000), AudioAction::None);
     }
+    fn channels(values: &[u32]) -> Vec<VolumeChannel> {
+        values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| VolumeChannel {
+                name: format!("channel-{index}"),
+                value: *value,
+            })
+            .collect()
+    }
     #[test]
     fn conversational_event_mapping_preserves_unknown_events() {
         let mut policy = DuckingPolicy::default();
-        assert!(policy.on_event(0xff, "pods", 50).is_none());
+        let original = channels(&[32768, 24577]);
+        let ducked = channels(&[6553, 4915]);
+        assert!(policy.on_event(255, "pods", &original).is_none());
         assert!(!policy.is_ducking());
-        assert_eq!(policy.on_event(1, "pods", 50).unwrap().percent, 10);
+        assert_eq!(
+            policy.on_event(1, "pods", &original).unwrap().target,
+            ducked
+        );
         assert!(policy.is_ducking());
-        assert!(policy.on_event(2, "pods", 10).is_none());
-        assert_eq!(policy.on_event(6, "pods", 10).unwrap().percent, 50);
+        assert!(policy.on_event(2, "pods", &ducked).is_none());
+        assert_eq!(
+            policy.on_event(6, "pods", &ducked).unwrap().target,
+            original
+        );
         assert!(!policy.is_ducking());
-        policy.on_event(2, "pods", 50);
-        assert_eq!(policy.on_event(8, "pods", 10).unwrap().percent, 50);
-        policy.on_event(1, "pods", 50);
-        assert_eq!(policy.on_event(9, "pods", 10).unwrap().percent, 50);
+        for event in [8, 9] {
+            policy.on_event(2, "pods", &original);
+            assert_eq!(
+                policy.on_event(event, "pods", &ducked).unwrap().target,
+                original
+            );
+        }
     }
     #[test]
-    fn ducking_restores_only_its_own_volume_on_the_same_sink() {
+    fn ducking_restores_exact_balance_and_fractional_volume_only_on_the_same_sink() {
         let mut policy = DuckingPolicy::default();
-        assert_eq!(
-            policy.speech_started("pods", 50),
-            Some(VolumeAction {
-                sink: "pods".into(),
-                percent: 10
-            })
-        );
-        assert_eq!(policy.speech_started("pods", 10), None);
-        assert_eq!(
-            policy.speech_stopped("pods", 10),
-            Some(VolumeAction {
-                sink: "pods".into(),
-                percent: 50
-            })
-        );
-        policy.speech_started("pods", 50);
-        assert_eq!(policy.speech_stopped("speakers", 10), None);
-        policy.speech_started("pods", 50);
-        assert_eq!(policy.speech_stopped("pods", 25), None);
-        assert_eq!(policy.speech_started("pods", 101), None);
-        policy.speech_started("pods", 50);
+        let original = channels(&[32801, 21475]);
+        let action = policy.speech_started("pods", &original).unwrap();
+        assert_eq!(action.expected, original);
+        assert_eq!(action.target, channels(&[6560, 4295]));
+        let restoration = policy.speech_stopped("pods", &action.target).unwrap();
+        assert_eq!(restoration.expected, action.target);
+        assert_eq!(restoration.target, original);
+        policy.speech_started("pods", &original);
+        assert_eq!(policy.speech_stopped("speakers", &action.target), None);
+        policy.speech_started("pods", &original);
+        let mut manual = action.target.clone();
+        manual[0].value += 1;
+        assert_eq!(policy.speech_stopped("pods", &manual), None);
+        policy.speech_started("pods", &original);
+        let mut reordered = action.target.clone();
+        reordered.swap(0, 1);
+        assert_eq!(policy.speech_stopped("pods", &reordered), None);
+        policy.speech_started("pods", &original);
         policy.cancel();
-        assert_eq!(policy.speech_stopped("pods", 10), None);
+        assert_eq!(policy.speech_stopped("pods", &action.target), None);
+    }
+    #[test]
+    fn malformed_channel_snapshots_cannot_acquire_volume_ownership() {
+        for invalid in [
+            vec![],
+            channels(&[MAX_PULSE_VOLUME + 1]),
+            vec![VolumeChannel {
+                name: "".into(),
+                value: 1,
+            }],
+            vec![
+                VolumeChannel {
+                    name: "same".into(),
+                    value: 1
+                };
+                2
+            ],
+            channels(&[1; MAX_VOLUME_CHANNELS + 1]),
+        ] {
+            assert!(!valid_channel_volumes(&invalid));
+            assert!(DuckingPolicy::default()
+                .speech_started("pods", &invalid)
+                .is_none());
+        }
+        assert!(valid_channel_volumes(&channels(
+            &[MAX_PULSE_VOLUME; MAX_VOLUME_CHANNELS]
+        )));
     }
 }
