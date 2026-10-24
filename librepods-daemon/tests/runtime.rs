@@ -2138,6 +2138,24 @@ async fn wait_for_connections(shared: &Shared, count: usize) {
     }
 }
 
+async fn wait_for_peer(shared: &Shared, ordinal: usize) -> Arc<Peer> {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        if let Some(peer) = shared
+            .peers
+            .lock()
+            .expect("peers")
+            .iter()
+            .find(|peer| peer.ordinal == ordinal)
+            .cloned()
+        {
+            return peer;
+        }
+        assert!(Instant::now() < deadline, "peer {ordinal} was not created");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn config_without_live_echo_uses_one_write_and_one_fresh_readback_reopen() {
     for (change, id, value) in [
@@ -2380,13 +2398,7 @@ async fn cancelling_during_readback_handshake_closes_it_promptly_without_replay(
     bytes.push(b'\n');
     client.write_all(&bytes).await.expect("command");
     wait_for_connections(&shared, 2).await;
-    let readback_peer = shared
-        .peers
-        .lock()
-        .expect("peers")
-        .last()
-        .expect("readback peer")
-        .clone();
+    let readback_peer = wait_for_peer(&shared, 2).await;
     drop(client);
     let deadline = Instant::now() + Duration::from_millis(500);
     while !readback_peer.closed.load(Ordering::SeqCst) {
@@ -2431,13 +2443,7 @@ async fn readback_handshake_obeys_original_deadline_and_ignores_late_old_reports
         "reopen reset or expanded the command deadline"
     );
     wait_for_connections(&shared, 2).await;
-    let peer = shared
-        .peers
-        .lock()
-        .expect("peers")
-        .last()
-        .expect("readback peer")
-        .clone();
+    let peer = wait_for_peer(&shared, 2).await;
     let deadline = Instant::now() + Duration::from_millis(250);
     while !peer.closed.load(Ordering::SeqCst) {
         assert!(
