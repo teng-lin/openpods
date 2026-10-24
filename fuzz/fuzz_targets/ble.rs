@@ -12,8 +12,15 @@ fuzz_target!(|data: &[u8]| {
         let payload: [u8; 16] = data[16..32].try_into().expect("checked payload length");
         let address: [u8; 6] = data[32..38].try_into().expect("checked address length");
         let _ = librepods_core::device::ble_advert::verify_rpa(&key, &address);
-        if let Some(mut advert) = librepods_core::device::ble_advert::parse_advertisement(&data[38..]) {
-            librepods_core::device::ble_advert::decrypt_battery(&mut advert, &payload, &key, data[0] & 1 == 0);
+        if let Some(mut advert) =
+            librepods_core::device::ble_advert::parse_advertisement(&data[38..])
+        {
+            librepods_core::device::ble_advert::decrypt_battery(
+                &mut advert,
+                &payload,
+                &key,
+                data[0] & 1 == 0,
+            );
         }
     }
 });
