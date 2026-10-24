@@ -727,7 +727,12 @@ mod tests {
             ),
             Some(ErrorKind::Timeout)
         );
-        drop(listener);
+        // Parallel subprocess tests can briefly inherit a CLOEXEC listener before exec.
+        // Shut down the shared socket state before testing refusal; dropping one fd is insufficient.
+        assert_eq!(
+            unsafe { libc::shutdown(listener.as_raw_fd(), libc::SHUT_RDWR) },
+            0
+        );
         let (fd, result) = connecting_tcp_peer(address);
         let error = L2capLinux::complete_connect(
             fd,
