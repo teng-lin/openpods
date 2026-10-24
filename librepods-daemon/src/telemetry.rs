@@ -47,8 +47,14 @@ impl Telemetry {
     }
 
     pub fn pause_for_connection(&self) -> Result<(), DaemonError> {
+        self.pause_for_connection_with_timeout(Duration::from_millis(500))
+    }
+
+    pub fn pause_for_connection_with_timeout(&self, timeout: Duration) -> Result<(), DaemonError> {
         match &self.coordinator {
-            Some(coordinator) => coordinator.pause_for_connection(Duration::from_millis(500)),
+            Some(coordinator) => {
+                coordinator.pause_for_connection(timeout.min(Duration::from_millis(500)))
+            }
             None => Ok(()),
         }
     }
