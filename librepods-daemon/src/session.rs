@@ -23,6 +23,7 @@ use librepods_core::{
     transport::TransportError,
 };
 use std::collections::VecDeque;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc, Mutex,
@@ -36,11 +37,41 @@ const READ_SLICE: Duration = Duration::from_millis(40);
 const AVAILABILITY_POLL_MS: u64 = 1000;
 
 struct Envelope {
+    peer: Option<Arc<OwnedFd>>,
     target_address: Option<String>,
     request: Request,
     deadline: Instant,
     reply: oneshot::Sender<Response>,
     dispatched: Arc<AtomicBool>,
+}
+/// Kernel liveness closes the scheduling gap before Tokio observes peer EOF.
+/// A read half-close cancels requests, matching the native pending-reader contract.
+fn peer_connected(peer: &OwnedFd) -> bool {
+    let closed = libc::POLLRDHUP | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
+    let mut descriptor = libc::pollfd {
+        fd: peer.as_raw_fd(),
+        events: libc::POLLRDHUP,
+        revents: 0,
+    };
+    // SAFETY: descriptor is valid for this call and its OwnedFd cannot be reused.
+    // A zero timeout never waits or consumes any unread/pipelined bytes.
+    let result = unsafe { libc::poll(&mut descriptor, 1, 0) };
+    result >= 0 && descriptor.revents & closed == 0
+}
+impl Envelope {
+    fn cancel_before_dispatch(self) {
+        let _ = self.reply.send(Response::failed(
+            self.request.id,
+            DaemonError::new(
+                ErrorCode::Cancelled,
+                "IPC peer",
+                "request peer is no longer available before dispatch",
+            ),
+        ));
+    }
+    fn client_cancelled(&self) -> bool {
+        self.reply.is_closed() || self.peer.as_ref().is_some_and(|peer| !peer_connected(peer))
+    }
 }
 struct KeyExchange {
     envelope: Envelope,
@@ -69,8 +100,25 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
-    pub async fn request(&self, mut request: Request) -> Response {
+    pub async fn request(&self, request: Request) -> Response {
+        self.request_inner(request, None).await
+    }
+    /// Attach the owned server-side native peer descriptor for dispatch-time liveness.
+    pub async fn request_from_peer(&self, request: Request, peer: Arc<OwnedFd>) -> Response {
+        self.request_inner(request, Some(peer)).await
+    }
+    async fn request_inner(&self, mut request: Request, peer: Option<Arc<OwnedFd>>) -> Response {
         let id = request.id;
+        if peer.as_ref().is_some_and(|peer| !peer_connected(peer)) {
+            return Response::failed(
+                id,
+                DaemonError::new(
+                    ErrorCode::Cancelled,
+                    "IPC peer",
+                    "request peer closed before dispatch",
+                ),
+            );
+        }
         let target_address = if let Operation::ForDevice { address, operation } = request.operation
         {
             request.operation = *operation;
@@ -128,6 +176,16 @@ impl SessionHandle {
                 (status.session_generation, status.device.address.clone())
             };
             let audio_address = address.clone();
+            if peer.as_ref().is_some_and(|peer| !peer_connected(peer)) {
+                return Response::failed(
+                    id,
+                    DaemonError::new(
+                        ErrorCode::Cancelled,
+                        "IPC peer",
+                        "request peer closed before audio dispatch",
+                    ),
+                );
+            }
             if !matches!(request.operation, Operation::AudioStatus) {
                 self.manual_overrides
                     .send_modify(|revision| *revision = revision.saturating_add(1));
@@ -160,6 +218,7 @@ impl SessionHandle {
         let dispatched = Arc::new(AtomicBool::new(false));
         let (reply, rx) = oneshot::channel();
         match self.sender.try_send(Envelope {
+            peer,
             target_address,
             request,
             deadline,
@@ -529,7 +588,7 @@ impl Worker {
             if self
                 .active
                 .as_ref()
-                .is_none_or(|active| active.envelope.reply.is_closed())
+                .is_none_or(|active| active.envelope.client_cancelled())
             {
                 return Err(DaemonError::new(
                     ErrorCode::Cancelled,
@@ -754,7 +813,7 @@ impl Worker {
                 CommandAction::Send(packet) => {
                     // The pure action may have been produced before cancellation, shutdown
                     // or scheduler delay. Revalidate at the actual write boundary.
-                    if self.stopped.load(Ordering::SeqCst) || active.envelope.reply.is_closed() {
+                    if self.stopped.load(Ordering::SeqCst) || active.envelope.client_cancelled() {
                         action = active.pending.cancel();
                         continue;
                     }
@@ -812,7 +871,7 @@ impl Worker {
                     };
                     action = match result {
                         Ok(()) => {
-                            if resumed.envelope.reply.is_closed()
+                            if resumed.envelope.client_cancelled()
                                 || self.stopped.load(Ordering::SeqCst)
                                 || self.backend.sleeping()
                             {
@@ -857,6 +916,10 @@ impl Worker {
         }
     }
     fn enqueue(&mut self, envelope: Envelope) {
+        if envelope.client_cancelled() {
+            envelope.cancel_before_dispatch();
+            return;
+        }
         if let Operation::Change(change) = &envelope.request.operation {
             if let Some(index)=self.queue.iter().position(|other|matches!(&other.request.operation,Operation::Change(other) if other.id()==change.id())) {
                 if let Some(old)=self.queue.remove(index){let _=old.reply.send(Response::failed(old.request.id,DaemonError::new(ErrorCode::Superseded,"queue","replaced by a newer desired value")));}
@@ -878,7 +941,8 @@ impl Worker {
         let Some(envelope) = self.queue.pop_front() else {
             return;
         };
-        if envelope.reply.is_closed() {
+        if envelope.client_cancelled() {
+            envelope.cancel_before_dispatch();
             return;
         }
         if Instant::now() >= envelope.deadline {
@@ -968,7 +1032,7 @@ impl Worker {
                     )
                 } else {
                     let remaining = envelope.deadline.saturating_duration_since(Instant::now());
-                    if envelope.reply.is_closed() || self.stopped.load(Ordering::SeqCst) {
+                    if envelope.client_cancelled() || self.stopped.load(Ordering::SeqCst) {
                         return;
                     }
                     if remaining.is_zero() {
@@ -1081,7 +1145,7 @@ impl Worker {
     }
     fn expire_key_exchange(&mut self) {
         if self.key_exchange.as_ref().is_some_and(|exchange| {
-            exchange.envelope.reply.is_closed() || Instant::now() >= exchange.envelope.deadline
+            exchange.envelope.client_cancelled() || Instant::now() >= exchange.envelope.deadline
         }) {
             if let Some(exchange) = self.key_exchange.take() {
                 let _ = exchange.envelope.reply.send(Response::failed(
@@ -1154,7 +1218,7 @@ impl Worker {
                 }
             }
             if let Some(mut active) = self.active.take() {
-                let action = if active.envelope.reply.is_closed() {
+                let action = if active.envelope.client_cancelled() {
                     active.pending.cancel()
                 } else {
                     active.pending.tick(self.generation, self.now())
@@ -1167,7 +1231,7 @@ impl Worker {
                     Ok(size) => match parser::parse(&bytes[..size]) {
                         Ok(packet) => {
                             if let Some(mut exchange) = self.key_exchange.take() {
-                                if !exchange.envelope.reply.is_closed()
+                                if !exchange.envelope.client_cancelled()
                                     && Instant::now() < exchange.envelope.deadline
                                     && exchange.keys.observe(&packet)
                                 {
@@ -1315,8 +1379,74 @@ mod dispatch_tests {
         }
     }
     #[test]
+    fn readable_open_peer_remains_live_and_probe_does_not_consume_pipelined_bytes() {
+        use std::{
+            io::{Read, Write},
+            os::fd::AsFd,
+        };
+        let (mut server, mut client) = std::os::unix::net::UnixStream::pair().unwrap();
+        let peer = server.as_fd().try_clone_to_owned().unwrap();
+        client.write_all(b"next request\n").unwrap();
+        assert!(peer_connected(&peer));
+        let mut buffer = [0; 13];
+        server.read_exact(&mut buffer).unwrap();
+        assert_eq!(&buffer, b"next request\n");
+        // SAFETY: this call only reads descriptor flags from the live owned fd.
+        assert_ne!(
+            unsafe { libc::fcntl(peer.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        assert!(!peer_connected(&peer));
+    }
+    #[cfg(feature = "ble")]
+    #[test]
+    fn unscheduled_eof_cancels_queued_key_request_even_while_reply_receiver_is_open() {
+        use std::{io::Write, os::fd::AsFd};
+        let transport = Arc::new(Spy(AtomicUsize::new(0)));
+        let mut owner = owner(transport.clone());
+        owner.status.connected = true;
+        let private = tempfile::tempdir().unwrap();
+        let root = private.path();
+        owner.paths = Some(crate::storage::Paths {
+            runtime: root.join("runtime"),
+            state: root.join("state"),
+            config: root.join("config"),
+            legacy_state: root.join("legacy-state"),
+            legacy_socket: root.join("legacy-socket"),
+        });
+        let (server, mut client) = std::os::unix::net::UnixStream::pair().unwrap();
+        let peer = Arc::new(server.as_fd().try_clone_to_owned().unwrap());
+        let (reply, mut response) = oneshot::channel();
+        let dispatched = Arc::new(AtomicBool::new(false));
+        owner.enqueue(Envelope {
+            peer: Some(peer),
+            target_address: None,
+            request: Request {
+                version: 1,
+                id: 1,
+                timeout_ms: 1000,
+                operation: Operation::FetchKeys,
+            },
+            deadline: Instant::now() + Duration::from_secs(1),
+            reply,
+            dispatched: dispatched.clone(),
+        });
+        assert_eq!(owner.queue.len(), 1);
+        client.write_all(b"unread pipeline\n").unwrap();
+        drop(client);
+        owner.dispatch();
+        assert_eq!(
+            response.try_recv().unwrap().error.unwrap().code,
+            ErrorCode::Cancelled
+        );
+        assert_eq!(transport.0.load(Ordering::SeqCst), 0);
+        assert!(!dispatched.load(Ordering::SeqCst));
+        assert!(owner.key_exchange.is_none());
+    }
+    #[test]
     fn expired_cancelled_or_stopping_requests_cannot_write_after_a_pure_send_action() {
-        for reason in 0..4 {
+        for reason in 0..6 {
             let transport = Arc::new(Spy(AtomicUsize::new(0)));
             let mut owner = owner(transport.clone());
             if reason == 3 {
@@ -1334,8 +1464,24 @@ mod dispatch_tests {
             if reason == 2 {
                 owner.stopped.store(true, Ordering::SeqCst);
             }
+            let (peer, _kept_client) = if reason >= 4 {
+                use std::{io::Write, os::fd::AsFd};
+                let (server, mut client) = std::os::unix::net::UnixStream::pair().unwrap();
+                let peer = Arc::new(server.as_fd().try_clone_to_owned().unwrap());
+                if reason == 5 {
+                    client.write_all(b"queued next request\n").unwrap();
+                    client.shutdown(std::net::Shutdown::Write).unwrap();
+                    (Some(peer), Some(client))
+                } else {
+                    drop(client);
+                    (Some(peer), None)
+                }
+            } else {
+                (None, None)
+            };
             let dispatched = Arc::new(AtomicBool::new(false));
             let envelope = Envelope {
+                peer,
                 target_address: None,
                 request: Request {
                     version: 1,

@@ -14,6 +14,7 @@ use crate::{
     DaemonError, ErrorCode,
 };
 use std::future::Future;
+use std::os::fd::AsFd;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -221,6 +222,14 @@ async fn client_connection(
     _paths: Paths,
     _config: Config,
 ) -> Result<(), DaemonError> {
+    // Keep an owned CLOEXEC duplicate for synchronous dispatch-time peer checks.
+    // Tokio EOF handling still drains input; the guard never reads pipelined data.
+    let peer = Arc::new(
+        stream
+            .as_fd()
+            .try_clone_to_owned()
+            .map_err(|error| DaemonError::io("duplicate IPC peer", error))?,
+    );
     let (mut reader, mut writer) = stream.into_split();
     let mut buffered = Vec::new();
     loop {
@@ -291,7 +300,7 @@ async fn client_connection(
                 }
             }
         }
-        let pending = handle.request(request);
+        let pending = handle.request_from_peer(request, peer.clone());
         tokio::pin!(pending);
         let response = loop {
             let mut input = [0u8; 1024];
