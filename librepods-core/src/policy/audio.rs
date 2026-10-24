@@ -44,6 +44,12 @@ pub struct AudioSnapshot {
     pub pinned_streams: bool,
 }
 impl AudioSnapshot {
+    pub fn needs_playback_recovery(&self) -> bool {
+        matches!(
+            self.health(),
+            AudioHealth::ProfileOff | AudioHealth::MissingSink | AudioHealth::NoPlaybackProfile
+        )
+    }
     pub fn health(&self) -> AudioHealth {
         if !self.server_available {
             AudioHealth::ServerUnavailable
@@ -121,10 +127,7 @@ impl AudioRecoveryPolicy {
             self.pending = None;
             return AudioAction::None;
         }
-        if !matches!(
-            snapshot.health(),
-            AudioHealth::ProfileOff | AudioHealth::MissingSink | AudioHealth::NoPlaybackProfile
-        ) {
+        if !snapshot.needs_playback_recovery() {
             self.pending = None;
             return AudioAction::None;
         }

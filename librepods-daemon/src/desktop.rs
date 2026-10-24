@@ -512,6 +512,22 @@ impl Coordinator {
             self.recovery
                 .observe(&facts, snapshot.session_generation, now)
         {
+            // Capture may start during the settlement window; refresh immediately before repair.
+            let current = match adapter.audio_snapshot(&self.address).await {
+                Ok(current) => current,
+                Err(error) => {
+                    self.last_error = Some(format!("audio recovery check: {}", error.code()));
+                    return;
+                }
+            };
+            let current_facts = policy_audio(&current);
+            self.audio = Some(current);
+            if current_facts.capture != CaptureState::Idle
+                || !current_facts.needs_playback_recovery()
+                || !current_facts.device_connected
+            {
+                return;
+            }
             match adapter
                 .audio_action(&self.address, AudioAction::SetProfile { profile })
                 .await
@@ -1455,6 +1471,22 @@ mod tests {
             .unwrap()
             .iter()
             .any(|effect| effect == "Pause"));
+    }
+    #[tokio::test]
+    async fn capture_started_during_settlement_cancels_profile_repair() {
+        let fake = Fake::default();
+        let mut c = Coordinator::new(Config {
+            audio_recovery: true,
+            ..Config::default()
+        });
+        let s = snapshot(ConfigEar::Off);
+        c.step(&s, 0, &fake).await;
+        fake.audio.lock().unwrap().profile = Some("off".into());
+        c.step(&s, 1000, &fake).await;
+        fake.audio.lock().unwrap().capture_active = true;
+        c.step(&s, 1500, &fake).await;
+        assert!(fake.effects.lock().unwrap().is_empty());
+        assert!(c.audio.as_ref().unwrap().capture_active);
     }
     #[tokio::test]
     async fn shutdown_cancels_stalled_observation_without_waiting_for_deadline() {
