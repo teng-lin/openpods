@@ -64,19 +64,45 @@ def checked(run, *args):
         raise ValueError(f"systemctl {' '.join(args)} failed: {result.stderr.strip()}")
 
 
+def restore_failed_switch(snapshot, run):
+    """Restore only when the replacement is proved stopped; report every failure."""
+    errors = []
+    replacement_stopped = False
+    try:
+        checked(run, "stop", NEW_UNIT)
+        replacement_stopped = True
+    except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+        errors.append(f"replacement cleanup: {error}")
+        try:
+            state = run("is-active", NEW_UNIT)
+            replacement_stopped = (state.returncode == 3 and
+                                   state.stdout.strip() in {"inactive", "failed"})
+            if not replacement_stopped:
+                errors.append("replacement inactivity could not be verified")
+        except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+            errors.append(f"replacement activity check: {error}")
+    if snapshot["old"]["active"]:
+        if replacement_stopped:
+            try:
+                checked(run, "start", snapshot["old"]["unit"])
+            except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+                errors.append(f"previous service restoration: {error}")
+        else:
+            errors.append("previous service was not restored because the replacement may still own the connection")
+    return errors
+
+
 def switch(snapshot, run=systemctl):
     if snapshot["new"]["active"]:
         raise ValueError("replacement was already active; resolve connection ownership first")
-    checked(run, "stop", snapshot["old"]["unit"])
-    checked(run, "daemon-reload")
     try:
+        checked(run, "stop", snapshot["old"]["unit"])
+        checked(run, "daemon-reload")
         checked(run, "start", NEW_UNIT)
-    except ValueError:
-        # A failed new start must not leave a previously active desktop service off.
-        checked(run, "stop", NEW_UNIT)
-        if snapshot["old"]["active"]:
-            checked(run, "start", snapshot["old"]["unit"])
-        raise
+    except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+        failures = restore_failed_switch(snapshot, run)
+        detail = f"; rollback: {'; '.join(failures)}" if failures else "; previous service activity restored"
+        raise ValueError(f"switch failed: {error}{detail}") from error
 
 
 def rollback(snapshot, run=systemctl):
