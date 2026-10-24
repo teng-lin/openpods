@@ -263,3 +263,71 @@ impl librepods_daemon::backend::Backend for NoDevice {
         ))
     }
 }
+
+#[test]
+fn inherited_lock_child_probe() {
+    use std::io::Read;
+    let Some(fd) = std::env::var_os("LIBREPODS_INHERITED_LOCK_FD") else {
+        return;
+    };
+    let path = std::path::PathBuf::from("/proc/self/fd").join(fd);
+    assert!(path
+        .metadata()
+        .expect("inherited lock descriptor")
+        .is_file());
+    std::io::stdin()
+        .read_to_end(&mut Vec::new())
+        .expect("parent lifetime pipe");
+}
+
+#[test]
+fn owner_drop_releases_lock_even_while_an_exec_child_inherits_the_open_file_description() {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let directory = tempfile::tempdir().expect("test directory");
+    let paths = paths(directory.path());
+    let guard = OwnerGuard::acquire(&paths, "first").expect("owner");
+    let lock_path = paths.runtime.join("owner.lock");
+    let fd = fs::read_dir("/proc/self/fd")
+        .expect("descriptor directory")
+        .filter_map(Result::ok)
+        .find(|entry| fs::read_link(entry.path()).is_ok_and(|path| path == lock_path))
+        .expect("owner lock descriptor")
+        .file_name()
+        .to_str()
+        .expect("numeric fd")
+        .parse::<i32>()
+        .expect("descriptor number");
+    // Safety: fd was found in this process; F_DUPFD creates a new owned descriptor
+    // without CLOEXEC. No Rust code or allocation runs in a post-fork child hook.
+    let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD, 3) };
+    assert!(duplicate >= 0, "duplicate lock descriptor");
+    // Safety: F_DUPFD returned a new descriptor transferred to this OwnedFd.
+    let duplicate = unsafe { OwnedFd::from_raw_fd(duplicate) };
+    let mut child = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args(["--exact", "inherited_lock_child_probe", "--nocapture"])
+        .env(
+            "LIBREPODS_INHERITED_LOCK_FD",
+            duplicate.as_raw_fd().to_string(),
+        )
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("child holding inherited OFD");
+    drop(duplicate);
+    drop(guard);
+    let replacement = OwnerGuard::acquire(&paths, "replacement");
+    drop(child.stdin.take());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while child.try_wait().expect("child status").is_none() {
+        if std::time::Instant::now() >= deadline {
+            child.kill().expect("terminate child");
+            child.wait().expect("reap child");
+            panic!("inherited descriptor child did not stop");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        replacement.is_ok(),
+        "explicit owner drop left flock held by an inherited descriptor"
+    );
+}

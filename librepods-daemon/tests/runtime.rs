@@ -1588,3 +1588,49 @@ async fn foreign_legacy_publication_is_preserved_and_degradation_does_not_break_
         foreign
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_one_byte_control_id_remains_observable_without_exceeding_native_frame_budget() {
+    let harness = Harness::start(Arc::new(Shared::default()), Config::default()).await;
+    harness.ready().await;
+    let peer = harness
+        .shared
+        .peers
+        .lock()
+        .expect("peers")
+        .last()
+        .expect("peer")
+        .clone();
+    for id in 0..=u8::MAX {
+        peer.push(ControlCommand::create(id, &[2, 0, 0, 0]).to_vec());
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !peer.incoming.lock().expect("queue").is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "device notification queue did not drain"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let response = runtime::request(
+        &harness.paths,
+        &Request {
+            version: 1,
+            id: 370,
+            timeout_ms: 1000,
+            operation: Operation::Status,
+        },
+    )
+    .await
+    .expect("finite control-ID map must fit the native IPC frame budget");
+    assert!(
+        response.error.is_none(),
+        "status failed after valid control notifications"
+    );
+    let status: Snapshot =
+        serde_json::from_value(response.result.expect("snapshot")).expect("status schema");
+    assert_eq!(status.device.reported_controls.len(), 256);
+    assert_eq!(status.device.reported_controls[&0xFE], [2, 0, 0, 0]);
+    harness.stop().await;
+}
