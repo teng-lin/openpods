@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #![cfg(target_os = "linux")]
 use librepods_daemon::{
-    ipc::{Response, MAX_FRAME},
-    runtime::{read_frame, write_response},
+    ipc::{Response, MAX_FRAME, MAX_RESPONSE_FRAME},
+    runtime::{read_frame, read_response_frame, write_response},
     ErrorCode,
 };
 use tokio::io::AsyncWriteExt;
@@ -50,7 +50,7 @@ async fn frame_limit_is_exact_and_partial_eof_is_distinct_from_clean_close() {
 #[tokio::test]
 async fn response_size_and_nonreading_peer_have_bounded_distinct_errors() {
     let (mut writer, _reader) = tokio::io::duplex(1);
-    let oversized = Response::ok(1, "x".repeat(MAX_FRAME));
+    let oversized = Response::ok(1, "x".repeat(MAX_RESPONSE_FRAME));
     assert_eq!(
         write_response(&mut writer, &oversized)
             .await
@@ -72,4 +72,33 @@ async fn response_size_and_nonreading_peer_have_bounded_distinct_errors() {
     assert!(write_response(&mut writer, &Response::ok(3, "small"))
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn response_frames_accept_exact_response_bound_and_reject_one_extra_byte() {
+    for length in [MAX_RESPONSE_FRAME, MAX_RESPONSE_FRAME + 1] {
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+        let sent = tokio::spawn(async move {
+            let mut bytes = vec![b'x'; length];
+            bytes.push(b'\n');
+            let _ = writer.write_all(&bytes).await;
+        });
+        let result = read_response_frame(&mut reader).await;
+        drop(reader);
+        sent.await.expect("writer task");
+        if length == MAX_RESPONSE_FRAME {
+            assert_eq!(
+                result
+                    .expect("exact response limit")
+                    .expect("response")
+                    .len(),
+                length
+            );
+        } else {
+            assert_eq!(
+                result.expect_err("oversized response").code,
+                ErrorCode::InvalidInput
+            );
+        }
+    }
 }

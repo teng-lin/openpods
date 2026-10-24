@@ -1632,5 +1632,49 @@ async fn every_one_byte_control_id_remains_observable_without_exceeding_native_f
         serde_json::from_value(response.result.expect("snapshot")).expect("status schema");
     assert_eq!(status.device.reported_controls.len(), 256);
     assert_eq!(status.device.reported_controls[&0xFE], [2, 0, 0, 0]);
+    let native = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/native-fixtures");
+    std::fs::create_dir_all(&native).expect("native fixture directory");
+    std::fs::write(
+        native.join("full-controls.json"),
+        serde_json::to_vec_pretty(&status).expect("large native JSON"),
+    )
+    .expect("large native fixture");
+    let mut watcher = UnixStream::connect(harness.paths.socket())
+        .await
+        .expect("watcher");
+    let mut watch_request = serde_json::to_vec(&Request {
+        version: 1,
+        id: 371,
+        timeout_ms: 1000,
+        operation: Operation::Watch,
+    })
+    .expect("watch JSON");
+    watch_request.push(b'\n');
+    watcher
+        .write_all(&watch_request)
+        .await
+        .expect("watch request");
+    let initial: Response = serde_json::from_slice(
+        &runtime::read_response_frame(&mut watcher)
+            .await
+            .expect("large initial watch frame")
+            .expect("watch snapshot"),
+    )
+    .expect("response");
+    assert_eq!(initial.id, 371);
+    let initial: Snapshot =
+        serde_json::from_value(initial.result.expect("snapshot")).expect("snapshot schema");
+    assert_eq!(initial.device.reported_controls.len(), 256);
+    peer.push(ControlCommand::create(0xFE, &[1, 0, 0, 0]).to_vec());
+    let next: Response = serde_json::from_slice(
+        &runtime::read_response_frame(&mut watcher)
+            .await
+            .expect("large updated watch frame")
+            .expect("watch update"),
+    )
+    .expect("response");
+    let next: Snapshot =
+        serde_json::from_value(next.result.expect("snapshot")).expect("snapshot schema");
+    assert_eq!(next.device.reported_controls[&0xFE], [1, 0, 0, 0]);
     harness.stop().await;
 }

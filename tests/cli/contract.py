@@ -107,7 +107,7 @@ class CliContract(unittest.TestCase):
 
     def test_watch_consumes_actual_serializer_snapshots(self):
         snapshots = [json.loads((FIXTURES / name).read_text())
-                     for name in ["pro2.json", "disconnected.json"]]
+                     for name in ["pro2.json", "full-controls.json", "disconnected.json"]]
         def frames(request):
             return b"".join(json.dumps({"version": 1, "id": request["id"],
                 "result": snapshot, "error": None}).encode() + b"\n"
@@ -117,8 +117,17 @@ class CliContract(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([json.loads(line) for line in result.stdout.splitlines()], snapshots)
         self.assertTrue(snapshots[0]["connected"])
-        self.assertFalse(snapshots[1]["connected"])
-        self.assertTrue(snapshots[1]["device"]["observations"]["battery.left"]["stale"])
+        self.assertFalse(snapshots[-1]["connected"])
+        self.assertTrue(snapshots[-1]["device"]["observations"]["battery.left"]["stale"])
+
+    def test_status_consumes_complete_snapshot_larger_than_request_frame_limit(self):
+        snapshot = json.loads((FIXTURES / "full-controls.json").read_text())
+        self.assertGreater(len(json.dumps(snapshot)), 16384)
+        result, _ = self.exchange(["status"], lambda req: {
+            "version": 1, "id": req["id"], "result": snapshot, "error": None})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), snapshot)
+        self.assertEqual(len(snapshot["device"]["reported_controls"]), 256)
 
     def test_terminal_watch_marks_retained_battery_as_stale_after_disconnect(self):
         snapshot = json.loads((FIXTURES / "disconnected.json").read_text())
