@@ -15,7 +15,7 @@ use librepods_daemon::runtime;
 use librepods_daemon::snapshot::Snapshot;
 use librepods_daemon::storage::Paths;
 use librepods_daemon::{DaemonError, ErrorCode};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -28,9 +28,14 @@ use tokio::sync::oneshot;
 const ADDRESS: &str = "00:11:22:33:44:55";
 
 fn metadata() -> Vec<u8> {
+    metadata_for("Example AirPods")
+}
+
+fn metadata_for(name: &str) -> Vec<u8> {
     let mut bytes = packets::METADATA_PREFIX.to_vec();
     bytes.extend_from_slice(&[0; 6]);
-    bytes.extend_from_slice(b"Example AirPods\0A3048\0Apple Inc.\0");
+    bytes.extend_from_slice(name.as_bytes());
+    bytes.extend_from_slice(b"\0A3048\0Apple Inc.\0");
     // Real firmware appends additional fields and opaque extension bytes.
     bytes.extend_from_slice(b"ExampleFirmware\0");
     bytes.extend_from_slice(&[1, 2, 3, 0x80]);
@@ -54,6 +59,15 @@ struct Shared {
     sleeping: AtomicBool,
     absent: AtomicBool,
     lose_ack: AtomicBool,
+    suppress_config_echo: AtomicBool,
+    withhold_readback: AtomicBool,
+    hold_readback_metadata: AtomicBool,
+    hold_readback_handshake: AtomicBool,
+    fail_mutation: AtomicBool,
+    fail_readback_connect: AtomicBool,
+    readback_configs_delivered: AtomicUsize,
+    controls: Mutex<BTreeMap<u8, [u8; 4]>>,
+    name: Mutex<Option<String>>,
     no_handshake: AtomicBool,
     slow_audio: AtomicBool,
     hold_audio: AtomicBool,
@@ -72,6 +86,7 @@ struct Shared {
 
 struct Peer {
     shared: Arc<Shared>,
+    ordinal: usize,
     incoming: Mutex<VecDeque<Vec<u8>>>,
     available: Condvar,
     closed: AtomicBool,
@@ -90,7 +105,9 @@ impl SessionTransport for Peer {
             return Err(TransportError::ConnectionClosed);
         }
         if bytes == packets::HANDSHAKE {
-            if !self.shared.no_handshake.load(Ordering::SeqCst) {
+            if !self.shared.no_handshake.load(Ordering::SeqCst)
+                && !(self.ordinal > 1 && self.shared.hold_readback_handshake.load(Ordering::SeqCst))
+            {
                 self.push(packets::HANDSHAKE_ACK_PREFIX.to_vec());
             }
         } else if bytes == packets::REQUEST_MAGIC_CLOUD_KEYS {
@@ -105,7 +122,17 @@ impl SessionTransport for Peer {
         } else if bytes == packets::SET_SPECIFIC_FEATURES {
             self.push(packets::FEATURES_ACK_PREFIX.to_vec());
         } else if bytes == packets::REQUEST_NOTIFICATIONS {
-            self.push(metadata());
+            let reading_back = self.ordinal > 1;
+            let name = self
+                .shared
+                .name
+                .lock()
+                .expect("name")
+                .clone()
+                .unwrap_or_else(|| "Example AirPods".into());
+            if !reading_back || !self.shared.hold_readback_metadata.load(Ordering::SeqCst) {
+                self.push(metadata_for(&name));
+            }
             self.push(battery_left());
             let mode = self
                 .shared
@@ -114,18 +141,45 @@ impl SessionTransport for Peer {
                 .expect("mode")
                 .unwrap_or(NoiseControlMode::NoiseCancellation);
             self.push(packets::build_noise_control(mode).to_vec());
-            self.push(ControlCommand::enabled(0x28).to_vec());
-            self.push(ControlCommand::disabled(0x1B).to_vec());
+            let mut controls = self.shared.controls.lock().expect("persistent controls");
+            controls.entry(0x28).or_insert([1, 0, 0, 0]);
+            controls.entry(0x1B).or_insert([2, 0, 0, 0]);
+            controls.entry(0x2E).or_insert([50, 0, 0, 0]);
+            if !reading_back || !self.shared.withhold_readback.load(Ordering::SeqCst) {
+                for (&id, data) in controls.iter().filter(|(id, _)| **id != 0x0D) {
+                    self.push(ControlCommand::create(id, data).to_vec());
+                }
+            }
         } else {
             self.shared
                 .changes
                 .lock()
                 .expect("changes")
                 .push(bytes.to_vec());
+            if self.shared.fail_mutation.load(Ordering::SeqCst) {
+                return Err(TransportError::new("injected mutation write failure"));
+            }
+            let id = ControlCommand::parse_id(bytes);
+            if let (Some(id), Some(data)) = (id, ControlCommand::parse_data(bytes)) {
+                self.shared
+                    .controls
+                    .lock()
+                    .expect("persistent controls")
+                    .insert(id, data);
+            }
+            if bytes.starts_with(&[4, 0, 4, 0, 0x1A, 0, 1]) && bytes.len() >= 9 {
+                let name = std::str::from_utf8(&bytes[9..])
+                    .expect("synthetic rename UTF-8")
+                    .to_owned();
+                *self.shared.name.lock().expect("name") = Some(name);
+            }
             if let Ok(parser::ParsedPacket::NoiseControl(mode)) = parser::parse(bytes) {
                 *self.shared.mode.lock().expect("mode") = Some(mode);
             }
-            if !self.shared.lose_ack.load(Ordering::SeqCst) {
+            if !self.shared.lose_ack.load(Ordering::SeqCst)
+                && !(matches!(id, Some(0x28 | 0x1B | 0x2E))
+                    && self.shared.suppress_config_echo.load(Ordering::SeqCst))
+            {
                 self.push(bytes.to_vec());
             }
         }
@@ -146,6 +200,12 @@ impl SessionTransport for Peer {
         let packet = queue.pop_front().ok_or(TransportError::Timeout)?;
         if packet.len() > bytes.len() {
             return Err(TransportError::new("emulated truncated datagram"));
+        }
+        if self.ordinal > 1 && matches!(ControlCommand::parse_id(&packet), Some(0x28 | 0x1B | 0x2E))
+        {
+            self.shared
+                .readback_configs_delivered
+                .fetch_add(1, Ordering::SeqCst);
         }
         bytes[..packet.len()].copy_from_slice(&packet);
         Ok(packet.len())
@@ -181,9 +241,17 @@ impl Backend for EmulatedBackend {
     }
 
     fn connect(&self, _: &Endpoint, _: Duration) -> Result<Arc<dyn SessionTransport>, DaemonError> {
-        self.0.connections.fetch_add(1, Ordering::SeqCst);
+        let ordinal = self.0.connections.fetch_add(1, Ordering::SeqCst) + 1;
+        if ordinal > 1 && self.0.fail_readback_connect.load(Ordering::SeqCst) {
+            return Err(DaemonError::new(
+                ErrorCode::ConnectFailed,
+                "emulator",
+                "injected readback connection failure",
+            ));
+        }
         let peer = Arc::new(Peer {
             shared: self.0.clone(),
+            ordinal,
             incoming: Mutex::new(VecDeque::new()),
             available: Condvar::new(),
             closed: AtomicBool::new(false),
