@@ -79,10 +79,14 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libudev-dev
       - run: cargo install cargo-llvm-cov --version 0.9.1 --locked
       - name: Measure workspace and CLI process paths; enforce release coverage
         run: scripts/coverage.sh target/coverage.json
+      - name: Enforce changed critical production coverage against the port baseline
+        run: python3 scripts/coverage-audit.py --lcov target/coverage.lcov --test-spans target/coverage-test-spans.json --output target/coverage-audit.json --critical-min 90
       - name: Preserve coverage evidence even when the gate fails
         if: always()
         uses: actions/upload-artifact@v4
@@ -92,6 +96,7 @@ jobs:
             target/coverage.json
             target/coverage.lcov
             target/coverage-test-spans.json
+            target/coverage-audit.json
 
   dependencies:
     runs-on: ubuntu-latest

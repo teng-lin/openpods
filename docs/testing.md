@@ -108,3 +108,21 @@ inline unit-test functions, and therefore must not serve as release evidence.
 The JSON report, LCOV counters and parsed-span map are all needed to reproduce
 the final production-only calculation. The standalone analyzer has its own
 locked dependencies and does not modify the application workspace manifest.
+
+## Changed critical production gate
+
+After the full measurement, run:
+
+```bash
+python3 scripts/coverage-audit.py --lcov target/coverage.lcov \
+  --test-spans target/coverage-test-spans.json \
+  --output target/coverage-audit.json --critical-min 90
+```
+
+This strict gate compares current instrumented production lines with port baseline
+`399e7759053d4b0dfe1d37813b0ca9d0bde7af5c`. It excludes the same parsed test-only
+syntax and retains uncovered changed production lines. Its conservative critical
+scopes include protocol/policy/state, the entire daemon, native Linux adapters and
+the CLI, with rationales and per-file uncovered line numbers in the JSON artifact.
+The aggregate target is 90%; individual files can remain below it. CI fetches the
+baseline history and enforces this separately from the core/service gates.
