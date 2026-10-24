@@ -9,6 +9,8 @@ use librepods_core::protocol::settings::SettingChange;
 use serde::{Deserialize, Serialize};
 
 pub const MAX_FRAME: usize = 16 * 1024;
+/// Bounded snapshots retain all 256 possible control IDs and their provenance.
+pub const MAX_RESPONSE_FRAME: usize = 128 * 1024;
 pub const PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

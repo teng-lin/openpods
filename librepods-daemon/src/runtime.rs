@@ -329,6 +329,19 @@ async fn read_buffered_frame(
 pub async fn read_frame(
     reader: &mut (impl AsyncRead + Unpin),
 ) -> Result<Option<Vec<u8>>, DaemonError> {
+    read_frame_limit(reader, ipc::MAX_FRAME).await
+}
+
+pub async fn read_response_frame(
+    reader: &mut (impl AsyncRead + Unpin),
+) -> Result<Option<Vec<u8>>, DaemonError> {
+    read_frame_limit(reader, ipc::MAX_RESPONSE_FRAME).await
+}
+
+async fn read_frame_limit(
+    reader: &mut (impl AsyncRead + Unpin),
+    limit: usize,
+) -> Result<Option<Vec<u8>>, DaemonError> {
     let mut frame = Vec::new();
     let mut byte = [0u8; 1];
     loop {
@@ -350,11 +363,11 @@ pub async fn read_frame(
         if byte[0] == b'\n' {
             return Ok(Some(frame));
         }
-        if frame.len() == ipc::MAX_FRAME {
+        if frame.len() == limit {
             return Err(DaemonError::new(
                 ErrorCode::InvalidInput,
                 "ipc",
-                "frame exceeds 16 KiB",
+                format!("frame exceeds {limit} byte limit"),
             ));
         }
         frame.push(byte[0]);
@@ -367,11 +380,11 @@ pub async fn write_response(
 ) -> Result<(), DaemonError> {
     let mut bytes = serde_json::to_vec(response)
         .map_err(|e| DaemonError::new(ErrorCode::Internal, "ipc encode", e.to_string()))?;
-    if bytes.len() > ipc::MAX_FRAME {
+    if bytes.len() > ipc::MAX_RESPONSE_FRAME {
         return Err(DaemonError::new(
             ErrorCode::InvalidInput,
             "ipc encode",
-            "response exceeds 16 KiB",
+            "response exceeds 128 KiB",
         ));
     }
     bytes.push(b'\n');
@@ -418,7 +431,8 @@ pub async fn request(paths: &Paths, request: &Request) -> Result<Response, Daemo
             .await
             .map_err(|e| DaemonError::io("request write", e))?;
         dispatched = true;
-        let bytes = read_frame(&mut stream).await?.ok_or_else(|| {
+        let mut reader = tokio::io::BufReader::new(&mut stream);
+        let bytes = read_response_frame(&mut reader).await?.ok_or_else(|| {
             DaemonError::new(
                 ErrorCode::ServiceUnavailable,
                 "response",
@@ -473,7 +487,8 @@ pub async fn watch_status(
         .write_all(&bytes)
         .await
         .map_err(|e| DaemonError::io("watch write", e))?;
-    while let Some(bytes) = read_frame(&mut stream).await? {
+    let mut reader = tokio::io::BufReader::new(&mut stream);
+    while let Some(bytes) = read_response_frame(&mut reader).await? {
         let response: Response = serde_json::from_slice(&bytes)
             .map_err(|e| DaemonError::new(ErrorCode::MalformedFrame, "watch", e.to_string()))?;
         if let Some(error) = response.error {

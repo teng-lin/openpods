@@ -186,10 +186,10 @@ pub fn read_private_json(path: &Path) -> Result<Option<serde_json::Value>, Daemo
     };
     validate_file(&file)?;
     let mut bytes = Vec::new();
-    file.take(crate::ipc::MAX_FRAME as u64 + 1)
+    file.take(crate::ipc::MAX_RESPONSE_FRAME as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| DaemonError::io("read publication", error))?;
-    if bytes.len() > crate::ipc::MAX_FRAME {
+    if bytes.len() > crate::ipc::MAX_RESPONSE_FRAME {
         return Err(DaemonError::new(
             ErrorCode::InvalidInput,
             "publication",
