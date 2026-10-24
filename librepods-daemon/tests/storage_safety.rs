@@ -487,17 +487,23 @@ fn invalid_existing_publications_and_legacy_owner_are_preserved() {
     let directory = tempfile::tempdir().unwrap();
     let paths = paths(directory.path());
     fs::create_dir_all(paths.legacy_state.parent().unwrap()).unwrap();
+    fs::set_permissions(
+        paths.legacy_state.parent().unwrap(),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
     for bytes in [
         b"broken JSON".to_vec(),
         vec![b' '; librepods_daemon::ipc::MAX_RESPONSE_FRAME + 1],
     ] {
         atomic_write(&paths.legacy_state, &bytes).unwrap();
+        let original = fs::read(&paths.legacy_state).unwrap();
         assert_eq!(
             read_private_json(&paths.legacy_state).unwrap_err().code,
             ErrorCode::InvalidInput
         );
         assert!(publish_legacy(&paths, "new", b"{}").is_err());
-        assert_eq!(fs::read(&paths.legacy_state).unwrap(), bytes);
+        assert_eq!(fs::read(&paths.legacy_state).unwrap(), original);
     }
     fs::remove_file(&paths.legacy_state).unwrap();
     fs::write(&paths.legacy_socket, b"foreign owner marker").unwrap();
