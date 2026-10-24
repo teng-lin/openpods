@@ -18,6 +18,8 @@ use tokio::process::Command;
 use crate::error::{ErrorKind, PlatformError};
 
 pub use crate::player_monitor::{PlayerEvent, PlayerMonitor};
+pub use librepods_core::policy::audio::VolumeChannel;
+use librepods_core::policy::audio::{valid_channel_volumes, MAX_VOLUME_CHANNELS};
 
 const TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_OUTPUT: u64 = 4 * 1024 * 1024;
@@ -29,6 +31,9 @@ pub struct AudioNode {
     pub selected_device: bool,
     pub muted: bool,
     pub volume_percent: Option<f64>,
+    /// Exact raw PulseAudio values in the server's channel-map order.
+    #[serde(default)]
+    pub volume_channels: Option<Vec<VolumeChannel>>,
     pub state: Option<String>,
     pub monitor: bool,
 }
@@ -86,6 +91,12 @@ pub enum AudioAction {
         name: String,
         input: bool,
         percent: u8,
+    },
+    SetRawVolume {
+        name: String,
+        input: bool,
+        expected: Vec<VolumeChannel>,
+        channels: Vec<VolumeChannel>,
     },
     MovePlayback {
         index: u32,
@@ -225,6 +236,39 @@ fn device_matches(value: &Value, address: &str) -> bool {
             })
 }
 
+fn raw_channel_volumes(node: &Value) -> Option<Vec<VolumeChannel>> {
+    let map = node.get("channel_map")?;
+    let names: Vec<&str> = if let Some(map) = map.as_str() {
+        map.split(',')
+            .map(str::trim)
+            .take(MAX_VOLUME_CHANNELS + 1)
+            .collect()
+    } else {
+        map.as_array()?
+            .iter()
+            .map(Value::as_str)
+            .collect::<Option<_>>()?
+    };
+    if names.is_empty() || names.len() > MAX_VOLUME_CHANNELS {
+        return None;
+    }
+    let values = node.get("volume")?.as_object()?;
+    if values.len() != names.len() {
+        return None;
+    }
+    let channels: Vec<VolumeChannel> = names
+        .into_iter()
+        .map(|name| {
+            let value = values.get(name)?.get("value")?.as_u64()?.try_into().ok()?;
+            Some(VolumeChannel {
+                name: name.to_owned(),
+                value,
+            })
+        })
+        .collect::<Option<_>>()?;
+    valid_channel_volumes(&channels).then_some(channels)
+}
+
 fn nodes(value: &Value, address: &str) -> Vec<AudioNode> {
     value
         .as_array()
@@ -251,6 +295,7 @@ fn nodes(value: &Value, address: &str) -> Vec<AudioNode> {
                 selected_device: device_matches(node, address),
                 muted: node.get("mute").and_then(Value::as_bool).unwrap_or(false),
                 volume_percent: volume,
+                volume_channels: raw_channel_volumes(node),
                 state: string(node, "state"),
                 monitor: node.get("monitor_of_sink").is_some_and(|value| {
                     value.as_u64().is_some_and(|index| index != u32::MAX as u64)
@@ -432,6 +477,44 @@ fn action_arguments(
             name,
             format!("{percent}%"),
         ],
+        AudioAction::SetRawVolume {
+            name,
+            input,
+            expected,
+            channels,
+        } => {
+            let current = (if input { &state.inputs } else { &state.outputs })
+                .iter()
+                .find(|node| node.name == name);
+            if !state.capture_known
+                || state.capture_active
+                || !valid_channel_volumes(&expected)
+                || !valid_channel_volumes(&channels)
+                || expected.len() != channels.len()
+                || expected
+                    .iter()
+                    .zip(&channels)
+                    .any(|(before, after)| before.name != after.name)
+                || current.and_then(|node| node.volume_channels.as_ref()) != Some(&expected)
+            {
+                return Err(PlatformError::new(
+                    "audio volume ownership, channel map or capture state changed",
+                    ErrorKind::InvalidInput,
+                )
+                .into());
+            }
+            let mut args = vec![
+                if input {
+                    "set-source-volume"
+                } else {
+                    "set-sink-volume"
+                }
+                .to_owned(),
+                name,
+            ];
+            args.extend(channels.iter().map(|channel| channel.value.to_string()));
+            args
+        }
         AudioAction::MovePlayback { index, output }
             if valid_node(&output, false)
                 && state
@@ -1032,5 +1115,282 @@ mod tests {
             .and_then(|source| source.source())
             .expect("original command failure retained");
         assert!(source.to_string().contains("audio unavailable"));
+    }
+    #[test]
+    fn raw_volume_decode_preserves_channel_order_balance_and_fractional_percent_units() {
+        let node = json!({"index":1,"name":"sink","channel_map":"front-right,front-left","volume":{"front-left":{"value":65537},"front-right":{"value":32769}}});
+        let decoded = nodes(&json!([node.clone()]), "");
+        assert_eq!(
+            decoded[0].volume_channels,
+            Some(vec![
+                VolumeChannel {
+                    name: "front-right".into(),
+                    value: 32769
+                },
+                VolumeChannel {
+                    name: "front-left".into(),
+                    value: 65537
+                }
+            ])
+        );
+        for map in [
+            json!("front-left,front-left"),
+            json!("front-left"),
+            json!([]),
+            json!(""),
+            json!(["front-left", 1]),
+        ] {
+            let mut invalid = node.clone();
+            invalid["channel_map"] = map;
+            assert!(raw_channel_volumes(&invalid).is_none());
+        }
+        let mut invalid = node.clone();
+        invalid["volume"]["front-left"]["value"] = json!(0x8000_0000u32);
+        assert!(raw_channel_volumes(&invalid).is_none());
+        invalid["volume"]["front-left"]["value"] = json!(6.5);
+        assert!(raw_channel_volumes(&invalid).is_none());
+        let mut array_map = node;
+        array_map["channel_map"] = json!(["front-right", "front-left"]);
+        assert_eq!(raw_channel_volumes(&array_map), decoded[0].volume_channels);
+    }
+
+    #[test]
+    fn raw_volume_action_validates_exact_current_values_and_channel_topology() {
+        let channels = vec![
+            VolumeChannel {
+                name: "front-right".into(),
+                value: 6553,
+            },
+            VolumeChannel {
+                name: "front-left".into(),
+                value: 13107,
+            },
+        ];
+        let mut state = AudioSnapshot {
+            capture_known: true,
+            outputs: vec![AudioNode {
+                name: "sink with spaces".into(),
+                volume_channels: Some(channels.clone()),
+                ..Default::default()
+            }],
+            inputs: vec![AudioNode {
+                name: "microphone".into(),
+                volume_channels: Some(channels.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        for input in [false, true] {
+            let name = if input {
+                "microphone"
+            } else {
+                "sink with spaces"
+            };
+            assert_eq!(
+                action_arguments(
+                    &state,
+                    AudioAction::SetRawVolume {
+                        name: name.into(),
+                        input,
+                        expected: channels.clone(),
+                        channels: channels.clone()
+                    }
+                )
+                .expect("exact raw target"),
+                vec![
+                    if input {
+                        "set-source-volume"
+                    } else {
+                        "set-sink-volume"
+                    },
+                    name,
+                    "6553",
+                    "13107"
+                ]
+            );
+        }
+        for (known, active) in [(false, false), (true, true)] {
+            state.capture_known = known;
+            state.capture_active = active;
+            assert!(action_arguments(
+                &state,
+                AudioAction::SetRawVolume {
+                    name: "sink with spaces".into(),
+                    input: false,
+                    expected: channels.clone(),
+                    channels: channels.clone()
+                }
+            )
+            .is_err());
+        }
+        state.capture_known = true;
+        state.capture_active = false;
+        let mut manual = channels.clone();
+        manual[0].value += 1;
+        state.outputs[0].volume_channels = Some(manual);
+        assert!(action_arguments(
+            &state,
+            AudioAction::SetRawVolume {
+                name: "sink with spaces".into(),
+                input: false,
+                expected: channels.clone(),
+                channels: channels.clone()
+            }
+        )
+        .is_err());
+        state.outputs[0].volume_channels = Some(channels.clone());
+        let mut reordered = channels.clone();
+        reordered.reverse();
+        for target in [
+            reordered,
+            vec![],
+            vec![VolumeChannel {
+                name: "front-right".into(),
+                value: u32::MAX,
+            }],
+            vec![channels[0].clone(), channels[0].clone()],
+        ] {
+            assert!(action_arguments(
+                &state,
+                AudioAction::SetRawVolume {
+                    name: "sink with spaces".into(),
+                    input: false,
+                    expected: channels.clone(),
+                    channels: target
+                }
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn raw_volume_api_roundtrips_exact_values_and_rejects_manual_changes_before_effect() {
+        const CHILD: &str = "LIBREPODS_RAW_AUDIO_FIXTURE";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let path = std::path::PathBuf::from(path);
+            let node = json!({"index":1,"name":"headset output with spaces","channel_map":"front-right,front-left","volume":{"front-left":{"value":65537},"front-right":{"value":32769}}});
+            std::fs::write(&path, serde_json::to_vec(&node).expect("fixture encoding"))
+                .expect("fixture");
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            runtime.block_on(async {
+                let original = audio_snapshot("").await.expect("raw snapshot").outputs[0]
+                    .volume_channels
+                    .clone()
+                    .expect("ordered values");
+                let ducked: Vec<_> = original
+                    .iter()
+                    .map(|channel| VolumeChannel {
+                        name: channel.name.clone(),
+                        value: channel.value / 5,
+                    })
+                    .collect();
+                let set = |expected, channels| AudioAction::SetRawVolume {
+                    name: "headset output with spaces".into(),
+                    input: false,
+                    expected,
+                    channels,
+                };
+                audio_action("", set(original.clone(), ducked.clone()))
+                    .await
+                    .expect("scale per channel");
+                assert_eq!(
+                    audio_snapshot("").await.expect("ducked snapshot").outputs[0]
+                        .volume_channels
+                        .as_ref(),
+                    Some(&ducked)
+                );
+                audio_action("", set(ducked.clone(), original.clone()))
+                    .await
+                    .expect("exact restoration");
+                assert_eq!(
+                    audio_snapshot("").await.expect("restored snapshot").outputs[0]
+                        .volume_channels
+                        .as_ref(),
+                    Some(&original)
+                );
+                audio_action("", set(original.clone(), ducked.clone()))
+                    .await
+                    .expect("second speech");
+                let mut manual: Value =
+                    serde_json::from_slice(&std::fs::read(&path).expect("current fixture"))
+                        .expect("fixture JSON");
+                manual["volume"]["front-right"]["value"] = json!(ducked[0].value + 1);
+                std::fs::write(&path, serde_json::to_vec(&manual).expect("manual edit"))
+                    .expect("manual volume");
+                let error = audio_action("", set(ducked.clone(), original.clone()))
+                    .await
+                    .expect_err("manual volume ownership changed");
+                assert_eq!(crate::error::kind(&error), Some(ErrorKind::InvalidInput));
+                manual["volume"]["front-right"]["value"] = json!(ducked[0].value);
+                std::fs::write(&path, serde_json::to_vec(&manual).expect("fixture"))
+                    .expect("reset raw ownership");
+                std::fs::write(path.with_extension("capture"), b"active")
+                    .expect("capture starts before effect");
+                let error = audio_action("", set(ducked, original))
+                    .await
+                    .expect_err("fresh capture suppresses automatic mutation");
+                assert_eq!(crate::error::kind(&error), Some(ErrorKind::InvalidInput));
+            });
+            let actions: Vec<Vec<String>> = std::fs::read_to_string(path.with_extension("log"))
+                .expect("actions")
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("argument JSON"))
+                .collect();
+            assert_eq!(
+                actions,
+                vec![
+                    vec![
+                        "set-sink-volume",
+                        "headset output with spaces",
+                        "6553",
+                        "13107"
+                    ],
+                    vec![
+                        "set-sink-volume",
+                        "headset output with spaces",
+                        "32769",
+                        "65537"
+                    ],
+                    vec![
+                        "set-sink-volume",
+                        "headset output with spaces",
+                        "6553",
+                        "13107"
+                    ]
+                ]
+            );
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().expect("fake audio directory");
+        let program = directory.path().join("pactl");
+        std::fs::write(&program,r##"#!/usr/bin/python3
+import json,os,sys
+from pathlib import Path
+path=Path(os.environ['LIBREPODS_RAW_AUDIO_FIXTURE'])
+args=sys.argv[1:]
+if args[0]=='--format=json':
+    if args[1:]==['info']: print('{}')
+    elif args[1:]==['list','sinks']: print('['+path.read_text()+']')
+    elif args[1:]==['list','source-outputs'] and path.with_suffix('.capture').exists(): print('[{"index":1,"source":999,"corked":false}]')
+    else: print('[]')
+else:
+    with path.with_suffix('.log').open('a') as log: log.write(json.dumps(args)+'\n')
+    node=json.loads(path.read_text())
+    for channel,value in zip(node['channel_map'].split(','),args[2:]): node['volume'][channel]['value']=int(value)
+    path.write_text(json.dumps(node))
+"##).expect("fake pactl");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
+            .expect("executable");
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable")).args(["--exact","desktop::tests::raw_volume_api_roundtrips_exact_values_and_rejects_manual_changes_before_effect","--nocapture"]).env("PATH",directory.path()).env(CHILD,directory.path().join("volume.json")).output().expect("isolated audio child");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
