@@ -220,11 +220,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for path in external {
         let canonical = path.canonicalize()?;
         let name = canonical.to_str().ok_or("non-UTF8 path")?.to_owned();
-        if ranges.contains_key(&name) {
-            ranges.insert(
-                name,
-                vec![[1, fs::read_to_string(canonical)?.lines().count()]],
-            );
+        if let Some(entry) = ranges.get_mut(&name) {
+            *entry = vec![[1, fs::read_to_string(canonical)?.lines().count()]];
         }
     }
     println!("{}", serde_json::to_string_pretty(&ranges)?);

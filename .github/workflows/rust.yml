@@ -60,6 +60,7 @@ jobs:
         if: runner.os == 'Linux' && matrix.features == 'minimal'
         run: |
           cargo test --manifest-path tools/coverage-spans/Cargo.toml --locked
+          cargo clippy --manifest-path tools/coverage-spans/Cargo.toml --all-targets --locked -- -D warnings
           python3 -m unittest discover -s tests/packaging -v
           python3 tools/test_hardware_modes.py -v
           python3 tests/cli/contract.py target/release/librepods-cli -v
