@@ -35,7 +35,7 @@ class Installation(unittest.TestCase):
         manifest = installer.manifest_path(self.prefix)
         self.assertEqual(stat.S_IMODE(manifest.stat().st_mode), 0o600)
         unit = (self.unit_dir / installer.UNIT).read_text()
-        self.assertIn('ExecStart="', unit)
+        self.assertIn('ExecStart=:"', unit)
         self.assertIn("space%%${PODS_TEST}", unit)
         self.assertIn("NoNewPrivileges=yes", unit)
         self.assertIn("CapabilityBoundingSet=\n", unit)

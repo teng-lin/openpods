@@ -8,7 +8,7 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart="@BINARY@" serve
+ExecStart=:"@BINARY@" serve
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=2
