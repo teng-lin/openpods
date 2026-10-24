@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Run the actual CLI against isolated native IPC peers; never access Bluetooth."""
 import argparse
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,8 @@ class CliContract(unittest.TestCase):
         self.env = {**os.environ, "HOME": str(root), "XDG_RUNTIME_DIR": str(root),
                     "XDG_CONFIG_HOME": str(root / "config"),
                     "XDG_STATE_HOME": str(root / "state"), "RUST_LOG": "off"}
+        self.env["DBUS_SYSTEM_BUS_ADDRESS"] = "unix:path=" + str(root / "no-system-bus")
+        self.env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=" + str(root / "no-session-bus")
         (root / "librepods-rs").mkdir(mode=0o700)
         self.socket = root / "librepods-rs/control.sock"
 
@@ -179,6 +182,19 @@ class CliContract(unittest.TestCase):
         result = self.call("--direct", "status")
         self.assertEqual(result.returncode, 1)
         self.assertEqual(json.loads(result.stderr)["code"], "service_unavailable")
+
+    def test_direct_respects_native_owner_lock_even_before_owner_creates_socket(self):
+        lock = self.socket.parent / "owner.lock"
+        with lock.open("w") as owned:
+            lock.chmod(0o600)
+            fcntl.flock(owned, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertFalse(self.socket.exists())
+            result = self.call("--direct", "status")
+            self.assertEqual(result.returncode, 1)
+            error = json.loads(result.stderr)
+            self.assertEqual(error["code"], "service_unavailable")
+            self.assertEqual(error["stage"], "owner lock")
+            self.assertFalse(self.socket.exists())
 
     def test_invalid_compat_verb_is_rejected_before_connecting(self):
         result = self.call("compat", "adaptive:101")

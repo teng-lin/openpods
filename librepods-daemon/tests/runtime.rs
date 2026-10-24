@@ -56,6 +56,7 @@ struct Shared {
     lose_ack: AtomicBool,
     no_handshake: AtomicBool,
     slow_audio: AtomicBool,
+    large_audio: AtomicBool,
     key_reply: AtomicU8,
     key_requests: AtomicUsize,
     connections: AtomicUsize,
@@ -200,6 +201,25 @@ impl Backend for EmulatedBackend {
     }
 
     fn audio(&self, _: &str, operation: &Operation) -> Result<serde_json::Value, DaemonError> {
+        if matches!(operation, Operation::AudioStatus) && self.0.large_audio.load(Ordering::SeqCst)
+        {
+            let snapshot = librepods_linux::desktop::AudioSnapshot {
+                server_name: "PipeWire (synthetic)".into(),
+                outputs: (0..5000)
+                    .map(|index| librepods_linux::desktop::AudioNode {
+                        index,
+                        name: format!("example-output-{index}"),
+                        selected_device: false,
+                        muted: false,
+                        volume_percent: Some(50.0),
+                        state: Some("RUNNING".into()),
+                        monitor: false,
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            return Ok(serde_json::to_value(snapshot).expect("synthetic audio graph"));
+        }
         if matches!(operation, Operation::AudioStatus) {
             Ok(serde_json::json!({"health":"usable","profile":"a2dp-sink","capture":"external"}))
         } else {
@@ -1676,5 +1696,46 @@ async fn every_one_byte_control_id_remains_observable_without_exceeding_native_f
     let next: Snapshot =
         serde_json::from_value(next.result.expect("snapshot")).expect("snapshot schema");
     assert_eq!(next.device.reported_controls[&0xFE], [1, 0, 0, 0]);
+    harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_audio_graph_returns_a_typed_error_and_never_poisons_native_status() {
+    let shared = Arc::new(Shared::default());
+    shared.large_audio.store(true, Ordering::SeqCst);
+    let harness = Harness::start(shared, Config::default()).await;
+    harness.ready().await;
+    let audio = runtime::request(
+        &harness.paths,
+        &Request {
+            version: 1,
+            id: 380,
+            timeout_ms: 1000,
+            operation: Operation::AudioStatus,
+        },
+    )
+    .await
+    .expect("oversized explicit audio result must return a typed response");
+    assert_eq!(
+        audio.error.expect("bounded audio result").code,
+        ErrorCode::InvalidInput
+    );
+    let status = harness.ready().await;
+    assert!(
+        serde_json::to_vec(&status).expect("status").len()
+            < librepods_daemon::ipc::MAX_RESPONSE_FRAME
+    );
+    assert!(
+        harness
+            .request(
+                381,
+                Operation::Change(SettingChange::ListeningMode(NoiseControlMode::Transparency)),
+                1000
+            )
+            .await
+            .error
+            .is_none(),
+        "oversized audio graph broke AACP control"
+    );
     harness.stop().await;
 }
