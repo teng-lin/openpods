@@ -83,6 +83,7 @@ impl Snapshot {
         }
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn observe_device(&mut self, state: &DeviceState, monotonic_ms: u64, unix_ms: u64) {
         self.observation_unix_ms
             .retain(|field, _| state.observations.contains_key(field));
@@ -180,6 +181,7 @@ pub fn available(reading: BatteryState) -> bool {
 
 /// Large audio graphs have an explicit detailed endpoint. They must not prevent
 /// battery, command and recovery status from fitting in the native frame budget.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn bounded_audio(value: Value) -> Value {
     const DETAILS_LIMIT: usize = 32 * 1024;
     if serde_json::to_vec(&value).is_ok_and(|bytes| bytes.len() <= DETAILS_LIMIT) {
