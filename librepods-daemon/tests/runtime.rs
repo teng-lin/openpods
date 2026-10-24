@@ -2203,12 +2203,21 @@ async fn config_without_live_echo_uses_one_write_and_one_fresh_readback_reopen()
             "{:?}",
             response.error
         );
-        let fresh = harness
-            .wait_for(|snapshot| {
-                snapshot.session_generation > initial.session_generation
-                    && snapshot.device.reported_controls.get(&id) == Some(&[value, 0, 0, 0])
-            })
-            .await;
+        // Confirmation is a publication barrier: the first status read after
+        // awaiting the reply must already expose fresh matching readback.
+        let fresh: Snapshot = serde_json::from_value(
+            harness
+                .request(501, Operation::Status, 1000)
+                .await
+                .result
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(fresh.session_generation > initial.session_generation);
+        assert_eq!(
+            fresh.device.reported_controls.get(&id),
+            Some(&[value, 0, 0, 0])
+        );
         for field in ["metadata".to_string(), format!("control.{id:02x}")] {
             let observed = &fresh.device.observations[&field];
             assert_eq!(observed.generation, fresh.session_generation);
@@ -2378,7 +2387,7 @@ async fn config_write_or_readback_connect_failure_is_unknown_and_never_replays()
         let harness = Harness::start(shared.clone(), Config::default()).await;
         harness.ready().await;
         let started = Instant::now();
-        unknown_error(
+        let error = unknown_error(
             runtime::request(
                 &harness.paths,
                 &Request {
@@ -2396,6 +2405,12 @@ async fn config_write_or_readback_connect_failure_is_unknown_and_never_replays()
         );
         assert_eq!(shared.changes.lock().expect("mutations").len(), 1);
         if !fail_write {
+            assert_eq!(error.stage, "emulator");
+            assert!(error
+                .message
+                .contains("injected readback connection failure"));
+            assert!(error.message.contains("ConnectFailed"));
+            assert!(!error.retryable);
             assert!(
                 shared.connections.load(Ordering::SeqCst) >= 2,
                 "readback connect was not attempted"
@@ -2820,6 +2835,105 @@ async fn private_key_persistence_failure_never_acknowledges_or_exposes_received_
     assert!(
         change.error.is_none(),
         "key persistence failure must leave AACP usable: {change:?}"
+    );
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn rejected_adaptive_values_explain_the_reason_before_any_transport_write() {
+    let shared = Arc::new(Shared::default());
+    let harness = Harness::start(shared.clone(), Config::default()).await;
+    harness.ready().await;
+    for (level, reason) in [
+        (101, "the setting value is out of range"),
+        (
+            50,
+            "adaptive noise level requires confirmed Adaptive listening mode",
+        ),
+    ] {
+        let response = harness
+            .request(
+                940,
+                Operation::Change(SettingChange::AdaptiveNoiseLevel(level)),
+                1000,
+            )
+            .await;
+        let error = response
+            .error
+            .expect("invalid adaptive request must be rejected");
+        assert_eq!(error.code, ErrorCode::InvalidInput);
+        assert_eq!(error.message, reason);
+        assert!(!error.retryable);
+        assert!(response.result.is_none());
+        assert!(shared.changes.lock().unwrap().is_empty());
+        assert_eq!(shared.connections.load(Ordering::SeqCst), 1);
+    }
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn lifetime_reconnect_and_readback_counters_remain_distinct_after_ready_resets_retry_round() {
+    let shared = Arc::new(Shared::default());
+    let harness = Harness::start(shared.clone(), Config::default()).await;
+    let initial = harness.ready().await;
+    assert_eq!(initial.reconnect_attempts_total, 0);
+    assert_eq!(initial.readback_attempts_total, 0);
+    shared.fail_readback_connect.store(true, Ordering::SeqCst);
+    wait_for_peer(&shared, 1).await.close();
+    let failed = harness
+        .wait_for(|s| s.retry_count > 0 && s.reconnect_attempts_total > 0)
+        .await;
+    shared.fail_readback_connect.store(false, Ordering::SeqCst);
+    let recovered = harness
+        .wait_for(|s| {
+            s.connected && s.retry_count == 0 && s.session_generation > failed.session_generation
+        })
+        .await;
+    assert!(recovered.reconnect_attempts_total >= failed.reconnect_attempts_total);
+    assert!(recovered.reconnect_attempts_total > 0);
+    assert_eq!(recovered.readback_attempts_total, 0);
+    assert_eq!(
+        recovered.legacy()["reconnect_attempts_total"],
+        recovered.reconnect_attempts_total
+    );
+    shared.suppress_config_echo.store(true, Ordering::SeqCst);
+    let response = harness
+        .request(
+            950,
+            Operation::Change(SettingChange::ConversationalAwareness(false)),
+            1500,
+        )
+        .await;
+    assert_eq!(response.result, Some(serde_json::json!("Confirmed")));
+    let after: Snapshot = serde_json::from_value(
+        harness
+            .request(951, Operation::Status, 1000)
+            .await
+            .result
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(after.retry_count, 0);
+    assert_eq!(
+        after.reconnect_attempts_total,
+        recovered.reconnect_attempts_total
+    );
+    assert_eq!(after.readback_attempts_total, 1);
+    assert_eq!(
+        after.legacy()["reconnect_attempts_total"],
+        recovered.reconnect_attempts_total
+    );
+    let reconnect = harness.request(952, Operation::Reconnect, 1000).await;
+    assert!(reconnect.error.is_none());
+    let final_status = harness
+        .wait_for(|s| s.connected && s.session_generation > after.session_generation)
+        .await;
+    assert!(final_status.reconnect_attempts_total > after.reconnect_attempts_total);
+    assert_eq!(final_status.readback_attempts_total, 1);
+    assert_eq!(final_status.retry_count, 0);
+    assert_eq!(
+        final_status.legacy()["reconnect_attempts_total"],
+        final_status.reconnect_attempts_total
     );
     harness.stop().await;
 }
