@@ -221,12 +221,69 @@ pub fn publish_legacy(paths: &Paths, instance: &str, bytes: &[u8]) -> Result<(),
     atomic_write(&paths.legacy_state, bytes)
 }
 
+struct OwnerLock(File);
+impl From<File> for OwnerLock {
+    fn from(file: File) -> Self {
+        Self(file)
+    }
+}
+impl Drop for OwnerLock {
+    fn drop(&mut self) {
+        // Failed startup must also release a description inherited before exec.
+        // Safety: this guard owns a valid open descriptor throughout the call.
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
 pub struct OwnerGuard {
-    _lock: File,
+    _lock: OwnerLock,
     socket: PathBuf,
     state: PathBuf,
     instance: String,
     socket_identity: Option<(u64, u64)>,
+}
+
+#[cfg(test)]
+mod owner_lock_regressions {
+    use super::*;
+
+    #[test]
+    fn failed_startup_releases_lock_while_an_inherited_description_remains_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owner.lock");
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        // A dup shares the open file description exactly as a forked child does.
+        // Safety: lock owns a valid descriptor.
+        assert_eq!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let inherited = lock.try_clone().unwrap();
+        let failed: Result<(), ()> = {
+            let _startup_lock: OwnerLock = lock.into();
+            Err(())
+        };
+        assert!(failed.is_err());
+        let replacement = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        // Safety: replacement owns a valid descriptor.
+        assert_eq!(
+            unsafe { libc::flock(replacement.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0,
+            "failed startup left ownership in an inherited open description"
+        );
+        drop(inherited);
+    }
 }
 
 impl OwnerGuard {
@@ -251,6 +308,7 @@ impl OwnerGuard {
                 "another daemon owns the runtime directory",
             ));
         }
+        let lock = OwnerLock::from(lock);
         let socket = paths.socket();
         if let Ok(metadata) = fs::symlink_metadata(&socket) {
             use std::os::unix::fs::FileTypeExt;
@@ -310,12 +368,6 @@ impl Drop for OwnerGuard {
             {
                 let _ = fs::remove_file(&self.state);
             }
-        }
-        // A concurrently spawned child can briefly share this open description
-        // before exec closes its CLOEXEC copy. Release ownership explicitly.
-        // Safety: the lock descriptor remains valid until this guard is dropped.
-        unsafe {
-            libc::flock(self._lock.as_raw_fd(), libc::LOCK_UN);
         }
     }
 }
