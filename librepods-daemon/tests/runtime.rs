@@ -64,6 +64,7 @@ struct Shared {
     hold_readback_metadata: AtomicBool,
     hold_readback_handshake: AtomicBool,
     fail_mutation: AtomicBool,
+    ignore_config_write: AtomicBool,
     fail_readback_connect: AtomicBool,
     readback_configs_delivered: AtomicUsize,
     controls: Mutex<BTreeMap<u8, [u8; 4]>>,
@@ -161,11 +162,13 @@ impl SessionTransport for Peer {
             }
             let id = ControlCommand::parse_id(bytes);
             if let (Some(id), Some(data)) = (id, ControlCommand::parse_data(bytes)) {
-                self.shared
-                    .controls
-                    .lock()
-                    .expect("persistent controls")
-                    .insert(id, data);
+                if !self.shared.ignore_config_write.load(Ordering::SeqCst) {
+                    self.shared
+                        .controls
+                        .lock()
+                        .expect("persistent controls")
+                        .insert(id, data);
+                }
             }
             if bytes.starts_with(&[4, 0, 4, 0, 0x1A, 0, 1]) && bytes.len() >= 9 {
                 let name = std::str::from_utf8(&bytes[9..])
@@ -2116,4 +2119,346 @@ async fn audio_results_from_a_previous_identity_are_never_published_to_the_new_d
         );
         harness.stop().await;
     }
+}
+
+fn unknown_error(result: Result<Response, DaemonError>) -> DaemonError {
+    let error = match result {
+        Ok(response) => response.error.expect("uncertain command outcome"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, ErrorCode::OutcomeUnknown);
+    error
+}
+
+async fn wait_for_connections(shared: &Shared, count: usize) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while shared.connections.load(Ordering::SeqCst) < count {
+        assert!(Instant::now() < deadline, "expected {count} connections");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn config_without_live_echo_uses_one_write_and_one_fresh_readback_reopen() {
+    for (change, id, value) in [
+        (SettingChange::ConversationalAwareness(false), 0x28, 2),
+        (SettingChange::SingleEarbudAnc(true), 0x1B, 1),
+        (SettingChange::AdaptiveNoiseLevel(75), 0x2E, 75),
+    ] {
+        let shared = Arc::new(Shared::default());
+        shared.suppress_config_echo.store(true, Ordering::SeqCst);
+        *shared.mode.lock().expect("mode") = Some(NoiseControlMode::Adaptive);
+        let harness = Harness::start(shared.clone(), Config::default()).await;
+        let initial = harness.ready().await;
+        let packet = change.packet();
+        let response = harness.request(500, Operation::Change(change), 1500).await;
+        assert_eq!(
+            response.result,
+            Some(serde_json::json!("Confirmed")),
+            "{:?}",
+            response.error
+        );
+        let fresh = harness
+            .wait_for(|snapshot| {
+                snapshot.session_generation > initial.session_generation
+                    && snapshot.device.reported_controls.get(&id) == Some(&[value, 0, 0, 0])
+            })
+            .await;
+        for field in ["metadata".to_string(), format!("control.{id:02x}")] {
+            let observed = &fresh.device.observations[&field];
+            assert_eq!(observed.generation, fresh.session_generation);
+            assert!(!observed.stale);
+            assert_eq!(
+                observed.source,
+                librepods_core::device::state::ObservationSource::Aacp
+            );
+        }
+        assert_eq!(fresh.device.address, ADDRESS);
+        assert_eq!(
+            shared.connections.load(Ordering::SeqCst),
+            2,
+            "not exactly one readback reopen"
+        );
+        assert_eq!(
+            *shared.changes.lock().expect("mutations"),
+            vec![packet],
+            "configuration mutation replayed"
+        );
+        assert_eq!(
+            shared.audio_calls.load(Ordering::SeqCst),
+            0,
+            "AACP readback touched audio routing"
+        );
+        harness.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn config_report_before_new_metadata_waits_for_fresh_identity_before_confirmation() {
+    let shared = Arc::new(Shared::default());
+    shared.suppress_config_echo.store(true, Ordering::SeqCst);
+    shared.hold_readback_metadata.store(true, Ordering::SeqCst);
+    let harness = Harness::start(shared.clone(), Config::default()).await;
+    harness.ready().await;
+    let paths = harness.paths.clone();
+    let pending = tokio::spawn(async move {
+        runtime::request(
+            &paths,
+            &Request {
+                version: 1,
+                id: 510,
+                timeout_ms: 2500,
+                operation: Operation::Change(SettingChange::ConversationalAwareness(false)),
+            },
+        )
+        .await
+    });
+    wait_for_connections(&shared, 2).await;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while shared.readback_configs_delivered.load(Ordering::SeqCst) < 3 {
+        assert!(
+            Instant::now() < deadline,
+            "new-generation controls were not delivered"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(
+        !pending.is_finished(),
+        "config report completed without fresh new-generation metadata"
+    );
+    shared
+        .peers
+        .lock()
+        .expect("peers")
+        .last()
+        .expect("readback peer")
+        .push(metadata());
+    let response = pending.await.expect("client task").expect("response");
+    assert_eq!(response.result, Some(serde_json::json!("Confirmed")));
+    assert_eq!(shared.changes.lock().expect("mutations").len(), 1);
+    harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn old_connection_config_echo_cannot_replace_missing_fresh_readback() {
+    let shared = Arc::new(Shared::default());
+    // Echo remains enabled on the old connection. Reopened connection never
+    // reports config fields: this is genuine missing readback, not missing ACK.
+    shared.withhold_readback.store(true, Ordering::SeqCst);
+    let harness = Harness::start(shared.clone(), Config::default()).await;
+    harness.ready().await;
+    let started = Instant::now();
+    unknown_error(
+        runtime::request(
+            &harness.paths,
+            &Request {
+                version: 1,
+                id: 520,
+                timeout_ms: 200,
+                operation: Operation::Change(SettingChange::ConversationalAwareness(false)),
+            },
+        )
+        .await,
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(700),
+        "readback extended original TTL"
+    );
+    assert!(shared.connections.load(Ordering::SeqCst) >= 2);
+    assert_eq!(shared.changes.lock().expect("mutations").len(), 1);
+    harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_both_config_echo_and_readback_reports_is_unknown_without_replay() {
+    let shared = Arc::new(Shared::default());
+    shared.suppress_config_echo.store(true, Ordering::SeqCst);
+    shared.withhold_readback.store(true, Ordering::SeqCst);
+    let harness = Harness::start(shared.clone(), Config::default()).await;
+    harness.ready().await;
+    unknown_error(
+        runtime::request(
+            &harness.paths,
+            &Request {
+                version: 1,
+                id: 530,
+                timeout_ms: 200,
+                operation: Operation::Change(SettingChange::SingleEarbudAnc(true)),
+            },
+        )
+        .await,
+    );
+    assert_eq!(shared.changes.lock().expect("mutations").len(), 1);
+    harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ignored_config_write_is_not_inferred_from_mismatching_fresh_readback() {
+    let shared = Arc::new(Shared::default());
+    shared.suppress_config_echo.store(true, Ordering::SeqCst);
+    shared.ignore_config_write.store(true, Ordering::SeqCst);
+    *shared.mode.lock().expect("mode") = Some(NoiseControlMode::Adaptive);
+    let harness = Harness::start(shared.clone(), Config::default()).await;
+    harness.ready().await;
+    unknown_error(
+        runtime::request(
+            &harness.paths,
+            &Request {
+                version: 1,
+                id: 540,
+                timeout_ms: 250,
+                operation: Operation::Change(SettingChange::AdaptiveNoiseLevel(73)),
+            },
+        )
+        .await,
+    );
+    assert_eq!(
+        shared.controls.lock().expect("actual device value")[&0x2E],
+        [50, 0, 0, 0]
+    );
+    assert_eq!(shared.changes.lock().expect("mutations").len(), 1);
+    harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn config_write_or_readback_connect_failure_is_unknown_and_never_replays() {
+    for fail_write in [true, false] {
+        let shared = Arc::new(Shared::default());
+        shared.suppress_config_echo.store(true, Ordering::SeqCst);
+        shared.fail_mutation.store(fail_write, Ordering::SeqCst);
+        shared
+            .fail_readback_connect
+            .store(!fail_write, Ordering::SeqCst);
+        let harness = Harness::start(shared.clone(), Config::default()).await;
+        harness.ready().await;
+        let started = Instant::now();
+        unknown_error(
+            runtime::request(
+                &harness.paths,
+                &Request {
+                    version: 1,
+                    id: 550,
+                    timeout_ms: 1500,
+                    operation: Operation::Change(SettingChange::ConversationalAwareness(false)),
+                },
+            )
+            .await,
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(700),
+            "known transport failure consumed whole TTL"
+        );
+        assert_eq!(shared.changes.lock().expect("mutations").len(), 1);
+        if !fail_write {
+            assert!(
+                shared.connections.load(Ordering::SeqCst) >= 2,
+                "readback connect was not attempted"
+            );
+        }
+        harness.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_during_readback_handshake_closes_it_promptly_without_replay() {
+    let shared = Arc::new(Shared::default());
+    shared.suppress_config_echo.store(true, Ordering::SeqCst);
+    shared.hold_readback_handshake.store(true, Ordering::SeqCst);
+    let harness = Harness::start(shared.clone(), Config::default()).await;
+    harness.ready().await;
+    let mut client = UnixStream::connect(harness.paths.socket())
+        .await
+        .expect("client");
+    let mut bytes = serde_json::to_vec(&Request {
+        version: 1,
+        id: 560,
+        timeout_ms: 2500,
+        operation: Operation::Change(SettingChange::ConversationalAwareness(false)),
+    })
+    .expect("request");
+    bytes.push(b'\n');
+    client.write_all(&bytes).await.expect("command");
+    wait_for_connections(&shared, 2).await;
+    let readback_peer = shared
+        .peers
+        .lock()
+        .expect("peers")
+        .last()
+        .expect("readback peer")
+        .clone();
+    drop(client);
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while !readback_peer.closed.load(Ordering::SeqCst) {
+        assert!(
+            Instant::now() < deadline,
+            "cancelled readback did not close promptly"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    shared
+        .hold_readback_handshake
+        .store(false, Ordering::SeqCst);
+    harness
+        .wait_for(|snapshot| snapshot.connected && snapshot.session_generation >= 3)
+        .await;
+    assert_eq!(shared.changes.lock().expect("mutations").len(), 1);
+    harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readback_handshake_obeys_original_deadline_and_ignores_late_old_reports() {
+    let shared = Arc::new(Shared::default());
+    shared.suppress_config_echo.store(true, Ordering::SeqCst);
+    shared.hold_readback_handshake.store(true, Ordering::SeqCst);
+    let harness = Harness::start(shared.clone(), Config::default()).await;
+    harness.ready().await;
+    let started = Instant::now();
+    unknown_error(
+        runtime::request(
+            &harness.paths,
+            &Request {
+                version: 1,
+                id: 570,
+                timeout_ms: 150,
+                operation: Operation::Change(SettingChange::ConversationalAwareness(false)),
+            },
+        )
+        .await,
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(600),
+        "reopen reset or expanded the command deadline"
+    );
+    wait_for_connections(&shared, 2).await;
+    let peer = shared
+        .peers
+        .lock()
+        .expect("peers")
+        .last()
+        .expect("readback peer")
+        .clone();
+    let deadline = Instant::now() + Duration::from_millis(250);
+    while !peer.closed.load(Ordering::SeqCst) {
+        assert!(
+            Instant::now() < deadline,
+            "expired readback connection remained live"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    peer.push(packets::HANDSHAKE_ACK_PREFIX.to_vec());
+    peer.push(metadata());
+    peer.push(ControlCommand::disabled(0x28).to_vec());
+    shared
+        .hold_readback_handshake
+        .store(false, Ordering::SeqCst);
+    harness
+        .wait_for(|snapshot| snapshot.connected && snapshot.session_generation >= 3)
+        .await;
+    assert_eq!(
+        shared.changes.lock().expect("mutations").len(),
+        1,
+        "late readback caused mutation replay"
+    );
+    harness.stop().await;
 }
