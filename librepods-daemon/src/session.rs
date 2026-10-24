@@ -651,18 +651,28 @@ impl Worker {
                     return;
                 }
                 CommandAction::Send(packet) => {
-                    active.envelope.dispatched.store(true, Ordering::SeqCst);
+                    // The pure action may have been produced before cancellation, shutdown
+                    // or scheduler delay. Revalidate at the actual write boundary.
+                    if self.stopped.load(Ordering::SeqCst) || active.envelope.reply.is_closed() {
+                        action = active.pending.cancel();
+                        continue;
+                    }
                     let remaining = active
                         .envelope
                         .deadline
                         .saturating_duration_since(Instant::now());
-                    let result = self
-                        .connection
-                        .as_ref()
-                        .ok_or(TransportError::NotConnected)
-                        .and_then(|connection| {
-                            connection.send(&packet, remaining.min(Duration::from_secs(1)))
-                        });
+                    if remaining.is_zero() {
+                        action = active
+                            .pending
+                            .tick(self.generation, active.pending.deadline_ms.max(self.now()));
+                        continue;
+                    }
+                    let Some(connection) = self.connection.clone() else {
+                        action = active.pending.transport_lost();
+                        continue;
+                    };
+                    active.envelope.dispatched.store(true, Ordering::SeqCst);
+                    let result = connection.send(&packet, remaining.min(Duration::from_secs(1)));
                     match result {
                         Ok(()) => action = active.pending.mark_sent(self.generation, self.now()),
                         Err(error) => {
@@ -1074,6 +1084,140 @@ impl Worker {
                 envelope.request.id,
                 DaemonError::new(ErrorCode::Cancelled, "shutdown", "daemon stopping"),
             ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    use librepods_core::{
+        device::state::NoiseControlMode,
+        protocol::{parser::ParsedPacket, settings::SettingChange},
+    };
+    use std::sync::atomic::AtomicUsize;
+    struct NoDiscovery;
+    impl Backend for NoDiscovery {
+        fn discover(&self, _: Option<&str>) -> Result<crate::backend::Endpoint, DaemonError> {
+            panic!("dispatch guard must not discover")
+        }
+        fn connect(
+            &self,
+            _: &crate::backend::Endpoint,
+            _: Duration,
+        ) -> Result<Arc<dyn SessionTransport>, DaemonError> {
+            panic!("dispatch guard must not reconnect")
+        }
+    }
+    struct Spy(AtomicUsize);
+    impl SessionTransport for Spy {
+        fn send(&self, _: &[u8], _: Duration) -> Result<(), TransportError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn recv(&self, _: &mut [u8], _: Duration) -> Result<usize, TransportError> {
+            panic!("dispatch guard must not read")
+        }
+        fn close(&self) {}
+    }
+    fn owner(transport: Arc<Spy>) -> Worker {
+        let started = Instant::now();
+        let mut state = DeviceState::default();
+        state.begin_session(1);
+        state.apply_packet(
+            &ParsedPacket::Metadata {
+                name: "Example".into(),
+                model_number: "A3048".into(),
+                manufacturer: "Apple Inc.".into(),
+            },
+            1,
+            0,
+        );
+        state.apply_packet(&ParsedPacket::NoiseControl(NoiseControlMode::Off), 1, 0);
+        let status = Snapshot::new("dispatch-test".into(), &state);
+        let (status_tx, _) = watch::channel(status.clone());
+        let (_, audio_updates) = watch::channel(status.audio.clone());
+        let (_, publication_updates) = watch::channel(None);
+        let (_, receiver) = mpsc::sync_channel(QUEUE_LIMIT);
+        Worker {
+            backend: Arc::new(NoDiscovery),
+            config: Config::default(),
+            paths: None,
+            state,
+            status,
+            status_tx,
+            audio_updates,
+            publication_updates,
+            receiver,
+            stopped: Arc::new(AtomicBool::new(false)),
+            transport: Arc::new(Mutex::new(Some(transport.clone()))),
+            connection: Some(transport),
+            active: None,
+            key_exchange: None,
+            telemetry: Telemetry::new(started, None),
+            queue: VecDeque::new(),
+            started,
+            generation: 1,
+            recovery: RecoveryPolicy::new(DEFAULT_ABSENT_ATTEMPTS),
+            next_probe_ms: 0,
+            adapter_ready: true,
+            bluez_connected: true,
+        }
+    }
+    #[test]
+    fn expired_cancelled_or_stopping_requests_cannot_write_after_a_pure_send_action() {
+        for reason in 0..4 {
+            let transport = Arc::new(Spy(AtomicUsize::new(0)));
+            let mut owner = owner(transport.clone());
+            if reason == 3 {
+                owner.connection = None;
+            }
+            let change = SettingChange::ListeningMode(NoiseControlMode::NoiseCancellation);
+            let mut pending = PendingChange::new(change.clone(), 1, 10_000);
+            let action = pending.begin(&owner.state, 0);
+            assert!(matches!(action, CommandAction::Send(_)));
+            let (reply, rx) = oneshot::channel();
+            let mut rx = Some(rx);
+            if reason == 1 {
+                drop(rx.take());
+            }
+            if reason == 2 {
+                owner.stopped.store(true, Ordering::SeqCst);
+            }
+            let dispatched = Arc::new(AtomicBool::new(false));
+            let envelope = Envelope {
+                target_address: None,
+                request: Request {
+                    version: 1,
+                    id: 1,
+                    timeout_ms: 1000,
+                    operation: Operation::Change(change),
+                },
+                deadline: if reason == 0 {
+                    Instant::now() - Duration::from_millis(1)
+                } else {
+                    Instant::now() + Duration::from_secs(1)
+                },
+                reply,
+                dispatched: dispatched.clone(),
+            };
+            owner.handle_action(Active { envelope, pending }, action);
+            assert_eq!(
+                transport.0.load(Ordering::SeqCst),
+                0,
+                "request reason {reason} wrote after becoming ineligible"
+            );
+            assert!(!dispatched.load(Ordering::SeqCst));
+            if let Some(mut rx) = rx {
+                assert_eq!(
+                    rx.try_recv().unwrap().error.unwrap().code,
+                    if reason == 0 {
+                        ErrorCode::CommandTimeout
+                    } else {
+                        ErrorCode::Cancelled
+                    }
+                );
+            }
         }
     }
 }
