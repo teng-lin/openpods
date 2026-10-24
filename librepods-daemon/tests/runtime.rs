@@ -77,6 +77,7 @@ struct Shared {
     audio_calls: AtomicUsize,
     address: Mutex<Option<String>>,
     large_audio: AtomicBool,
+    wide_audio_names: AtomicBool,
     key_reply: AtomicU8,
     key_requests: AtomicUsize,
     connections: AtomicUsize,
@@ -292,7 +293,26 @@ impl Backend for EmulatedBackend {
         if matches!(operation, Operation::AudioStatus) && self.0.large_audio.load(Ordering::SeqCst)
         {
             let snapshot = librepods_linux::desktop::AudioSnapshot {
-                server_name: "PipeWire (synthetic)".into(),
+                server_name: if self.0.wide_audio_names.load(Ordering::SeqCst) {
+                    "🔊".repeat(1024)
+                } else {
+                    "PipeWire (synthetic)".into()
+                },
+                profile: self
+                    .0
+                    .wide_audio_names
+                    .load(Ordering::SeqCst)
+                    .then(|| "🔊".repeat(1024)),
+                default_input: self
+                    .0
+                    .wide_audio_names
+                    .load(Ordering::SeqCst)
+                    .then(|| "🔊".repeat(1024)),
+                default_output: self
+                    .0
+                    .wide_audio_names
+                    .load(Ordering::SeqCst)
+                    .then(|| "🔊".repeat(1024)),
                 outputs: (0..5000)
                     .map(|index| librepods_linux::desktop::AudioNode {
                         index,
@@ -2528,4 +2548,126 @@ async fn repeated_cached_config_target_still_writes_once_and_reads_a_fresh_gener
         }
         harness.stop().await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn combined_finite_protocol_state_and_large_audio_fit_status_watch_and_owned_cleanup() {
+    let shared = Arc::new(Shared::default());
+    shared.large_audio.store(true, Ordering::SeqCst);
+    shared.wide_audio_names.store(true, Ordering::SeqCst);
+    let mut harness = Harness::start(shared.clone(), Config::default()).await;
+    harness.ready().await;
+    let audio = harness.request(600, Operation::AudioStatus, 1000).await;
+    assert_eq!(
+        audio
+            .error
+            .expect("explicit graph exceeds endpoint budget")
+            .code,
+        ErrorCode::ResponseTooLarge
+    );
+    let peer = wait_for_peer(&shared, 1).await;
+    for id in 0..=u8::MAX {
+        let packet = if id == 0x0D {
+            packets::build_noise_control(NoiseControlMode::Adaptive).to_vec()
+        } else {
+            ControlCommand::create(id, &[255; 4]).to_vec()
+        };
+        assert!(
+            parser::parse(&packet).is_ok(),
+            "control frame was not protocol-valid"
+        );
+        peer.push(packet);
+    }
+    for first in (0..=u8::MAX as usize).step_by(32) {
+        let mut packet = vec![4, 0, 4, 0, 4, 0, 32];
+        for component in first..first + 32 {
+            packet.extend_from_slice(&[component as u8, 1, 100, 255, 1]);
+        }
+        assert!(packet.len() <= packets::MAX_PACKET_BYTES);
+        assert!(
+            parser::parse(&packet).is_ok(),
+            "battery frame was not protocol-valid"
+        );
+        peer.push(packet);
+    }
+    // Read the actual published serializer output first so an oversized IPC
+    // response does not hide the measured finite-state size behind a closed peer.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let (snapshot, bytes) = loop {
+        let current = std::fs::read(harness.paths.state_file())
+            .ok()
+            .and_then(|bytes| {
+                serde_json::from_slice::<Snapshot>(&bytes)
+                    .ok()
+                    .map(|snapshot| (snapshot, bytes))
+            });
+        if let Some((snapshot, bytes)) = current {
+            if snapshot.device.reported_controls.len() == 256
+                && snapshot.device.battery.unknown_records.len() == 252
+                && snapshot.audio["details_omitted"] == true
+                && snapshot.observation_unix_ms.len() >= 500
+            {
+                break (snapshot, bytes);
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "combined state was not published"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    let wire_size = serde_json::to_vec(&Response::snapshot(601, &snapshot))
+        .expect("full response")
+        .len();
+    eprintln!(
+        "combined finite state: published={} bytes, native response={wire_size} bytes",
+        bytes.len()
+    );
+    assert!(
+        wire_size <= librepods_daemon::ipc::MAX_RESPONSE_FRAME,
+        "all finite protocol values and bounded audio summary exceeded the native response budget"
+    );
+    assert_eq!(snapshot.device.reported_controls[&0xFE], [255; 4]);
+    assert_eq!(
+        snapshot.device.battery.unknown_records[&0xFF].status,
+        librepods_core::device::battery::BatteryStatus::Unknown(255)
+    );
+    let response = harness.request(601, Operation::Status, 1000).await;
+    let native: Snapshot = serde_json::from_value(response.result.expect("large status"))
+        .expect("native status schema");
+    assert_eq!(native.device.reported_controls.len(), 256);
+    assert_eq!(native.device.battery.unknown_records.len(), 252);
+    let mut watcher = UnixStream::connect(harness.paths.socket())
+        .await
+        .expect("watcher");
+    let mut request = serde_json::to_vec(&Request {
+        version: 1,
+        id: 602,
+        timeout_ms: 1000,
+        operation: Operation::Watch,
+    })
+    .expect("request");
+    request.push(b'\n');
+    watcher.write_all(&request).await.expect("watch request");
+    let response: Response = serde_json::from_slice(
+        &runtime::read_response_frame(&mut watcher)
+            .await
+            .expect("bounded large watch frame")
+            .expect("watch snapshot"),
+    )
+    .expect("response schema");
+    assert_eq!(response.id, 602);
+    let watched: Snapshot =
+        serde_json::from_value(response.result.expect("large watch snapshot")).expect("snapshot");
+    assert_eq!(watched.device.reported_controls.len(), 256);
+    assert_eq!(watched.device.battery.unknown_records.len(), 252);
+    harness.shutdown_in_place().await;
+    assert!(
+        !harness.paths.state_file().exists(),
+        "owned large state survived cleanup"
+    );
+    assert!(
+        harness.paths.state.is_dir(),
+        "test directory vanished before cleanup check"
+    );
 }
