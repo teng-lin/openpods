@@ -117,3 +117,149 @@ fn config_requires_private_regular_bounded_files_and_never_follows_a_symlink() {
     assert!(paths.load_config().is_err());
     assert_eq!(fs::read(other).expect("unchanged symlink target"), b"{}");
 }
+
+fn make_fifo(path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("path");
+    // Safety: name is a valid NUL-terminated path; mkfifo does not retain it.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+}
+
+#[test]
+fn fifo_child_probe() {
+    let Some(root) = std::env::var_os("LIBREPODS_FIFO_TEST_ROOT") else {
+        return;
+    };
+    let paths = paths(Path::new(&root));
+    match std::env::var("LIBREPODS_FIFO_TEST_OPERATION")
+        .expect("probe operation")
+        .as_str()
+    {
+        "config" => {
+            assert!(paths.load_config().is_err(), "FIFO config was accepted");
+        }
+        "owner-cleanup" => {
+            drop(OwnerGuard::acquire(&paths, "probe").expect("owner"));
+        }
+        "legacy-shutdown" => {
+            tokio::runtime::Runtime::new()
+                .expect("child runtime")
+                .block_on(async move {
+                    let (sender, receiver) = tokio::sync::oneshot::channel();
+                    let clone = paths.clone();
+                    let server = tokio::spawn(librepods_daemon::runtime::run(
+                        clone,
+                        Config {
+                            legacy_compatibility: true,
+                            ..Config::default()
+                        },
+                        std::sync::Arc::new(NoDevice),
+                        async {
+                            let _ = receiver.await;
+                        },
+                    ));
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+                    while !paths.socket().exists() {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "child service did not start"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    sender.send(()).expect("shutdown request");
+                    server.await.expect("service join").expect("service result");
+                    use std::os::unix::fs::FileTypeExt;
+                    assert!(paths
+                        .legacy_state
+                        .symlink_metadata()
+                        .expect("FIFO preserved")
+                        .file_type()
+                        .is_fifo());
+                });
+        }
+        other => panic!("unexpected probe operation {other}"),
+    }
+}
+
+#[test]
+fn fifo_config_and_owner_cleanup_cannot_block_before_regular_file_validation() {
+    for operation in ["config", "owner-cleanup", "legacy-shutdown"] {
+        let directory = tempfile::tempdir().expect("test directory");
+        let paths = paths(directory.path());
+        fs::create_dir_all(paths.config.parent().expect("config parent"))
+            .expect("config directory");
+        fs::create_dir_all(&paths.state).expect("state directory");
+        fs::set_permissions(&paths.state, fs::Permissions::from_mode(0o700))
+            .expect("private directory");
+        fs::create_dir_all(paths.legacy_state.parent().expect("legacy parent"))
+            .expect("legacy directory");
+        fs::set_permissions(
+            paths.legacy_state.parent().expect("legacy parent"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .expect("private legacy parent");
+        let destination = match operation {
+            "config" => paths.config.clone(),
+            "owner-cleanup" => paths.state_file(),
+            _ => paths.legacy_state.clone(),
+        };
+        make_fifo(&destination);
+        let mut child =
+            std::process::Command::new(std::env::current_exe().expect("test executable"))
+                .args(["--exact", "fifo_child_probe", "--nocapture"])
+                .env("LIBREPODS_FIFO_TEST_ROOT", directory.path())
+                .env("LIBREPODS_FIFO_TEST_OPERATION", operation)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("bounded child probe");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if child.try_wait().expect("child status").is_some() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().expect("terminate blocked FIFO probe");
+                child.wait().expect("reap probe");
+                panic!("{operation} blocked opening a FIFO before validating regular file type");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let result = child.wait_with_output().expect("child output");
+        assert!(
+            result.status.success(),
+            "{operation}: {} {}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+struct NoDevice;
+impl librepods_daemon::backend::Backend for NoDevice {
+    fn discover(
+        &self,
+        _: Option<&str>,
+    ) -> Result<librepods_daemon::backend::Endpoint, librepods_daemon::DaemonError> {
+        Err(librepods_daemon::DaemonError::transient(
+            ErrorCode::AdapterUnavailable,
+            "fake discovery",
+            "no adapter",
+        ))
+    }
+    fn connect(
+        &self,
+        _: &librepods_daemon::backend::Endpoint,
+        _: std::time::Duration,
+    ) -> Result<
+        std::sync::Arc<dyn librepods_daemon::backend::SessionTransport>,
+        librepods_daemon::DaemonError,
+    > {
+        Err(librepods_daemon::DaemonError::new(
+            ErrorCode::ConnectFailed,
+            "fake connect",
+            "no endpoint",
+        ))
+    }
+}

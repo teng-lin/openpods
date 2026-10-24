@@ -222,6 +222,14 @@ struct Harness {
 
 impl Harness {
     async fn start(shared: Arc<Shared>, config: Config) -> Self {
+        Self::start_seeded(shared, config, None).await
+    }
+
+    async fn start_seeded(
+        shared: Arc<Shared>,
+        config: Config,
+        legacy: Option<serde_json::Value>,
+    ) -> Self {
         let directory = TempDir::new().expect("test directory");
         let root = directory.path();
         let paths = Paths {
@@ -231,6 +239,13 @@ impl Harness {
             legacy_state: root.join("state/librepods/status.json"),
             legacy_socket: root.join("run/librepods.sock"),
         };
+        if let Some(legacy) = legacy {
+            librepods_daemon::storage::atomic_write(
+                &paths.legacy_state,
+                &serde_json::to_vec(&legacy).expect("seeded legacy JSON"),
+            )
+            .expect("seeded legacy state");
+        }
         let (sender, receiver) = oneshot::channel();
         let backend = Arc::new(EmulatedBackend(shared.clone()));
         let server_paths = paths.clone();
@@ -1525,4 +1540,51 @@ async fn pipelined_native_requests_keep_frames_and_identifiers_separate() {
         assert!(response.error.is_none(), "pipelined request failed");
     }
     harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn foreign_legacy_publication_is_preserved_and_degradation_does_not_break_control() {
+    let foreign = Snapshot::new("foreign-owner".into(), &DeviceState::default()).legacy();
+    let mut harness = Harness::start_seeded(
+        Arc::new(Shared::default()),
+        Config {
+            legacy_compatibility: true,
+            ..Config::default()
+        },
+        Some(foreign.clone()),
+    )
+    .await;
+    harness.ready().await;
+    let degraded = harness
+        .wait_for(|snapshot| snapshot.publication_error.is_some())
+        .await;
+    assert!(degraded.connected);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &std::fs::read(&harness.paths.legacy_state).expect("foreign status")
+        )
+        .expect("legacy JSON"),
+        foreign
+    );
+    assert!(
+        harness
+            .request(
+                360,
+                Operation::Change(SettingChange::ListeningMode(NoiseControlMode::Transparency)),
+                1000
+            )
+            .await
+            .error
+            .is_none(),
+        "legacy conflict blocked ANC"
+    );
+    harness.shutdown_in_place().await;
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &std::fs::read(&harness.paths.legacy_state)
+                .expect("foreign status must survive shutdown")
+        )
+        .expect("legacy JSON"),
+        foreign
+    );
 }
