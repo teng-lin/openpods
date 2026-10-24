@@ -31,6 +31,9 @@ fn metadata() -> Vec<u8> {
     let mut bytes = packets::METADATA_PREFIX.to_vec();
     bytes.extend_from_slice(&[0; 6]);
     bytes.extend_from_slice(b"Example AirPods\0A3048\0Apple Inc.\0");
+    // Real firmware appends additional fields and opaque extension bytes.
+    bytes.extend_from_slice(b"ExampleFirmware\0");
+    bytes.extend_from_slice(&[1, 2, 3, 0x80]);
     bytes
 }
 
@@ -1470,5 +1473,56 @@ async fn cancelled_key_fetch_discards_old_responses_and_requires_a_complete_new_
         .error
         .is_none());
     assert!(harness.paths.state.join("ble-keys.json").is_file());
+    harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pipelined_native_requests_keep_frames_and_identifiers_separate() {
+    let harness = Harness::start(Arc::new(Shared::default()), Config::default()).await;
+    harness.ready().await;
+    let mut client = UnixStream::connect(harness.paths.socket())
+        .await
+        .expect("client");
+    let mut frames = b"invalid JSON\n".to_vec();
+    for (id, operation) in [
+        (350, Operation::Status),
+        (351, Operation::Capabilities),
+        (352, Operation::Doctor),
+    ] {
+        frames.extend(
+            serde_json::to_vec(&Request {
+                version: 1,
+                id,
+                timeout_ms: 1000,
+                operation,
+            })
+            .expect("frame"),
+        );
+        frames.push(b'\n');
+    }
+    client.write_all(&frames).await.expect("pipelined write");
+    let malformed: Response = serde_json::from_slice(
+        &runtime::read_frame(&mut client)
+            .await
+            .expect("read")
+            .expect("response"),
+    )
+    .expect("error schema");
+    assert_eq!(malformed.id, 0);
+    assert_eq!(
+        malformed.error.expect("malformed request").code,
+        ErrorCode::InvalidInput
+    );
+    for id in 350..353 {
+        let response: Response = serde_json::from_slice(
+            &runtime::read_frame(&mut client)
+                .await
+                .expect("read")
+                .expect("response"),
+        )
+        .expect("response schema");
+        assert_eq!(response.id, id);
+        assert!(response.error.is_none(), "pipelined request failed");
+    }
     harness.stop().await;
 }
