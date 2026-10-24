@@ -1,0 +1,77 @@
+{
+  "source_commit": "f920fe3c539a995b288f1ccbab7cea95f9625a2a",
+  "source_tree": "bbeae158ab6acd1fff3531e8ff4ec6638da88233",
+  "headline_metric": "production_native_summary",
+  "method": [
+    "Run the locked pure-core tests with nightly cargo-llvm-cov --branch, separately for default and BLE.",
+    "Use LLVM native per-source branch summary counters, subtracting only branch outcomes in syn-derived test-only syntax spans.",
+    "No production source, function, or branch is excluded. Tests outside core/src are not production.",
+    "Also retain exact LCOV BRDA records and a source-line/block/branch counter union using maximum taken count for duplicate IDs.",
+    "Native summaries and BRDA counter unions may differ in covered outcomes across variants; use the lower native filtered summary as headline rather than claim the higher export-derived percentage."
+  ],
+  "limitations": [
+    "Rust/LLVM branch instrumentation is unstable; cargo-llvm-cov emitted that warning.",
+    "The native summary/BRDA inconsistency is observable in the saved exports for duplicate source locations across unit and integration instantiations; no upstream cause or correction is claimed.",
+    "This reports instrumented branch outcomes, not MC/DC, complete enum-transition coverage, hardware behavior, or a release branch gate.",
+    "No branch minimum is specified by the plan. Existing line gates are separate and were not replaced by this diagnostic.",
+    "The branch run uses cargo test --tests; it does not instrument doctests."
+  ],
+  "variants": {
+    "default": {
+      "groups": {
+        "llvm_native_source_summary": {
+          "covered": 527,
+          "count": 610,
+          "percent": 86.39344262295081
+        },
+        "test_syntax_excluded": {
+          "covered": 14,
+          "count": 14,
+          "percent": 100.0
+        },
+        "production_native_summary": {
+          "covered": 513,
+          "count": 596,
+          "percent": 86.0738255033557
+        },
+        "production_brda_counter_union": {
+          "covered": 528,
+          "count": 596,
+          "percent": 88.59060402684564
+        }
+      }
+    },
+    "ble": {
+      "groups": {
+        "llvm_native_source_summary": {
+          "covered": 547,
+          "count": 632,
+          "percent": 86.5506329113924
+        },
+        "test_syntax_excluded": {
+          "covered": 14,
+          "count": 14,
+          "percent": 100.0
+        },
+        "production_native_summary": {
+          "covered": 533,
+          "count": 618,
+          "percent": 86.24595469255664
+        },
+        "production_brda_counter_union": {
+          "covered": 548,
+          "count": 618,
+          "percent": 88.67313915857605
+        }
+      }
+    }
+  },
+  "source_metadata": {
+    "core_source_tree": "1bec7489785fae97323e335818d3d4dd6c4bc431",
+    "worktree_status": "",
+    "cargo_lock_sha256": "a07b8ee367ff6160c320c8b6195d85f4e9dcad40a6a2b949662d1f7014bb4134",
+    "rustc_verbose": "rustc 1.101.0-nightly (48f4b0553 2026-10-23)\nbinary: rustc\ncommit-hash: 48f4b05538b8eca412137042d9647a61e692c6b3\ncommit-date: 2026-10-23\nhost: x86_64-unknown-linux-gnu\nrelease: 1.101.0-nightly\nLLVM version: 23.1.4",
+    "cargo_llvm_cov": "cargo-llvm-cov 0.9.1"
+  },
+  "archive_sha256": "ecf10d881ae41e012b1fd53ac9aacf2f030e92291b4a7be8ddd989fbf9a1e498"
+}

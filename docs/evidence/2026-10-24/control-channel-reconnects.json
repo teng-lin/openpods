@@ -1,0 +1,42 @@
+{
+  "source_commit": "f920fe3c539a995b288f1ccbab7cea95f9625a2a",
+  "binary_sha256": "aafbfd7ceea47331da998e336654eaacd8bd58bf62f422b5dac1f27fe886d3a5",
+  "scope": "automated AACP-only reconnect; not a physical case or suspend cycle",
+  "started_utc": "2026-10-24T22:59:35.101642+00:00",
+  "cycles": [
+    {
+      "number": 1,
+      "generation_before": 1,
+      "generation_after": 2,
+      "fresh_ready_seconds": 0.4355621999857249,
+      "bluez_connected_before": true,
+      "bluez_connected_after": true,
+      "same_device": true,
+      "audio_profile_and_defaults_preserved": true,
+      "listening_mode_preserved": true
+    },
+    {
+      "number": 2,
+      "generation_before": 2,
+      "generation_after": 3,
+      "fresh_ready_seconds": 0.12281959000392817,
+      "bluez_connected_before": true,
+      "bluez_connected_after": true,
+      "same_device": true,
+      "audio_profile_and_defaults_preserved": true,
+      "listening_mode_preserved": true
+    },
+    {
+      "number": 3,
+      "generation_before": 3,
+      "generation_after": 4,
+      "fresh_ready_seconds": 0.23865465399285313,
+      "bluez_connected_before": true,
+      "bluez_connected_after": true,
+      "same_device": true,
+      "audio_profile_and_defaults_preserved": true,
+      "listening_mode_preserved": true
+    }
+  ],
+  "passed": true
+}

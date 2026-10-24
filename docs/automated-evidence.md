@@ -116,8 +116,10 @@ coverage for OS Bluetooth/desktop adapters.
 
 The final `cargo deny --locked check` passed advisories, bans, licenses and
 sources with zero error records, against Cargo.lock SHA-256
-`e93e7ca714de465d2f2997fcce65ada0dcd40983fe63fa5a36fb76dc2c1cde64`.
-No advisory exemption was added. Evidence: `/tmp/librepods-rs-final-lock-deny.log`.
+`a07b8ee367ff6160c320c8b6195d85f4e9dcad40a6a2b949662d1f7014bb4134`.
+No advisory exemption was added. Evidence: `/tmp/librepods-rs-08f24a9-final-deny.log`.
+The new lock adds only the daemon's Linux test dependency edge to the existing
+zbus package; resolved versions/checksums are unchanged.
 Workspace Tokio 1.54.1 resolves the initially detected 1.50 advisory.
 
 An additional isolated child forced a real partial regular-file write to fail
@@ -134,3 +136,20 @@ space/percent/dollar paths. A transient user unit executing a staged `/usr/bin/t
 also accepted the special path with environment expansion disabled; this does
 not establish the real daemon sandbox gate. No automatic packaging test starts
 or switches the user's real AirPods services.
+
+## Current branch diagnostics and cross-platform checks
+
+[Pure-core branch diagnostics](evidence/2026-10-24/core-branch-diagnostic.json)
+on clean `f920fe3` report 513/596 (86.07%) default and 533/618 (86.25%) BLE
+production outcomes using conservative LLVM native counters. Only parsed test
+syntax is excluded. LCOV counter unions report 15 additional covered outcomes;
+we retain the discrepancy and use the lower native result. Instrumentation is
+unstable and diagnostic; no branch threshold replaces the line gates.
+
+Strict Linux BLE and Windows default/BLE workspace all-target Clippy passed at
+`f920fe3`, and root default all-target Clippy and formatting passed after the
+additional suspend tests. Linux-hosted Windows type/lint checks do not establish
+Windows linking, runtime or hardware acceptance. Android default/BLE pure-core
+checks passed at the unchanged production core. Final source/version logs are
+in `/home/blackmyth/.cache/librepods-platform-*-final-f920fe3.log`; the actual
+Model.js accepted three freshly Rust-generated status fixtures.

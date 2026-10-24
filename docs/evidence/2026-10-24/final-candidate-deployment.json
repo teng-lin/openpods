@@ -1,19 +1,19 @@
 {
   "build": {
-    "source_commit": "08f24a968ecb200f4bedf5d9b0ff5bcd2de3cbbe",
-    "source_tree": "c305810833cd7243270a010a1fa55a04ca6a66a8",
+    "source_commit": "f920fe3c539a995b288f1ccbab7cea95f9625a2a",
+    "source_tree": "bbeae158ab6acd1fff3531e8ff4ec6638da88233",
     "source_state": "clean",
     "features": "no-default-features",
     "started_utc": "2026-10-24T22:48:35.295883+00:00",
     "lock_sha256": "a07b8ee367ff6160c320c8b6195d85f4e9dcad40a6a2b949662d1f7014bb4134",
     "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
     "ble_backend_absent_from_graph": true,
-    "binary_sha256": "96e7bdde8e3bc3de8a335a4817f03f281321505f6726a522ffa241a51558c361",
-    "completed_utc": "2026-10-24T22:48:44.516023+00:00"
+    "binary_sha256": "aafbfd7ceea47331da998e336654eaacd8bd58bf62f422b5dac1f27fe886d3a5",
+    "completed_utc": "2026-10-24T22:54:16.747786+00:00"
   },
-  "started_utc": "2026-10-24T22:49:29.452690+00:00",
-  "old_stop_seconds": 0.014756279007997364,
-  "pid": 1935818,
+  "started_utc": "2026-10-24T22:55:39.063334+00:00",
+  "old_stop_seconds": 0.008280604000901803,
+  "pid": 1983778,
   "native_ready": true,
   "same_device": true,
   "compiled_no_ble": true,

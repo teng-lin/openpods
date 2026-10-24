@@ -4,7 +4,8 @@ Rust 1.99.1 is pinned because it is the toolchain used for the recorded local
 baseline. This is the supported compiler baseline; no lower MSRV is claimed.
 `Cargo.lock` pins dependencies. Linux and Windows builds run separately, with
 minimal/default and BLE feature variants. Core also receives an Android compile
-check. Native Windows linking is verified on Windows CI, not by Linux type checks.
+check. Native Windows linking must be verified on Windows CI; Linux type checks do not
+establish native linking or runtime acceptance.
 
 ## Local checks
 

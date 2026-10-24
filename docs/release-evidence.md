@@ -2,8 +2,7 @@
 
 Status: implementation committed on `daemon-port`; first stable release
 acceptance is incomplete. Further manual testing was stopped by the user after
-five successful case cycles. Unattended verification continues: final critical
-coverage and the 24-hour no-BLE soak remain open. Automated evidence is recorded
+five successful case cycles. Unattended verification continues: the 24-hour no-BLE soak remains open. Automated evidence is recorded
 separately in [automated-evidence.md](automated-evidence.md).
 
 The final instrumentation run exposed a queued-client cancellation race. The
@@ -11,14 +10,13 @@ kernel peer guard fixed it and passed 200 unchanged regression repetitions.
 A missed suspend/resume edge was also reproduced with a private login1 bus;
 `08f24a9` latches epochs until owner cancellation completes and fences admitted
 requests against that epoch. Both minimal and BLE functional suites pass at the
-subsequent test-only checkpoint; final coverage and additional epoch regressions
-are still being completed.
+subsequent test-only checkpoint; all three coverage gates and the additional epoch regressions now pass.
 
 ## Environment record
 
 | Field | Evidence |
 | --- | --- |
-| Rust commit and tree cleanliness | [Deployed candidate](evidence/2026-10-24/final-candidate-deployment.json): clean `08f24a9`, exact tree and binary hashes recorded |
+| Rust commit and tree cleanliness | [Deployed candidate](evidence/2026-10-24/final-candidate-deployment.json): clean `f920fe3`, exact tree and binary hashes recorded |
 | Rust compiler and dependency lock hash | Rust 1.99.1; lock SHA-256 `a07b8ee367ff6160c320c8b6195d85f4e9dcad40a6a2b949662d1f7014bb4134`; candidate record above |
 | OS/kernel, BlueZ, PipeWire and WirePlumber versions | [Recorded host](evidence/2026-10-24/hardware-environment.json) |
 | Adapter model/driver | Intel USB 8087:0033 / btusb; host record above |
@@ -32,8 +30,8 @@ are still being completed.
 
 | Gate | Required evidence | Status |
 | --- | --- | --- |
-| Automated matrix | Both Linux workspace variants and 22 CLI checks each passed; fresh Rust-generated fixtures passed actual Model.js; default strict Clippy and fmt passed | Final supplemental tests/cross-platform attestation pending |
-| Coverage | Fresh production run: core 96.90%, service 88.01%; critical changed code 89.66% | Broad gates passed; critical 90% gate still open |
+| Automated matrix | Both Linux workspace variants and 22 CLI checks each passed; fresh Rust-generated fixtures passed actual Model.js; default strict Clippy and fmt passed | Linux functional/lint, cross-platform lint/compile and panel checks passed; scheduled stress/property audit additions pending |
+| Coverage | [Clean f920fe3 record](evidence/2026-10-24/production-coverage.json): core 96.90%, service 88.96%; critical changed code 90.44% | All three gates passed |
 | Protocol robustness | Corpus replay, fuzz artifacts/regressions, Miri or documented platform limitation | Pending |
 | Native IPC | Concurrent clients, deadline expiry, unknown mutation outcome, stop/restart behavior | Pending |
 | Legacy integration | Rust-generated snapshots accepted by actual Omarchy Model.js | Pending |
@@ -97,7 +95,7 @@ A completed 600-second diagnostic on the earlier `33e181f` application checkpoin
 measured 0.1733% CPU of one core, p95 local status latency 3.378 ms and maximum
 RSS 11644 KiB. RSS increased from its first sample; this is a warm-up diagnostic,
 not the required 24-hour stability proof. [Redacted diagnostic summary](evidence/2026-10-24/idle-diagnostic.json);
-raw private samples are in `target/idle-33e181f/`. The final 24-hour run has not started.
+raw private samples are in `target/idle-33e181f/`. The final 24-hour run has not started; the exact `f920fe3` executable is warming up.
 
 The user explicitly stopped manual testing after [5 successful physical
 case/reconnect cycles](evidence/2026-10-24/case-reconnect-smoke.json). These
@@ -113,3 +111,10 @@ coverage does not replace these gates. No previous daemon was initially active;
 the staged install cycle therefore does not prove a full previous-daemon
 migration and rollback. Optional BLE hardware coexistence remains unverified;
 connected scanning remains disabled and BLE is experimental.
+
+Three [automatic AACP-only reconnects](evidence/2026-10-24/control-channel-reconnects.json)
+on the exact `f920fe3` binary restored fresh identity in 0.123–0.436 seconds.
+The selected device, listening mode, profile and defaults were preserved. These
+are control-channel checks; they do not count as physical case/suspend cycles
+or audible continuity proof. They occurred during the final candidate warm-up
+diagnostic and are recorded so its workload is explicit.
