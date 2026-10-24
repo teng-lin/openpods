@@ -6,9 +6,13 @@
 
 #[cfg(target_os = "linux")]
 pub mod backend;
+#[cfg(target_os = "linux")]
+pub mod ble;
 pub mod config;
 pub mod error;
 pub mod ipc;
+#[cfg(target_os = "linux")]
+pub mod keys;
 #[cfg(target_os = "linux")]
 pub mod runtime;
 #[cfg(target_os = "linux")]
