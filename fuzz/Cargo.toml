@@ -1,0 +1,45 @@
+[package]
+name = "librepods-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "AGPL-3.0-only"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+librepods-core = { path = "../librepods-core", default-features = false }
+librepods-daemon = { path = "../librepods-daemon", default-features = false }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "aacp"
+path = "fuzz_targets/aacp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ble"
+path = "fuzz_targets/ble.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ipc"
+path = "fuzz_targets/ipc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
+test = false
+doc = false
+bench = false

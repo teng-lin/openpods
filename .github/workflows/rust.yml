@@ -2,51 +2,91 @@ name: Rust
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [master]
   pull_request:
-    branches: [ "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
-  build:
+  test:
+    name: ${{ matrix.os }} / ${{ matrix.features }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-
+        features: [minimal, ble]
     runs-on: ${{ matrix.os }}
-
+    timeout-minutes: 20
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - name: System dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libudev-dev
+      - name: Install pinned Rust
+        shell: bash
+        run: rustup show active-toolchain
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Minimal feature checks
+        if: matrix.features == 'minimal'
+        run: |
+          cargo clippy --workspace --all-targets --no-default-features --locked -- -D warnings
+          cargo test --workspace --no-default-features --locked
+          cargo build -p librepods-cli --release --no-default-features --locked
+      - name: BLE feature checks
+        if: matrix.features == 'ble'
+        run: |
+          cargo clippy --workspace --all-targets --no-default-features --features librepods-cli/ble --locked -- -D warnings
+          cargo test --workspace --no-default-features --features librepods-cli/ble --locked
+          cargo build -p librepods-cli --release --no-default-features --features librepods-cli/ble --locked
+      - name: Verify no BLE backend in minimal dependency graph
+        if: matrix.features == 'minimal'
+        shell: bash
+        run: |
+          cargo tree -p librepods-cli --no-default-features --locked > dependencies.txt
+          if grep -E 'btleplug|bluez-async|bluez-generated' dependencies.txt; then
+            echo 'BLE backend leaked into minimal build'; exit 1
+          fi
+      - name: Linux packaging and panel contract tests
+        if: runner.os == 'Linux' && matrix.features == 'minimal'
+        run: |
+          python3 -m unittest discover -s tests/packaging -v
+          node tests/compat/model.mjs
+          node tests/compat/model.mjs --fixtures-dir target/compat-fixtures
+      - name: Cross-platform core
+        if: runner.os == 'Linux' && matrix.features == 'minimal'
+        run: |
+          rustup target add aarch64-linux-android
+          cargo check -p librepods-core --no-default-features --target aarch64-linux-android --locked
 
-    - name: Install system dependencies (Linux)
-      if: runner.os == 'Linux'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          pkg-config \
-          libdbus-1-dev \
-          libudev-dev
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libudev-dev
+      - run: cargo install cargo-llvm-cov --version 0.9.1 --locked
+      - name: Measure all workspace source, including uncovered paths
+        run: cargo llvm-cov --workspace --no-default-features --locked --json --output-path target/coverage.json
+      - name: Enforce release coverage targets
+        run: python3 scripts/check-coverage.py target/coverage.json --core-min 90 --service-min 80
+      - name: Preserve coverage evidence even when the gate fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: line-coverage
+          path: target/coverage.json
 
-    - name: Add lint components
-      run: rustup component add rustfmt clippy
-
-    - name: Check formatting
-      run: cargo fmt --all -- --check
-
-    - name: Clippy
-      run: cargo clippy --all-targets -- -D warnings
-
-    - name: Build
-      run: cargo build --verbose
-
-    - name: Run tests
-      run: cargo test --verbose
-
-    - name: Check core for Android (crate-purity litmus test)
-      if: runner.os == 'Linux'
-      run: |
-        rustup target add aarch64-linux-android
-        cargo check -p librepods-core --target aarch64-linux-android
+  dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo install cargo-deny --version 0.20.2 --locked
+      - run: cargo deny --locked check

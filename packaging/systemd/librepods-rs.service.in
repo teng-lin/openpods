@@ -1,0 +1,42 @@
+[Unit]
+Description=LibrePods Rust AirPods service
+Documentation=https://github.com/brianpht/librepods-rs
+After=graphical-session.target
+PartOf=graphical-session.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart="@BINARY@" serve
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=2
+UMask=0077
+RuntimeDirectory=librepods-rs
+RuntimeDirectoryMode=0700
+StateDirectory=librepods-rs
+StateDirectoryMode=0700
+ConfigurationDirectory=librepods-rs
+ConfigurationDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%t/librepods-rs
+PrivateTmp=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH AF_NETLINK
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+
+[Install]
+WantedBy=graphical-session.target

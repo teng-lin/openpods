@@ -1,0 +1,41 @@
+name: Scheduled fuzz and interpreter checks
+
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aacp, ble, ipc, config]
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libudev-dev
+      - run: rustup toolchain install nightly --profile minimal
+      - run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Bounded fuzz run
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=120 -max_len=16385 -rss_limit_mb=2048
+      - name: Preserve minimized failure input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ matrix.target }}-failure
+          path: fuzz/artifacts
+
+  miri:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install nightly --profile minimal --component miri
+      - run: cargo +nightly miri setup
+      - name: Pure-core interpreter checks
+        run: cargo +nightly miri test -p librepods-core --no-default-features --locked
