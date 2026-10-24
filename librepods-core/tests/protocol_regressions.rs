@@ -254,3 +254,37 @@ fn full_metadata_extensions_do_not_hide_verified_identity_or_retain_serials() {
     assert!(state.fresh("metadata"));
     assert!(state.model.capabilities().noise_control);
 }
+
+#[test]
+fn packet_debug_redacts_keys_and_unknown_private_extensions_without_destroying_data() {
+    use librepods_core::protocol::parser::{ProximityKey, ProximityKeyType};
+    let secret = vec![0xab; 16];
+    let key = ProximityKey {
+        key_type: ProximityKeyType::Irk,
+        data: secret.clone(),
+    };
+    let debug = format!("{key:?}");
+    assert!(debug.contains("16"));
+    assert!(!debug.contains("171, 171"));
+    assert_eq!(key.data, secret);
+    for packet in [
+        ParsedPacket::ProximityKeys(vec![key]),
+        ParsedPacket::MagicCloudKeys {
+            irk: [0xab; 16],
+            enc_key: [0xab; 16],
+        },
+        ParsedPacket::Unknown(secret.clone()),
+    ] {
+        let debug = format!("{packet:?}");
+        assert!(!debug.contains("171, 171"));
+        assert!(debug.contains("16"));
+        match packet {
+            ParsedPacket::Unknown(raw) => assert_eq!(raw, secret),
+            ParsedPacket::MagicCloudKeys { irk, enc_key } => {
+                assert_eq!(irk, [0xab; 16]);
+                assert_eq!(enc_key, [0xab; 16]);
+            }
+            _ => {}
+        }
+    }
+}

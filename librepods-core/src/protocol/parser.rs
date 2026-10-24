@@ -68,7 +68,7 @@ impl ProximityKeyType {
 }
 
 /// A single proximity key extracted from a keys-response packet.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProximityKey {
     pub key_type: ProximityKeyType,
     pub data: Vec<u8>,
@@ -79,7 +79,6 @@ pub struct ProximityKey {
 // ---------------------------------------------------------------------------
 
 /// Result of parsing an incoming AAP packet.
-#[derive(Debug)]
 pub enum ParsedPacket {
     /// Battery status for left, right, case.
     Battery(BatteryInfo),
@@ -128,6 +127,73 @@ pub enum ParsedPacket {
 
     /// Unrecognised packet.
     Unknown(Vec<u8>),
+}
+
+// Packet values stay available to the owner, while routine Debug output never
+// dumps key payloads or unknown frames that may contain private extensions.
+impl std::fmt::Debug for ProximityKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProximityKey")
+            .field("key_type", &self.key_type)
+            .field("bytes", &self.data.len())
+            .finish()
+    }
+}
+impl std::fmt::Debug for ParsedPacket {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Battery(info) => formatter.debug_tuple("Battery").field(info).finish(),
+            Self::EarDetection {
+                primary_in_ear,
+                secondary_in_ear,
+            } => formatter
+                .debug_struct("EarDetection")
+                .field("primary_in_ear", primary_in_ear)
+                .field("secondary_in_ear", secondary_in_ear)
+                .finish(),
+            Self::EarStatus { primary, secondary } => formatter
+                .debug_struct("EarStatus")
+                .field("primary", primary)
+                .field("secondary", secondary)
+                .finish(),
+            Self::NoiseControl(mode) => formatter.debug_tuple("NoiseControl").field(mode).finish(),
+            Self::ConversationalAwareness { status } => formatter
+                .debug_struct("ConversationalAwareness")
+                .field("status", status)
+                .finish(),
+            Self::ControlCommand { id, data } => formatter
+                .debug_struct("ControlCommand")
+                .field("id", id)
+                .field("data", data)
+                .finish(),
+            Self::Metadata {
+                name,
+                model_number,
+                manufacturer,
+            } => formatter
+                .debug_struct("Metadata")
+                .field("name", name)
+                .field("model_number", model_number)
+                .field("manufacturer", manufacturer)
+                .finish(),
+            Self::HeadTracking(data) => formatter.debug_tuple("HeadTracking").field(data).finish(),
+            Self::ProximityKeys(keys) => {
+                formatter.debug_tuple("ProximityKeys").field(keys).finish()
+            }
+            Self::HandshakeAck => formatter.write_str("HandshakeAck"),
+            Self::FeaturesAck => formatter.write_str("FeaturesAck"),
+            Self::MagicCloudKeys { irk, enc_key } => formatter
+                .debug_struct("MagicCloudKeys")
+                .field("irk_bytes", &irk.len())
+                .field("enc_key_bytes", &enc_key.len())
+                .finish(),
+            Self::Unknown(raw) => formatter
+                .debug_struct("Unknown")
+                .field("bytes", &raw.len())
+                .finish(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
