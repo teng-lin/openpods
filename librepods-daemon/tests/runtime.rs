@@ -1718,9 +1718,12 @@ async fn oversized_audio_graph_returns_a_typed_error_and_never_poisons_native_st
     .expect("oversized explicit audio result must return a typed response");
     assert_eq!(
         audio.error.expect("bounded audio result").code,
-        ErrorCode::InvalidInput
+        ErrorCode::ResponseTooLarge
     );
-    let status = harness.ready().await;
+    let status = harness
+        .wait_for(|status| status.audio["details_omitted"] == true)
+        .await;
+    assert_eq!(status.audio["outputs_count"], 5000);
     assert!(
         serde_json::to_vec(&status).expect("status").len()
             < librepods_daemon::ipc::MAX_RESPONSE_FRAME

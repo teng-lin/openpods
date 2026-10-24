@@ -61,6 +61,7 @@ jobs:
         run: |
           cargo test --manifest-path tools/coverage-spans/Cargo.toml --locked
           python3 -m unittest discover -s tests/packaging -v
+          python3 tools/test_hardware_modes.py -v
           python3 tests/cli/contract.py target/release/librepods-cli -v
           node tests/compat/model.mjs
           node tests/compat/model.mjs --fixtures-dir target/compat-fixtures

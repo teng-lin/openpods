@@ -49,15 +49,25 @@ async fn frame_limit_is_exact_and_partial_eof_is_distinct_from_clean_close() {
 
 #[tokio::test]
 async fn response_size_and_nonreading_peer_have_bounded_distinct_errors() {
-    let (mut writer, _reader) = tokio::io::duplex(1);
+    let (mut writer, mut reader) = tokio::io::duplex(1024);
     let oversized = Response::ok(1, "x".repeat(MAX_RESPONSE_FRAME));
-    assert_eq!(
-        write_response(&mut writer, &oversized)
+    write_response(&mut writer, &oversized)
+        .await
+        .expect("typed bounded error written");
+    let response: Response = serde_json::from_slice(
+        &read_response_frame(&mut reader)
             .await
-            .expect_err("oversize")
-            .code,
-        ErrorCode::InvalidInput
+            .expect("error frame")
+            .expect("response"),
+    )
+    .expect("response schema");
+    assert_eq!(response.id, 1);
+    assert_eq!(
+        response.error.expect("oversized response error").code,
+        ErrorCode::ResponseTooLarge
     );
+    assert!(response.result.is_none());
+    let (mut writer, _reader) = tokio::io::duplex(1);
     let started = std::time::Instant::now();
     assert_eq!(
         write_response(&mut writer, &Response::ok(2, "small"))
