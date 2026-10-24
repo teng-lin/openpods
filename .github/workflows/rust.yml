@@ -57,6 +57,7 @@ jobs:
         if: runner.os == 'Linux' && matrix.features == 'minimal'
         run: |
           python3 -m unittest discover -s tests/packaging -v
+          python3 tests/cli/contract.py target/release/librepods-cli -v
           node tests/compat/model.mjs
           node tests/compat/model.mjs --fixtures-dir target/compat-fixtures
       - name: Cross-platform core

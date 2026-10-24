@@ -21,6 +21,8 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libudev-dev
       - run: rustup toolchain install nightly --profile minimal
       - run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Verify fuzz dependency lock
+        run: cargo +nightly metadata --manifest-path fuzz/Cargo.toml --format-version 1 --locked > /dev/null
       - name: Bounded fuzz run
         run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=120 -max_len=16385 -rss_limit_mb=2048
       - name: Preserve minimized failure input

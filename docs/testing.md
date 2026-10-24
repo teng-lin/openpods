@@ -74,3 +74,14 @@ Use [release-evidence.md](release-evidence.md) to record hardware, firmware,
 transport adapter, exact commit, commands, results and restoration. A blank or
 pending item is incomplete. The 24-hour no-BLE soak is an elapsed-time requirement;
 running a shorter process or merely adding a script does not satisfy it.
+
+## CLI process contract
+
+After `cargo build -p librepods-cli --locked`, run
+`python3 tests/cli/contract.py target/debug/librepods-cli -v`. This launches the
+actual executable with isolated HOME and XDG directories and local Unix peers.
+It verifies typed ANC, conversational awareness, one-bud, ear policy and audio
+commands; structured failures; response correlation; and refusal to compete with
+an existing owner. It never opens a Bluetooth session or changes desktop state.
+The runtime integration tests separately exercise the actual daemon actor and
+protocol reducer using a fake transport, rather than replacing them with peers.

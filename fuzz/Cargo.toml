@@ -10,8 +10,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-librepods-core = { path = "../librepods-core", default-features = false }
-librepods-daemon = { path = "../librepods-daemon", default-features = false }
+librepods-core = { version = "0.1.0", path = "../librepods-core", default-features = false, features = ["ble"] }
+librepods-daemon = { version = "0.1.0", path = "../librepods-daemon", default-features = false }
 
 [workspace]
 members = ["."]
