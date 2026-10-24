@@ -42,6 +42,8 @@ mod enabled {
 
     const QUEUE_CAPACITY: usize = 64;
     const OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
+    const STARTUP_TIMEOUT: Duration = Duration::from_secs(1);
+    const STOP_TIMEOUT: Duration = Duration::from_millis(500);
     const APPLE_COMPANY_ID: u16 = 0x004C;
 
     pub struct BtleplugScanner {
@@ -64,7 +66,7 @@ mod enabled {
                 runtime.block_on(async {
                     let adapter = tokio::select! {
                         _ = stop.changed() => return,
-                        result = tokio::time::timeout(OPERATION_TIMEOUT, initialize()) => match result {
+                        result = tokio::time::timeout(STARTUP_TIMEOUT, initialize()) => match result {
                             Ok(Ok(adapter)) => adapter,
                             Ok(Err(error)) => { let _ = ready_tx.send(Err(error)); return; }
                             Err(_) => { let _ = ready_tx.send(Err(PlatformError::new("start BLE scan", ErrorKind::Timeout).into())); return; }
@@ -76,11 +78,11 @@ mod enabled {
                         _ = stop.changed() => {},
                         result = scan(&adapter, &tx, &mut worker_stop) => if let Err(error) = result { log::warn!("BLE scanner stopped: {error}"); }
                     }
-                    let _ = tokio::time::timeout(OPERATION_TIMEOUT, adapter.stop_scan()).await;
+                    let _ = tokio::time::timeout(STOP_TIMEOUT, adapter.stop_scan()).await;
                 });
             }).map_err(|error| PlatformError::io("start BLE worker", error))?;
             let ready =
-                tokio::task::spawn_blocking(move || ready_rx.recv_timeout(Duration::from_secs(3)))
+                tokio::task::spawn_blocking(move || ready_rx.recv_timeout(Duration::from_secs(2)))
                     .await
                     .map_err(|error| TransportError::with_source("wait for BLE startup", error));
             let startup = match ready {

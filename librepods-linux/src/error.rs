@@ -69,9 +69,48 @@ pub fn kind(error: &TransportError) -> Option<ErrorKind> {
         TransportError::Io { source, .. } => source
             .downcast_ref::<PlatformError>()
             .map(|error| error.kind),
-        TransportError::NotConnected | TransportError::ConnectionClosed => {
-            Some(ErrorKind::Unavailable)
-        }
+        TransportError::Timeout => Some(ErrorKind::Timeout),
+        TransportError::Cancelled => Some(ErrorKind::Cancelled),
+        TransportError::Unsupported => Some(ErrorKind::Unsupported),
+        TransportError::Truncated { .. } => Some(ErrorKind::Truncated),
+        TransportError::PermissionDenied => Some(ErrorKind::PermissionDenied),
+        TransportError::NotConnected
+        | TransportError::ConnectionClosed
+        | TransportError::ChannelClosed => Some(ErrorKind::Unavailable),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserves_core_and_platform_error_classification() {
+        for (error, expected) in [
+            (TransportError::Timeout, ErrorKind::Timeout),
+            (TransportError::Cancelled, ErrorKind::Cancelled),
+            (TransportError::Unsupported, ErrorKind::Unsupported),
+            (
+                TransportError::Truncated { limit: 10 },
+                ErrorKind::Truncated,
+            ),
+            (
+                TransportError::PermissionDenied,
+                ErrorKind::PermissionDenied,
+            ),
+            (TransportError::ChannelClosed, ErrorKind::Unavailable),
+            (
+                PlatformError::new("test", ErrorKind::InvalidInput).into(),
+                ErrorKind::InvalidInput,
+            ),
+            (
+                PlatformError::io("test", io::Error::from(io::ErrorKind::TimedOut)).into(),
+                ErrorKind::Timeout,
+            ),
+        ] {
+            assert_eq!(kind(&error), Some(expected));
+        }
+        assert_eq!(kind(&TransportError::new("unknown")), None);
     }
 }

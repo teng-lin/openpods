@@ -19,6 +19,7 @@ pub struct SleepMonitor {
     cancel: watch::Sender<bool>,
     worker: Option<std::thread::JoinHandle<()>>,
     ready: Arc<AtomicBool>,
+    sleeping: Arc<AtomicBool>,
 }
 
 impl SleepMonitor {
@@ -34,17 +35,24 @@ impl SleepMonitor {
         self.ready.load(Ordering::Acquire)
     }
 
+    /// Latest observed state remains authoritative when event consumers lag.
+    pub fn is_sleeping(&self) -> bool {
+        self.sleeping.load(Ordering::Acquire)
+    }
+
     fn start_with_bus(address: Option<String>) -> Result<Self, TransportError> {
         let (sender, receiver) = mpsc::sync_channel(8);
         let (cancel, mut stop) = watch::channel(false);
         let ready = Arc::new(AtomicBool::new(false));
         let worker_ready = ready.clone();
+        let sleeping = Arc::new(AtomicBool::new(false));
+        let worker_sleeping = sleeping.clone();
         let worker = std::thread::Builder::new().name("librepods-sleep".into()).spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() { Ok(runtime) => runtime, Err(_) => return };
             runtime.block_on(async {
                 loop {
                     let mut inner_stop = stop.clone();
-                    tokio::select! { _ = stop.changed() => return, result = listen(&sender,&mut inner_stop,&address,&worker_ready) => if let Err(error) = result { log::debug!("Sleep monitor unavailable: {error}"); } }
+                    tokio::select! { _ = stop.changed() => return, result = listen(&sender,&mut inner_stop,&address,&worker_ready,&worker_sleeping) => if let Err(error) = result { log::debug!("Sleep monitor unavailable: {error}"); } }
                     worker_ready.store(false,Ordering::Release);
                     tokio::select! { _ = stop.changed() => return, _ = tokio::time::sleep(Duration::from_secs(5)) => {} }
                 }
@@ -55,6 +63,7 @@ impl SleepMonitor {
             cancel,
             worker: Some(worker),
             ready,
+            sleeping,
         })
     }
 
@@ -91,6 +100,7 @@ async fn listen(
     stop: &mut watch::Receiver<bool>,
     address: &Option<String>,
     ready: &AtomicBool,
+    current_sleeping: &AtomicBool,
 ) -> Result<(), TransportError> {
     let connect = async {
         match address {
@@ -114,16 +124,11 @@ async fn listen(
         let message =
             message.map_err(|error| TransportError::with_source("read sleep event", error))?;
         if let Ok(sleeping) = message.body().deserialize::<bool>() {
+            current_sleeping.store(sleeping, Ordering::Release);
             match sender.try_send(sleeping) {
                 Ok(()) => {}
                 Err(mpsc::TrySendError::Disconnected(_)) => return Ok(()),
-                Err(mpsc::TrySendError::Full(_)) => {
-                    return Err(PlatformError::new(
-                        "sleep event queue full",
-                        ErrorKind::Unavailable,
-                    )
-                    .into())
-                }
+                Err(mpsc::TrySendError::Full(_)) => {}
             }
         }
     }
@@ -177,6 +182,25 @@ mod tests {
             .expect("event delivered");
             assert_eq!(observed, sleeping);
         }
+        // A slow consumer must still observe the final resume state after >queue capacity.
+        for sleeping in [true; 16].into_iter().chain([false]) {
+            service
+                .emit_signal(
+                    None::<&str>,
+                    "/org/freedesktop/login1",
+                    "org.freedesktop.login1.Manager",
+                    "PrepareForSleep",
+                    &sleeping,
+                )
+                .await
+                .expect("burst signal");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!monitor.is_sleeping());
+        assert!(
+            monitor.is_ready(),
+            "queue pressure must not drop subscription"
+        );
         monitor.shutdown();
         assert!(!monitor.is_ready());
     }
