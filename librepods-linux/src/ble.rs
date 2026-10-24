@@ -29,7 +29,7 @@ pub use disabled::BtleplugScanner;
 
 #[cfg(feature = "ble")]
 mod enabled {
-    use std::sync::{mpsc, Mutex};
+    use std::sync::{mpsc, Arc, Mutex};
     use std::time::Duration;
 
     use btleplug::api::{Central, CentralEvent, Manager as _, Peripheral, ScanFilter};
@@ -50,6 +50,7 @@ mod enabled {
         rx: Mutex<mpsc::Receiver<RawBleAdvertisement>>,
         cancel: watch::Sender<bool>,
         worker: Option<std::thread::JoinHandle<()>>,
+        stop_error: Arc<Mutex<Option<Arc<TransportError>>>>,
     }
 
     impl BtleplugScanner {
@@ -58,6 +59,8 @@ mod enabled {
             let (tx, rx) = mpsc::sync_channel(QUEUE_CAPACITY);
             let (ready_tx, ready_rx) = mpsc::sync_channel(1);
             let (cancel, mut stop) = watch::channel(false);
+            let stop_error = Arc::new(Mutex::new(None));
+            let worker_stop_error = stop_error.clone();
             let worker = std::thread::Builder::new().name("librepods-ble".into()).spawn(move || {
                 let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                     Ok(runtime) => runtime,
@@ -78,7 +81,15 @@ mod enabled {
                         _ = stop.changed() => {},
                         result = scan(&adapter, &tx, &mut worker_stop) => if let Err(error) = result { log::warn!("BLE scanner stopped: {error}"); }
                     }
-                    let _ = tokio::time::timeout(STOP_TIMEOUT, adapter.stop_scan()).await;
+                    let result = match tokio::time::timeout(STOP_TIMEOUT, adapter.stop_scan()).await {
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(error)) => Err(TransportError::with_source("stop BLE scan", error)),
+                        Err(_) => Err(PlatformError::new("stop BLE scan", ErrorKind::Timeout).into()),
+                    };
+                    if let Err(error) = result {
+                        log::warn!("BLE scan cleanup degraded; releasing scan client: {error}");
+                        *worker_stop_error.lock().unwrap_or_else(|error| error.into_inner()) = Some(Arc::new(error));
+                    }
                 });
             }).map_err(|error| PlatformError::io("start BLE worker", error))?;
             let ready =
@@ -101,6 +112,7 @@ mod enabled {
                 rx: Mutex::new(rx),
                 cancel,
                 worker: Some(worker),
+                stop_error,
             })
         }
 
@@ -117,6 +129,23 @@ mod enabled {
                 Ok(event) => Ok(Some(event)),
                 Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
                 Err(mpsc::RecvTimeoutError::Disconnected) => Err(TransportError::ChannelClosed),
+            }
+        }
+
+        /// The worker and its BlueZ client are released even when StopDiscovery fails.
+        pub fn shutdown_checked(&mut self) -> Result<(), TransportError> {
+            self.shutdown();
+            let error = self
+                .stop_error
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            match error {
+                Some(error) => Err(TransportError::with_source(
+                    "BLE cleanup failed after client release",
+                    error,
+                )),
+                None => Ok(()),
             }
         }
 
@@ -222,5 +251,307 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(kind(&error), Some(ErrorKind::Unsupported));
+    }
+}
+
+#[cfg(all(test, feature = "ble"))]
+mod native_tests {
+    use super::*;
+    use librepods_core::transport::BleScanner;
+    use std::collections::HashMap;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
+
+    struct FakeAdapter {
+        stops: Arc<AtomicUsize>,
+        starts: Arc<AtomicUsize>,
+        client: Arc<std::sync::Mutex<Option<String>>>,
+        mode: String,
+    }
+    #[zbus::interface(name = "org.bluez.Adapter1")]
+    impl FakeAdapter {
+        #[zbus(property)]
+        fn address(&self) -> &str {
+            "00:11:22:33:44:55"
+        }
+        #[zbus(property)]
+        fn address_type(&self) -> &str {
+            "public"
+        }
+        #[zbus(property)]
+        fn name(&self) -> &str {
+            "test adapter"
+        }
+        #[zbus(property)]
+        fn alias(&self) -> &str {
+            "test adapter"
+        }
+        #[zbus(property)]
+        fn modalias(&self) -> &str {
+            "usb:v1234p5678d90AB"
+        }
+        #[zbus(property)]
+        fn powered(&self) -> bool {
+            true
+        }
+        #[zbus(property)]
+        fn set_powered(&mut self, _value: bool) {}
+        #[zbus(property)]
+        fn discovering(&self) -> bool {
+            self.starts.load(Ordering::SeqCst) > self.stops.load(Ordering::SeqCst)
+        }
+        fn set_discovery_filter(&self, _properties: HashMap<String, zbus::zvariant::OwnedValue>) {}
+        async fn start_discovery(
+            &self,
+            #[zbus(header)] header: zbus::message::Header<'_>,
+        ) -> zbus::fdo::Result<()> {
+            *self.client.lock().expect("client lock") =
+                header.sender().map(|sender| sender.to_string());
+            if self.mode == "deny" {
+                return Err(zbus::fdo::Error::AccessDenied(
+                    "injected permission denial".into(),
+                ));
+            }
+            if self.mode == "stall" {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn stop_discovery(&self) {
+            if self.mode == "stop-stall" {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            self.stops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    struct FakeDevice;
+    #[zbus::interface(name = "org.bluez.Device1")]
+    impl FakeDevice {
+        #[zbus(property)]
+        fn address(&self) -> &str {
+            "70:81:94:0D:FB:AA"
+        }
+        #[zbus(property)]
+        fn address_type(&self) -> &str {
+            "random"
+        }
+        #[zbus(property)]
+        fn paired(&self) -> bool {
+            false
+        }
+        #[zbus(property)]
+        fn connected(&self) -> bool {
+            false
+        }
+        #[zbus(property)]
+        fn services_resolved(&self) -> bool {
+            false
+        }
+        #[zbus(property)]
+        fn trusted(&self) -> bool {
+            false
+        }
+        #[zbus(property)]
+        fn blocked(&self) -> bool {
+            false
+        }
+        #[zbus(property)]
+        fn legacy_pairing(&self) -> bool {
+            false
+        }
+        #[zbus(property, name = "RSSI")]
+        fn rssi(&self) -> i16 {
+            -42
+        }
+        #[zbus(property)]
+        fn manufacturer_data(&self) -> HashMap<u16, zbus::zvariant::OwnedValue> {
+            HashMap::from([(
+                0x004c,
+                zbus::zvariant::Value::from(vec![1u8, 2, 3])
+                    .try_into()
+                    .expect("manufacturer variant"),
+            )])
+        }
+    }
+    #[test]
+    fn native_worker_private_bluez_runtime_events_queue_and_stop_are_isolated() {
+        const CHILD: &str = "LIBREPODS_BLE_PRIVATE_BUS";
+        if let Some(address) = std::env::var_os(CHILD) {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("fake BlueZ runtime");
+            runtime.block_on(async {
+                let stops = Arc::new(AtomicUsize::new(0));
+                let starts = Arc::new(AtomicUsize::new(0));
+                let client = Arc::new(std::sync::Mutex::new(None));
+                let mode = std::env::var("LIBREPODS_BLE_CASE").expect("isolated case");
+                let builder =
+                    zbus::connection::Builder::address(address.to_str().expect("bus address"))
+                        .expect("bus")
+                        .name("org.bluez")
+                        .expect("owner")
+                        .serve_at("/", zbus::fdo::ObjectManager)
+                        .expect("object manager");
+                let builder = if mode == "absent" {
+                    builder
+                } else {
+                    builder
+                        .serve_at(
+                            "/org/bluez/hci0",
+                            FakeAdapter {
+                                stops: stops.clone(),
+                                starts: starts.clone(),
+                                client: client.clone(),
+                                mode: mode.clone(),
+                            },
+                        )
+                        .expect("adapter")
+                        .serve_at("/org/bluez/hci0/dev_70_81_94_0D_FB_AA", FakeDevice)
+                        .expect("device")
+                };
+                let service = builder.build().await.expect("fake BlueZ");
+                let startup = std::time::Instant::now();
+                let scanner = BtleplugScanner::start().await;
+                if mode != "normal" && mode != "stop-stall" {
+                    let error = scanner.err().expect("injected startup failure");
+                    let expected = match mode.as_str() {
+                        "deny" => crate::error::ErrorKind::PermissionDenied,
+                        "absent" => crate::error::ErrorKind::Unavailable,
+                        "stall" => crate::error::ErrorKind::Timeout,
+                        _ => panic!("unknown test case"),
+                    };
+                    assert_eq!(crate::error::kind(&error), Some(expected), "{error:?}");
+                    assert!(startup.elapsed() < Duration::from_secs(2));
+                    let disconnected_client = client.lock().expect("client").clone();
+                    if let Some(client) = disconnected_client {
+                        let bus = zbus::fdo::DBusProxy::new(&service)
+                            .await
+                            .expect("bus proxy");
+                        assert!(!bus
+                            .name_has_owner(client.as_str().try_into().expect("unique name"))
+                            .await
+                            .expect("client released"));
+                    }
+                    return;
+                }
+                let mut scanner = scanner.expect("native scanner starts on fake BlueZ");
+                assert_eq!(starts.load(Ordering::SeqCst), 1);
+                let emit = || async {
+                    let properties = HashMap::from([(
+                        "ManufacturerData",
+                        zbus::zvariant::Value::from(FakeDevice.manufacturer_data()),
+                    )]);
+                    service
+                        .emit_signal(
+                            None::<&str>,
+                            "/org/bluez/hci0/dev_70_81_94_0D_FB_AA",
+                            "org.freedesktop.DBus.Properties",
+                            "PropertiesChanged",
+                            &("org.bluez.Device1", properties, Vec::<String>::new()),
+                        )
+                        .await
+                        .expect("advertisement signal");
+                };
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                let observed = loop {
+                    emit().await;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    if let Some(event) = scanner
+                        .next_advertisement_timeout(Duration::ZERO)
+                        .expect("scanner events")
+                    {
+                        break event;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "advertisement deadline"
+                    );
+                };
+                assert_eq!(observed.address, "70:81:94:0D:FB:AA");
+                assert_eq!(observed.manufacturer_data, vec![1, 2, 3]);
+                assert_eq!(observed.rssi, Some(-42));
+                emit().await;
+                let observed =
+                    tokio::task::block_in_place(|| BleScanner::next_advertisement(&scanner))
+                        .expect("blocking trait events");
+                assert_eq!(observed.manufacturer_data, vec![1, 2, 3]);
+                for _ in 0..200 {
+                    emit().await;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let start = std::time::Instant::now();
+                let stopped = scanner.shutdown_checked();
+                scanner.shutdown();
+                assert!(start.elapsed() < Duration::from_secs(1));
+                if mode == "stop-stall" {
+                    assert_eq!(
+                        crate::error::kind(&stopped.expect_err("stop deadline")),
+                        Some(crate::error::ErrorKind::Timeout)
+                    );
+                    assert!(
+                        scanner.shutdown_checked().is_err(),
+                        "cleanup failure remains observable"
+                    );
+                } else {
+                    stopped.expect("confirmed stop");
+                    assert_eq!(
+                        stops.load(Ordering::SeqCst),
+                        1,
+                        "native Drop issues StopDiscovery"
+                    );
+                }
+                // Freeze the producer before counting: draining a live queue can consume >capacity.
+                let mut received = 0;
+                while let Ok(Some(_)) = scanner.next_advertisement_timeout(Duration::ZERO) {
+                    received += 1;
+                }
+                assert!(received > 0 && received <= 64, "bounded queue: {received}");
+                assert!(scanner.next_advertisement_timeout(Duration::ZERO).is_err());
+                let client = client
+                    .lock()
+                    .expect("client")
+                    .clone()
+                    .expect("scan client identity");
+                let bus = zbus::fdo::DBusProxy::new(&service)
+                    .await
+                    .expect("bus proxy");
+                assert!(
+                    !bus.name_has_owner(client.as_str().try_into().expect("unique name"))
+                        .await
+                        .expect("client released"),
+                    "scan client must be gone before AACP connect"
+                );
+                drop(service);
+            });
+            return;
+        }
+        for mode in ["normal", "deny", "absent", "stall", "stop-stall"] {
+            let bus = crate::test_bus::TestBus::start();
+            let mut child = std::process::Command::new(std::env::current_exe().expect("test executable"))
+                .args(["--exact", "ble::native_tests::native_worker_private_bluez_runtime_events_queue_and_stop_are_isolated", "--nocapture"])
+                .env(CHILD, &bus.address).env("DBUS_SYSTEM_BUS_ADDRESS", &bus.address).env("LIBREPODS_BLE_CASE", mode)
+                .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().expect("isolated child");
+            let deadline = std::time::Instant::now() + Duration::from_secs(8);
+            while child.try_wait().expect("child status").is_none() {
+                if std::time::Instant::now() >= deadline {
+                    child.kill().expect("stop stalled fake child");
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let result = child.wait_with_output().expect("isolated BlueZ child");
+            assert!(
+                result.status.success(),
+                "case {mode}: {}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
     }
 }

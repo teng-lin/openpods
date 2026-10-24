@@ -57,6 +57,10 @@ struct TaggedEvent {
 /// Injectable raw source; identity and protocol decoding are always done in core.
 pub trait ScanSource: Send {
     fn next(&mut self, timeout: Duration) -> Result<Option<RawBleAdvertisement>, DaemonError>;
+    /// Stop this client's scan; Drop must still release all owned resources on error.
+    fn stop(&mut self) -> Result<(), DaemonError> {
+        Ok(())
+    }
 }
 
 pub trait ScanFactory: Send + Sync + 'static {
@@ -112,6 +116,11 @@ impl ScanSource for NativeSource {
         self.0
             .next_advertisement_timeout(timeout)
             .map_err(|error| scan_error("BLE receive", error))
+    }
+    fn stop(&mut self) -> Result<(), DaemonError> {
+        self.0
+            .shutdown_checked()
+            .map_err(|error| scan_error("BLE stop", error))
     }
 }
 
@@ -444,6 +453,16 @@ fn verified(_raw: &RawBleAdvertisement, _keys: &BleKeys) -> Option<BleAdvertData
     None
 }
 
+fn release_source(control: &Control, revision: u64, scanner: &mut Option<Box<dyn ScanSource>>) {
+    if let Some(mut source) = scanner.take() {
+        if let Err(error) = source.stop() {
+            record_error(control, revision, error);
+        }
+        // The native worker and its BlueZ client are gone before quiescence is acknowledged.
+        drop(source);
+    }
+}
+
 fn run(
     control: Control,
     sender: mpsc::SyncSender<TaggedEvent>,
@@ -460,7 +479,7 @@ fn run(
             break;
         }
         if active_revision != revision {
-            scanner.take();
+            release_source(&control, revision, &mut scanner);
             retry_delay = Duration::from_secs(1);
             active_revision = revision;
         }
@@ -474,7 +493,7 @@ fn run(
             None
         };
         if let Some(paused) = pause {
-            scanner.take();
+            release_source(&control, revision, &mut scanner);
             health(&control, &sender, revision, policy.generation, paused);
             acknowledge_quiescence(&control, revision);
             wait(&control, revision, None);
@@ -558,7 +577,7 @@ fn run(
             Err(error) => {
                 let retryable = error.retryable;
                 record_error(&control, revision, error);
-                scanner.take();
+                release_source(&control, revision, &mut scanner);
                 health(
                     &control,
                     &sender,
@@ -571,7 +590,7 @@ fn run(
             }
         }
     }
-    scanner.take();
+    release_source(&control, state(&control).1, &mut scanner);
     let mut shared = control.0.lock().unwrap_or_else(|error| error.into_inner());
     shared.health = BleHealth::Stopped;
 }
@@ -761,6 +780,11 @@ mod tests {
             .expect("allow scan");
         wait_health(&coordinator, BleHealth::Backoff);
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        let error = coordinator
+            .last_error()
+            .expect("permission failure retained");
+        assert_eq!(error.code, ErrorCode::PermissionDenied);
+        assert!(!error.retryable);
         coordinator
             .configure(false, false, 1, None)
             .expect("disable during retry");
@@ -874,5 +898,121 @@ mod tests {
                 .code,
             ErrorCode::Cancelled
         );
+    }
+    #[cfg(feature = "ble")]
+    struct RetrySource;
+    #[cfg(feature = "ble")]
+    impl ScanSource for RetrySource {
+        fn next(&mut self, _: Duration) -> Result<Option<RawBleAdvertisement>, DaemonError> {
+            Err(DaemonError::transient(
+                ErrorCode::ServiceUnavailable,
+                "fake receive",
+                "injected scanner loss",
+            ))
+        }
+    }
+    #[cfg(feature = "ble")]
+    struct RetryFactory(Arc<AtomicUsize>);
+    #[cfg(feature = "ble")]
+    impl ScanFactory for RetryFactory {
+        fn start(&self) -> Result<Box<dyn ScanSource>, DaemonError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(RetrySource))
+        }
+    }
+    #[cfg(feature = "ble")]
+    #[test]
+    fn immediate_source_failures_back_off_and_pause_interrupts_retry_wait() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let mut coordinator = BleCoordinator::start_with_factory(
+            Instant::now(),
+            Arc::new(RetryFactory(starts.clone())),
+        )
+        .expect("coordinator");
+        let keys = BleKeys::new("AA:BB:CC:DD:EE:FF", [1; 16], [2; 16]).expect("keys");
+        coordinator
+            .configure(true, true, 1, Some(keys))
+            .expect("enable");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while starts.load(Ordering::SeqCst) < 2 {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        wait_health(&coordinator, BleHealth::Backoff);
+        let error = coordinator.last_error().expect("source error retained");
+        assert_eq!(error.code, ErrorCode::ServiceUnavailable);
+        assert!(error.retryable);
+        assert_eq!(error.message, "injected scanner loss");
+        // A second immediate source failure waits2s; recreating the source must not reset it to1s.
+        std::thread::sleep(Duration::from_millis(1100));
+        assert_eq!(starts.load(Ordering::SeqCst), 2);
+        let paused = Instant::now();
+        coordinator
+            .pause_for_connection(Duration::from_secs(1))
+            .expect("pause wakes retry");
+        assert!(paused.elapsed() < Duration::from_millis(200));
+        coordinator.shutdown();
+    }
+    #[cfg(feature = "ble")]
+    struct StopFailSource(Arc<AtomicUsize>);
+    #[cfg(feature = "ble")]
+    impl ScanSource for StopFailSource {
+        fn next(&mut self, timeout: Duration) -> Result<Option<RawBleAdvertisement>, DaemonError> {
+            std::thread::sleep(timeout.min(Duration::from_millis(5)));
+            Ok(None)
+        }
+        fn stop(&mut self) -> Result<(), DaemonError> {
+            Err(DaemonError::transient(
+                ErrorCode::CommandTimeout,
+                "fake stop",
+                "stop request timed out; client released by Drop",
+            ))
+        }
+    }
+    #[cfg(feature = "ble")]
+    impl Drop for StopFailSource {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    #[cfg(feature = "ble")]
+    struct StopFailFactory(Arc<AtomicUsize>);
+    #[cfg(feature = "ble")]
+    impl ScanFactory for StopFailFactory {
+        fn start(&self) -> Result<Box<dyn ScanSource>, DaemonError> {
+            Ok(Box::new(StopFailSource(self.0.clone())))
+        }
+    }
+    #[cfg(feature = "ble")]
+    #[test]
+    fn failed_optional_stop_retains_diagnostic_but_released_client_allows_aacp() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut coordinator = BleCoordinator::start_with_factory(
+            Instant::now(),
+            Arc::new(StopFailFactory(drops.clone())),
+        )
+        .expect("coordinator");
+        coordinator
+            .configure(
+                true,
+                true,
+                1,
+                Some(BleKeys::new("AA:BB:CC:DD:EE:FF", [1; 16], [2; 16]).expect("keys")),
+            )
+            .expect("enable");
+        wait_health(&coordinator, BleHealth::Scanning);
+        coordinator
+            .pause_for_connection(Duration::from_secs(1))
+            .expect("client release is quiescence");
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            coordinator
+                .last_error()
+                .expect("stop failure retained")
+                .code,
+            ErrorCode::CommandTimeout
+        );
+        assert_eq!(coordinator.health(), BleHealth::Paused);
+        coordinator.shutdown();
     }
 }

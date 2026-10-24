@@ -1,6 +1,6 @@
 [features]
 default = []
-ble = ["dep:btleplug"]
+ble = ["dep:btleplug", "dep:dbus", "dep:bluez-async"]
 
 [package]
 name = "librepods-linux"
@@ -21,6 +21,8 @@ tokio = { version = "1", features = ["full"] }
 nix = { version = "0.31.2", features = ["socket", "net"] }
 zbus = { version = "5", default-features = false, features = ["tokio", "blocking-api"] }
 btleplug = { version = "0.12.0", optional = true }
+dbus = { version = "0.9", optional = true }
+bluez-async = { version = "0.8", optional = true }
 libc = "0.2"
 futures = "0.3"
 

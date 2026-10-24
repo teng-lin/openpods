@@ -66,27 +66,7 @@ impl From<PlatformError> for TransportError {
 
 pub fn kind(error: &TransportError) -> Option<ErrorKind> {
     match error {
-        TransportError::Io { source, .. } => {
-            if let Some(error) = source.downcast_ref::<PlatformError>() {
-                return Some(error.kind);
-            }
-            if let Some(error) = source.downcast_ref::<io::Error>() {
-                return Some(PlatformError::io("I/O", io::Error::from(error.kind())).kind);
-            }
-            #[cfg(feature = "ble")]
-            if let Some(error) = source.downcast_ref::<btleplug::Error>() {
-                return Some(match error {
-                    btleplug::Error::PermissionDenied => ErrorKind::PermissionDenied,
-                    btleplug::Error::DeviceNotFound
-                    | btleplug::Error::NotConnected
-                    | btleplug::Error::NoAdapterAvailable => ErrorKind::Unavailable,
-                    btleplug::Error::NotSupported(_) => ErrorKind::Unsupported,
-                    btleplug::Error::TimedOut(_) => ErrorKind::Timeout,
-                    _ => ErrorKind::Io,
-                });
-            }
-            None
-        }
+        TransportError::Io { source, .. } => source_kind(source.as_ref()),
         TransportError::Timeout => Some(ErrorKind::Timeout),
         TransportError::Cancelled => Some(ErrorKind::Cancelled),
         TransportError::Unsupported => Some(ErrorKind::Unsupported),
@@ -97,6 +77,59 @@ pub fn kind(error: &TransportError) -> Option<ErrorKind> {
         | TransportError::ChannelClosed => Some(ErrorKind::Unavailable),
         _ => None,
     }
+}
+
+fn source_kind(source: &(dyn std::error::Error + 'static)) -> Option<ErrorKind> {
+    let mut current = Some(source);
+    for _ in 0..8 {
+        let error = current?;
+        if let Some(error) = error.downcast_ref::<PlatformError>() {
+            return Some(error.kind);
+        }
+        if let Some(error) = error.downcast_ref::<io::Error>() {
+            return Some(PlatformError::io("I/O", io::Error::from(error.kind())).kind);
+        }
+        #[cfg(feature = "ble")]
+        {
+            if let Some(error) = error.downcast_ref::<btleplug::Error>() {
+                match error {
+                    btleplug::Error::PermissionDenied => return Some(ErrorKind::PermissionDenied),
+                    btleplug::Error::DeviceNotFound
+                    | btleplug::Error::NotConnected
+                    | btleplug::Error::NoAdapterAvailable => return Some(ErrorKind::Unavailable),
+                    btleplug::Error::NotSupported(_) => return Some(ErrorKind::Unsupported),
+                    btleplug::Error::TimedOut(_) => return Some(ErrorKind::Timeout),
+                    btleplug::Error::Other(inner) => {
+                        current = Some(inner.as_ref());
+                        continue;
+                    }
+                    _ => return Some(ErrorKind::Io),
+                }
+            }
+            let dbus_error = error.downcast_ref::<dbus::Error>().or_else(|| {
+                match error.downcast_ref::<bluez_async::BluetoothError>() {
+                    Some(bluez_async::BluetoothError::DbusError(error)) => Some(error),
+                    _ => None,
+                }
+            });
+            if let Some(error) = dbus_error {
+                return Some(match error.name() {
+                    Some(
+                        "org.freedesktop.DBus.Error.AccessDenied"
+                        | "org.bluez.Error.NotAuthorized"
+                        | "org.bluez.Error.AuthenticationFailed",
+                    ) => ErrorKind::PermissionDenied,
+                    Some(
+                        "org.freedesktop.DBus.Error.NoReply" | "org.freedesktop.DBus.Error.Timeout",
+                    ) => ErrorKind::Timeout,
+                    Some("org.bluez.Error.NotSupported") => ErrorKind::Unsupported,
+                    _ => ErrorKind::Unavailable,
+                });
+            }
+        }
+        current = error.source();
+    }
+    None
 }
 
 #[cfg(test)]
@@ -130,5 +163,23 @@ mod tests {
             assert_eq!(kind(&error), Some(expected));
         }
         assert_eq!(kind(&TransportError::new("unknown")), None);
+    }
+    #[cfg(feature = "ble")]
+    #[test]
+    fn nested_bluez_permission_and_timeout_names_are_classified_without_matching_prose() {
+        for (name, expected) in [
+            ("org.bluez.Error.NotAuthorized", ErrorKind::PermissionDenied),
+            (
+                "org.freedesktop.DBus.Error.AccessDenied",
+                ErrorKind::PermissionDenied,
+            ),
+            ("org.freedesktop.DBus.Error.NoReply", ErrorKind::Timeout),
+            ("org.bluez.Error.NotSupported", ErrorKind::Unsupported),
+        ] {
+            let cause = dbus::Error::new_custom(name, "localized arbitrary failure");
+            let wrapped =
+                TransportError::with_source("start scan", btleplug::Error::Other(Box::new(cause)));
+            assert_eq!(kind(&wrapped), Some(expected));
+        }
     }
 }
