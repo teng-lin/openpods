@@ -10,6 +10,8 @@ confidence-threshold = 0.93
 allow = [
     "AGPL-3.0-only", "Apache-2.0", "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause", "BSD-3-Clause", "ISC", "MIT", "MPL-2.0",
+    # GPUI renderer: hexf-parse/tiny-keccak (CC0), libfuzzer-sys (NCSA).
+    "CC0-1.0", "NCSA",
     "Unicode-3.0", "Unicode-DFS-2016", "Zlib",
 ]
 

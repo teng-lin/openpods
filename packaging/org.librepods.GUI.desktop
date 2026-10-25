@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=LibrePods
+Comment=AirPods battery and listening controls
+Exec=librepods-gui
+Icon=org.librepods.GUI
+Terminal=false
+Categories=AudioVideo;Audio;Settings;
+Keywords=AirPods;Bluetooth;ANC;
+StartupWMClass=org.librepods.GUI
