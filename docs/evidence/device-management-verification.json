@@ -1,0 +1,198 @@
+{
+  "source_commit": "8bee8baf2df510cb159b0f66369b6922b3380842",
+  "source_tree": "c786b8b6695c830c4e456a6e15a9f9c56e9a06f7",
+  "source_clean": true,
+  "baseline": "2cd9f29ff5b2b4287e922c29698ab4646cb7b357",
+  "coverage": {
+    "core": {
+      "count": 2011,
+      "covered": 1953,
+      "test_lines_excluded": 1357,
+      "percent": 97.11586275484834
+    },
+    "service": {
+      "count": 6608,
+      "covered": 5914,
+      "test_lines_excluded": 4060,
+      "percent": 89.49757869249395
+    }
+  },
+  "changed_critical": {
+    "covered": 654,
+    "count": 697,
+    "percent": 93.83070301291248
+  },
+  "gates": {
+    "core_min_percent": 90,
+    "service_min_percent": 80,
+    "changed_critical_min_percent": 90,
+    "passed": true
+  },
+  "changed_files": {
+    "librepods-cli/src/main.rs": {
+      "metric": {
+        "covered": 17,
+        "count": 17,
+        "percent": 100.0
+      },
+      "uncovered_lines": []
+    },
+    "librepods-core/src/device/state.rs": {
+      "metric": {
+        "covered": 11,
+        "count": 11,
+        "percent": 100.0
+      },
+      "uncovered_lines": []
+    },
+    "librepods-daemon/src/backend.rs": {
+      "metric": {
+        "covered": 43,
+        "count": 43,
+        "percent": 100.0
+      },
+      "uncovered_lines": []
+    },
+    "librepods-daemon/src/ipc.rs": {
+      "metric": {
+        "covered": 7,
+        "count": 7,
+        "percent": 100.0
+      },
+      "uncovered_lines": []
+    },
+    "librepods-daemon/src/session.rs": {
+      "metric": {
+        "covered": 78,
+        "count": 78,
+        "percent": 100.0
+      },
+      "uncovered_lines": []
+    },
+    "librepods-daemon/src/session_device.rs": {
+      "metric": {
+        "covered": 121,
+        "count": 125,
+        "percent": 96.8
+      },
+      "uncovered_lines": [
+        34,
+        35,
+        36,
+        37
+      ]
+    },
+    "librepods-daemon/src/snapshot.rs": {
+      "metric": {
+        "covered": 5,
+        "count": 5,
+        "percent": 100.0
+      },
+      "uncovered_lines": []
+    },
+    "librepods-daemon/src/storage.rs": {
+      "metric": {
+        "covered": 9,
+        "count": 9,
+        "percent": 100.0
+      },
+      "uncovered_lines": []
+    },
+    "librepods-linux/src/bluez_monitor.rs": {
+      "metric": {
+        "covered": 7,
+        "count": 7,
+        "percent": 100.0
+      },
+      "uncovered_lines": []
+    },
+    "librepods-linux/src/device.rs": {
+      "metric": {
+        "covered": 341,
+        "count": 380,
+        "percent": 89.73684210526316
+      },
+      "uncovered_lines": [
+        45,
+        51,
+        54,
+        55,
+        57,
+        114,
+        125,
+        184,
+        185,
+        186,
+        187,
+        188,
+        232,
+        297,
+        298,
+        299,
+        300,
+        301,
+        327,
+        330,
+        356,
+        357,
+        358,
+        359,
+        360,
+        361,
+        373,
+        374,
+        376,
+        378,
+        416,
+        417,
+        418,
+        419,
+        455,
+        456,
+        457,
+        458,
+        459
+      ]
+    },
+    "librepods-linux/src/error.rs": {
+      "metric": {
+        "covered": 15,
+        "count": 15,
+        "percent": 100.0
+      },
+      "uncovered_lines": []
+    }
+  },
+  "verification": {
+    "workspace_tests": [
+      "minimal",
+      "ble"
+    ],
+    "cli_process_tests_per_variant": 24,
+    "strict_linux_clippy": [
+      "minimal",
+      "ble"
+    ],
+    "windows_checks": "Linux-hosted default/BLE all-target Clippy; native linking/runtime not tested",
+    "android_check": "aarch64 core BLE compile; target installed in the isolated toolchain",
+    "miri": "pure-core key_removal integration test passed",
+    "startup_lock_regression": "failed before RAII unlock, passed after; no test assertion relaxed",
+    "channel_fifo_regression": "failed before preserving channel-pending explicit device intents; passed after fix"
+  },
+  "limitations": [
+    "No live Bluetooth connect/disconnect/forget was performed.",
+    "The running soak daemon remains on the previous merged build.",
+    "Coverage removes only parsed test syntax, without production exclusions.",
+    "Line coverage does not establish controller/firmware behavior."
+  ],
+  "artifact_sha256": {
+    "lprs-device-final-coverage.json": "e5ac5ccc21f328bd48a90a0a854661d15ce20138aa9b9dfcfcc84447c4207aa1",
+    "lprs-device-final-coverage.lcov": "4d45451f113b198bd7c82b62d575c2b1fcc78b8400041f4520ed6602f95060b2",
+    "lprs-device-final-coverage-test-spans.json": "40e500ae35bd4a84c0f22505cfa8d23a9309e19e923fc84643884a1c2743f346",
+    "lprs-device-final-changed-coverage.json": "1ad4390c44bdd06c3c02c59ad779ceb361eca78fd9a980e5c556829f0581faa0",
+    "lprs-device-owner-lock-red.log": "ff28779b17f5c9095d9ea65d755bcb88ec837bbaa5df74de67fb667a4e80f0af",
+    "lprs-device-owner-lock-green.log": "e1e418cdb967115d8d2e8029bbc58d0f0f7c23963a75c2a233a903fe1e126b88",
+    "lprs-device-fifo-red.log": "f98cc3a6a8d509b60b6b6737b7e158597754e5540a8a03ae77c47db93489a0bd",
+    "lprs-device-fifo-green.log": "f1fd2c954c1fa83df909908c20927eea390aef8eeaccc31627f98d2fbda7d023"
+  }
+}

@@ -90,3 +90,19 @@ locked file did not release it while a child retained the same open description.
 A deterministic duplicate-description regression failed before explicit RAII
 unlocking was added and passes afterward. The fix covers acquisition errors as
 well as successful owner shutdown.
+
+## Measured implementation checkpoint
+
+[Portable verification record](evidence/device-management-verification.json)
+attests clean `8bee8ba`, compared with previous master `2cd9f29`. A correctly
+cleaned instrumentation target ran both workspace variants and all 24 actual
+CLI process checks per variant. Production-only coverage is 1953/2011 core
+lines (97.12%), 5914/6608 service lines (89.50%), and 654/697 newly changed
+critical lines (93.83%). All three gates pass. Per-file uncovered lines remain
+in the record; no production code was excluded to reach the thresholds.
+
+Linux minimal/BLE strict Clippy, Windows default/BLE cross-lint, Android core
+BLE compile and the pure key-removal Miri test passed. Windows cross-lint is
+not native Windows linking or runtime evidence. Raw local coverage, test-span
+and changed-line reports are under `/home/blackmyth/.cache/lprs-device-final-*`;
+the record preserves their SHA-256 hashes and failure reproductions.
