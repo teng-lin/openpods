@@ -32,11 +32,15 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{oneshot, watch};
 
+#[path = "session_device.rs"]
+mod device;
+
 const QUEUE_LIMIT: usize = 64;
 const READ_SLICE: Duration = Duration::from_millis(40);
 const AVAILABILITY_POLL_MS: u64 = 1000;
 
 struct Envelope {
+    device_epoch: u64,
     suspend_epoch: u64,
     peer: Option<Arc<OwnedFd>>,
     target_address: Option<String>,
@@ -90,6 +94,7 @@ struct Active {
 
 #[derive(Clone)]
 pub struct SessionHandle {
+    device_epoch: watch::Sender<u64>,
     sender: mpsc::SyncSender<Envelope>,
     backend: Arc<dyn Backend>,
     pub(crate) audio_feed: watch::Sender<serde_json::Value>,
@@ -110,6 +115,7 @@ impl SessionHandle {
     }
     async fn request_inner(&self, mut request: Request, peer: Option<Arc<OwnedFd>>) -> Response {
         let id = request.id;
+        let admission_device_epoch = *self.device_epoch.borrow();
         let admission_suspend_epoch = self.backend.suspend_epoch();
         if peer.as_ref().is_some_and(|peer| !peer_connected(peer)) {
             return Response::failed(
@@ -140,6 +146,8 @@ impl SessionHandle {
         };
         if target_address.as_ref().is_some_and(|address| {
             !address.eq_ignore_ascii_case(&self.status.borrow().device.address)
+                && !(request.operation.is_device_action()
+                    && self.status.borrow().device.address.is_empty())
         }) {
             return Response::failed(
                 id,
@@ -147,6 +155,21 @@ impl SessionHandle {
                     ErrorCode::DeviceUnavailable,
                     "device selection",
                     "service owns a different device; start it with the requested address",
+                ),
+            );
+        }
+        if matches!(request.operation, Operation::DeviceForget { .. })
+            && (!matches!(
+                request.operation,
+                Operation::DeviceForget { confirmed: true }
+            ) || target_address.is_none())
+        {
+            return Response::failed(
+                id,
+                DaemonError::new(
+                    ErrorCode::InvalidInput,
+                    "Bluetooth forget",
+                    "forget requires an explicit device address and confirmed=true",
                 ),
             );
         }
@@ -164,6 +187,8 @@ impl SessionHandle {
         if self.backend.sleeping()
             || self.status.borrow().lifecycle == "suspended"
             || self.backend.suspend_epoch() != admission_suspend_epoch
+            || (!request.operation.is_device_action()
+                && *self.device_epoch.borrow() != admission_device_epoch)
         {
             return Response::failed(
                 id,
@@ -204,6 +229,7 @@ impl SessionHandle {
             }
             if self.backend.sleeping()
                 || self.backend.suspend_epoch() != admission_suspend_epoch
+                || *self.device_epoch.borrow() != admission_device_epoch
                 || self.status.borrow().lifecycle == "suspended"
             {
                 return Response::failed(
@@ -219,11 +245,12 @@ impl SessionHandle {
                 self.manual_overrides
                     .send_modify(|revision| *revision = revision.saturating_add(1));
             }
-            let result = tokio::time::timeout(
-                duration,
-                self.backend.audio_async(address, request.operation),
-            )
-            .await;
+            let mut intent = self.device_epoch.subscribe();
+            let result = tokio::select! {
+                biased;
+                _ = async { if *intent.borrow_and_update() == admission_device_epoch { let _ = intent.changed().await; } } => return Response::failed(id, DaemonError::new(if readonly_audio { ErrorCode::Cancelled } else { ErrorCode::OutcomeUnknown }, "audio", "device management interrupted audio work; inspect status before repeating")),
+                result = tokio::time::timeout(duration, self.backend.audio_async(address, request.operation)) => result,
+            };
             let changed_session = {
                 let status = self.status.borrow();
                 status.session_generation != audio_generation
@@ -231,6 +258,7 @@ impl SessionHandle {
                     || status.lifecycle == "suspended"
                     || self.backend.suspend_epoch() != audio_suspend_epoch
                     || self.backend.sleeping()
+                    || *self.device_epoch.borrow() != admission_device_epoch
             };
             if matches!(&result, Ok(Ok(_)))
                 && (changed_session || self.stopped.load(Ordering::SeqCst))
@@ -250,6 +278,7 @@ impl SessionHandle {
         let dispatched = Arc::new(AtomicBool::new(false));
         let (reply, rx) = oneshot::channel();
         match self.sender.try_send(Envelope {
+            device_epoch: admission_device_epoch,
             suspend_epoch: admission_suspend_epoch,
             peer,
             target_address,
@@ -336,6 +365,7 @@ impl Session {
         paths: Option<crate::storage::Paths>,
     ) -> Self {
         let (sender, receiver) = mpsc::sync_channel(QUEUE_LIMIT);
+        let (device_epoch, _) = watch::channel(0);
         let mut state = DeviceState::default();
         if let Some(address) = &config.address {
             state.set_device_identity(address, "");
@@ -349,6 +379,7 @@ impl Session {
         let stopped = Arc::new(AtomicBool::new(false));
         let transport = Arc::new(Mutex::new(None));
         let handle = SessionHandle {
+            device_epoch: device_epoch.clone(),
             sender,
             backend: backend.clone(),
             audio_feed,
@@ -362,6 +393,7 @@ impl Session {
             let started = Instant::now();
             let telemetry = Telemetry::new(started, paths.clone());
             Worker {
+                device_epoch,
                 backend,
                 config,
                 paths,
@@ -415,6 +447,7 @@ impl Drop for Session {
 }
 
 struct Worker {
+    device_epoch: watch::Sender<u64>,
     backend: Arc<dyn Backend>,
     config: Config,
     paths: Option<crate::storage::Paths>,
@@ -524,6 +557,7 @@ impl Worker {
     }
 
     fn sync_recovery(&mut self) {
+        self.status.connection_desired = self.recovery.is_desired();
         self.status.adapter_ready = self.adapter_ready;
         self.status.bluez_connected = self.bluez_connected;
         self.status.lifecycle = match self.recovery.state {
@@ -1001,7 +1035,21 @@ impl Worker {
             }
         }
     }
-    fn enqueue(&mut self, envelope: Envelope) {
+    fn enqueue(&mut self, mut envelope: Envelope) {
+        if envelope.request.operation.is_device_action() {
+            // Later explicit intents survive earlier intents, including channel-pending requests.
+            envelope.device_epoch = *self.device_epoch.borrow();
+        } else if envelope.device_epoch != *self.device_epoch.borrow() {
+            let _ = envelope.reply.send(Response::failed(
+                envelope.request.id,
+                DaemonError::new(
+                    ErrorCode::Cancelled,
+                    "Bluetooth intent",
+                    "request predates a device management action",
+                ),
+            ));
+            return;
+        }
         if self.backend.sleeping()
             || self.recovery.state == Lifecycle::Suspended
             || envelope.suspend_epoch != self.backend.suspend_epoch()
@@ -1031,19 +1079,44 @@ impl Worker {
                 DaemonError::new(ErrorCode::QueueFull, "queue", "command queue full"),
             ));
         } else {
-            self.queue.push_back(envelope);
+            if envelope.request.operation.is_device_action() {
+                let position = self
+                    .queue
+                    .iter()
+                    .position(|queued| !queued.request.operation.is_device_action())
+                    .unwrap_or(self.queue.len());
+                self.queue.insert(position, envelope);
+            } else {
+                self.queue.push_back(envelope);
+            }
         }
     }
     fn dispatch(&mut self) {
         if self.backend.sleeping() || self.recovery.state == Lifecycle::Suspended {
             return;
         }
-        if self.active.is_some() || self.key_exchange.is_some() {
+        if (self.active.is_some() || self.key_exchange.is_some())
+            && !self
+                .queue
+                .front()
+                .is_some_and(|envelope| envelope.request.operation.is_device_action())
+        {
             return;
         }
         let Some(envelope) = self.queue.pop_front() else {
             return;
         };
+        if envelope.device_epoch != *self.device_epoch.borrow() {
+            let _ = envelope.reply.send(Response::failed(
+                envelope.request.id,
+                DaemonError::new(
+                    ErrorCode::Cancelled,
+                    "Bluetooth intent",
+                    "queued request predates device management",
+                ),
+            ));
+            return;
+        }
         if envelope.suspend_epoch != self.backend.suspend_epoch() {
             let _ = envelope.reply.send(Response::failed(
                 envelope.request.id,
@@ -1071,11 +1144,11 @@ impl Worker {
             return;
         }
         let id = envelope.request.id;
-        if envelope
-            .target_address
-            .as_ref()
-            .is_some_and(|address| !address.eq_ignore_ascii_case(&self.state.bluetooth_address))
-        {
+        if envelope.target_address.as_ref().is_some_and(|address| {
+            !address.eq_ignore_ascii_case(&self.state.bluetooth_address)
+                && !(envelope.request.operation.is_device_action()
+                    && self.state.bluetooth_address.is_empty())
+        }) {
             let _ = envelope.reply.send(Response::failed(
                 id,
                 DaemonError::new(
@@ -1084,6 +1157,10 @@ impl Worker {
                     "selected device changed before dispatch",
                 ),
             ));
+            return;
+        }
+        if envelope.request.operation.is_device_action() {
+            self.dispatch_device(envelope);
             return;
         }
         let response = match &envelope.request.operation {
@@ -1201,7 +1278,11 @@ impl Worker {
                 }
             }
             Operation::ForgetKeys => match self.telemetry.forget(&self.state.bluetooth_address) {
-                Ok(()) => Response::ok(id, serde_json::json!({"keys_available":false})),
+                Ok(()) => {
+                    self.state.forget_proximity_keys();
+                    self.publish();
+                    Response::ok(id, serde_json::json!({"keys_available":false}))
+                }
                 Err(error) => Response::failed(id, error),
             },
             Operation::BleEnabled(enabled) => {
@@ -1481,6 +1562,7 @@ mod dispatch_tests {
         let (_, publication_updates) = watch::channel(None);
         let (_, receiver) = mpsc::sync_channel(QUEUE_LIMIT);
         Worker {
+            device_epoch: watch::channel(0).0,
             backend: Arc::new(NoDiscovery),
             config: Config::default(),
             paths: None,
@@ -1548,6 +1630,7 @@ mod dispatch_tests {
         let (reply, mut response) = oneshot::channel();
         let dispatched = Arc::new(AtomicBool::new(false));
         owner.enqueue(Envelope {
+            device_epoch: 0,
             suspend_epoch: 0,
             peer: Some(peer),
             target_address: None,
@@ -1610,6 +1693,7 @@ mod dispatch_tests {
             };
             let dispatched = Arc::new(AtomicBool::new(false));
             let envelope = Envelope {
+                device_epoch: 0,
                 suspend_epoch: 0,
                 peer,
                 target_address: None,
@@ -1714,6 +1798,7 @@ mod dispatch_tests {
         let (reply, receiver) = oneshot::channel();
         (
             Envelope {
+                device_epoch: 0,
                 suspend_epoch: epoch,
                 peer: None,
                 target_address: None,
@@ -1911,6 +1996,7 @@ mod dispatch_tests {
             let (publication_health, _) = watch::channel(None);
             let (manual_overrides, _) = watch::channel(0);
             let handle = SessionHandle {
+                device_epoch: watch::channel(0).0,
                 sender,
                 backend: Arc::new(SuspendBackend(facts.clone())),
                 audio_feed,

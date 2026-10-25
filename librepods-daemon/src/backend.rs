@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use crate::{ipc::Operation, DaemonError, ErrorCode};
-use librepods_core::transport::{L2capTransport, TransportError};
+use librepods_core::transport::{DeviceAction, DeviceActionResult, L2capTransport, TransportError};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,6 +24,22 @@ pub type AudioFuture = std::pin::Pin<
 >;
 
 pub trait Backend: Send + Sync {
+    /// Validate the target first, then call prepare once immediately before dispatch.
+    /// Every wait and effect must respect deadline and the non-consuming cancellation guard.
+    fn device_action(
+        &self,
+        _address: &str,
+        _action: DeviceAction,
+        _deadline: std::time::Instant,
+        _cancelled: &(dyn Fn() -> bool + Sync),
+        _prepare: &mut dyn FnMut(),
+    ) -> Result<DeviceActionResult, DaemonError> {
+        Err(DaemonError::new(
+            ErrorCode::Unsupported,
+            "Bluetooth device",
+            "device management is unavailable on this backend",
+        ))
+    }
     fn discover(&self, address: Option<&str>) -> Result<Endpoint, DaemonError>;
     fn connect(
         &self,
@@ -92,6 +108,25 @@ impl Default for LinuxBackend {
 }
 
 impl Backend for LinuxBackend {
+    fn device_action(
+        &self,
+        address: &str,
+        action: DeviceAction,
+        deadline: std::time::Instant,
+        cancelled: &(dyn Fn() -> bool + Sync),
+        prepare: &mut dyn FnMut(),
+    ) -> Result<DeviceActionResult, DaemonError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| DaemonError::io("Bluetooth runtime", error))?;
+        runtime
+            .block_on(librepods_linux::device::execute(
+                address, action, deadline, cancelled, prepare,
+            ))
+            .map_err(device_error)
+    }
+
     fn desktop_enabled(&self) -> bool {
         true
     }
@@ -257,6 +292,21 @@ impl Backend for LinuxBackend {
     }
 }
 
+fn device_error(error: librepods_linux::device::DeviceError) -> DaemonError {
+    use librepods_linux::device::FailureKind;
+    let code = match error.kind {
+        FailureKind::InvalidInput => ErrorCode::InvalidInput,
+        FailureKind::Unsupported => ErrorCode::Unsupported,
+        FailureKind::Unavailable => ErrorCode::DeviceUnavailable,
+        FailureKind::PermissionDenied => ErrorCode::PermissionDenied,
+        FailureKind::Failed => ErrorCode::ConnectFailed,
+        FailureKind::Cancelled => ErrorCode::Cancelled,
+        FailureKind::TimedOut => ErrorCode::CommandTimeout,
+        FailureKind::OutcomeUnknown => ErrorCode::OutcomeUnknown,
+    };
+    DaemonError::new(code, error.stage, error.message)
+}
+
 fn select_endpoint(
     snapshot: &librepods_linux::bluez_monitor::BluezSnapshot,
     address: Option<&str>,
@@ -348,6 +398,30 @@ mod tests {
     use super::*;
     use librepods_linux::bluez_monitor::{AdapterSnapshot, BluezSnapshot, DeviceSnapshot};
 
+    #[test]
+    fn device_failures_keep_explicit_codes_and_do_not_automatically_retry() {
+        use librepods_linux::device::{DeviceError, FailureKind};
+        for (kind, code) in [
+            (FailureKind::InvalidInput, ErrorCode::InvalidInput),
+            (FailureKind::Unsupported, ErrorCode::Unsupported),
+            (FailureKind::Unavailable, ErrorCode::DeviceUnavailable),
+            (FailureKind::PermissionDenied, ErrorCode::PermissionDenied),
+            (FailureKind::Failed, ErrorCode::ConnectFailed),
+            (FailureKind::Cancelled, ErrorCode::Cancelled),
+            (FailureKind::TimedOut, ErrorCode::CommandTimeout),
+            (FailureKind::OutcomeUnknown, ErrorCode::OutcomeUnknown),
+        ] {
+            let error = device_error(DeviceError {
+                kind,
+                stage: "BlueZ operation",
+                message: "original cause".into(),
+            });
+            assert_eq!(error.code, code);
+            assert_eq!(error.stage, "BlueZ operation");
+            assert_eq!(error.message, "original cause");
+            assert!(!error.retryable);
+        }
+    }
     fn snapshot() -> BluezSnapshot {
         BluezSnapshot {
             available: true,

@@ -10,6 +10,23 @@
 
 use thiserror::Error;
 
+/// Explicit host Bluetooth operations, independent of the vendor control link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceAction {
+    Connect,
+    Disconnect,
+    Forget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DeviceActionResult {
+    pub address: String,
+    pub bluetooth_connected: bool,
+    pub paired: bool,
+    pub changed: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------

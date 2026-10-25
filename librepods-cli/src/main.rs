@@ -84,6 +84,11 @@ enum Command {
     Doctor,
     Capabilities,
     Reconnect,
+    /// Manage the Bluetooth link and pairing through the persistent service.
+    Device {
+        #[command(subcommand)]
+        action: DeviceCommand,
+    },
     /// Enable or disable optional proximity telemetry without restarting.
     Ble {
         #[arg(value_enum)]
@@ -129,6 +134,19 @@ enum AudioCommand {
 }
 
 #[derive(Subcommand)]
+enum DeviceCommand {
+    /// Connect already-paired AirPods; AACP readiness is reported separately.
+    Connect,
+    /// Disconnect Bluetooth audio and suppress automatic AACP recovery.
+    Disconnect,
+    /// Remove the selected pairing and private proximity keys. Requires --address.
+    Forget {
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum KeyCommand {
     Fetch,
     Forget,
@@ -168,6 +186,16 @@ impl Cli {
             Some(Command::Doctor) => Operation::Doctor,
             Some(Command::Capabilities) => Operation::Capabilities,
             Some(Command::Reconnect) => Operation::Reconnect,
+            Some(Command::Device { action }) => match action {
+                DeviceCommand::Connect => Operation::DeviceConnect,
+                DeviceCommand::Disconnect => Operation::DeviceDisconnect,
+                DeviceCommand::Forget { yes } => {
+                    if !yes || self.address.is_none() {
+                        return Err(DaemonError::new(ErrorCode::InvalidInput, "CLI", "forget removes the Bluetooth pairing; use device forget --address ADDRESS --yes to confirm"));
+                    }
+                    Operation::DeviceForget { confirmed: true }
+                }
+            },
             Some(Command::Ble { mode }) => Operation::BleEnabled(matches!(mode, Toggle::On)),
             Some(Command::Keys { action }) => match action {
                 KeyCommand::Fetch => Operation::FetchKeys,
@@ -212,6 +240,8 @@ impl Cli {
 
 fn compat_operation(verb: &str) -> Result<Operation, DaemonError> {
     let change = match verb {
+        "connect" => return Ok(Operation::DeviceConnect),
+        "disconnect" => return Ok(Operation::DeviceDisconnect),
         "status" => return Ok(Operation::Status),
         "noise:off" => SettingChange::ListeningMode(NoiseControlMode::Off),
         "noise:anc" => SettingChange::ListeningMode(NoiseControlMode::NoiseCancellation),
@@ -298,6 +328,13 @@ async fn run(cli: &Cli) -> Result<(), DaemonError> {
         return scan(&paths).await;
     }
     let operation = cli.operation()?;
+    if cli.direct && operation.is_device_action() {
+        return Err(DaemonError::new(
+            ErrorCode::Unsupported,
+            "CLI",
+            "Bluetooth device management requires the persistent service",
+        ));
+    }
     let watch = matches!(operation, Operation::Watch);
     let operation = match &cli.address {
         Some(address) => Operation::ForDevice {

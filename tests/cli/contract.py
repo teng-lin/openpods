@@ -82,11 +82,31 @@ class CliContract(unittest.TestCase):
         self.assertEqual(request["version"], 1)
         self.assertEqual(request["operation"], {"type": "status"})
 
+    def test_forget_requires_explicit_address_and_confirmation_before_any_ipc(self):
+        for args in [["device", "forget"], ["device", "forget", "--yes"],
+                     ["--address", "00:11:22:33:44:55", "device", "forget"]]:
+            result = self.call(*args)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("confirm", result.stdout + result.stderr)
+        result, request = self.exchange(
+            ["--address", "00:11:22:33:44:55", "device", "forget", "--yes"], self.ok)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(request["operation"], {"type": "for_device", "value": {
+            "address": "00:11:22:33:44:55", "operation": {
+                "type": "device_forget", "value": {"confirmed": True}}}})
+
+    def test_device_management_refuses_direct_mode_before_opening_bluetooth(self):
+        result = self.call("--direct", "device", "connect")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("persistent service", result.stdout + result.stderr)
+
     def test_control_audio_and_policy_verbs_forward_typed_operations(self):
         cases = [
             (["doctor"], {"type": "doctor"}),
             (["capabilities"], {"type": "capabilities"}),
             (["reconnect"], {"type": "reconnect"}),
+            (["device", "connect"], {"type": "device_connect"}),
+            (["device", "disconnect"], {"type": "device_disconnect"}),
             (["ble", "on"], {"type": "ble_enabled", "value": True}),
             (["ble", "off"], {"type": "ble_enabled", "value": False}),
             (["keys", "fetch"], {"type": "fetch_keys"}),
@@ -189,7 +209,9 @@ class CliContract(unittest.TestCase):
             (lambda req: {"version": 1, "id": req["id"], "result": None, "error": None}, "malformed_frame"),
         ]
         for response, readonly_code in cases:
-            for args, expected in [(["status"], readonly_code), (["--conversation-awareness", "off"], "outcome_unknown")]:
+            for args, expected in [(["status"], readonly_code), (["--conversation-awareness", "off"], "outcome_unknown"),
+                (["device", "connect"], "outcome_unknown"), (["device", "disconnect"], "outcome_unknown"),
+                (["--address", "00:11:22:33:44:55", "device", "forget", "--yes"], "outcome_unknown")]:
                 with self.subTest(expected=expected, readonly_code=readonly_code):
                     result, _ = self.exchange(args, response)
                     self.assertEqual(result.returncode, 1)
@@ -293,6 +315,13 @@ class CliContract(unittest.TestCase):
                 time.sleep(0.01)
             self.assertFalse(state["connected"])
             self.assertFalse(state["ble_enabled"])
+            for args in [["device", "connect"], ["device", "disconnect"],
+                         ["--address", "00:11:22:33:44:55", "device", "forget", "--yes"]]:
+                failed = self.call(*args)
+                self.assertEqual(failed.returncode, 1, failed.stdout)
+                self.assertEqual(json.loads(failed.stderr)["code"], "device_unavailable")
+            self.assertTrue(json.loads(self.call("status").stdout)["connection_desired"])
+
             self.assertEqual(state["ble"]["compiled"], BLE_BUILD)
             # No system/session bus or audio server points at the user's session.
             # This exercises production owners under a real unavailable-adapter failure.

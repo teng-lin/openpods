@@ -360,6 +360,19 @@ impl DeviceState {
         self.model.capabilities()
     }
 
+    /// Explicit key removal also invalidates the reducer's private cached copy.
+    pub fn forget_proximity_keys(&mut self) {
+        let changed = self.magic_acc_irk.is_some()
+            || self.magic_acc_enc_key.is_some()
+            || self.observations.contains_key("keys");
+        self.magic_acc_irk = None;
+        self.magic_acc_enc_key = None;
+        self.observations.remove("keys");
+        if changed {
+            self.revision = self.revision.saturating_add(1);
+        }
+    }
+
     pub fn begin_session(&mut self, generation: u64) {
         if generation <= self.session_generation {
             return;

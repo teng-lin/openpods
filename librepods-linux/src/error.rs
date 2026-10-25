@@ -89,6 +89,24 @@ fn source_kind(source: &(dyn std::error::Error + 'static)) -> Option<ErrorKind> 
         if let Some(error) = error.downcast_ref::<io::Error>() {
             return Some(PlatformError::io("I/O", io::Error::from(error.kind())).kind);
         }
+        if let Some(zbus::Error::MethodError(name, _, _)) = error.downcast_ref::<zbus::Error>() {
+            return Some(match name.as_str() {
+                "org.freedesktop.DBus.Error.AccessDenied"
+                | "org.freedesktop.DBus.Error.AuthFailed"
+                | "org.bluez.Error.NotAuthorized"
+                | "org.bluez.Error.NotPermitted" => ErrorKind::PermissionDenied,
+                "org.freedesktop.DBus.Error.NoReply" | "org.freedesktop.DBus.Error.Timeout" => {
+                    ErrorKind::Timeout
+                }
+                "org.bluez.Error.InvalidArguments" | "org.freedesktop.DBus.Error.InvalidArgs" => {
+                    ErrorKind::InvalidInput
+                }
+                "org.bluez.Error.NotSupported"
+                | "org.freedesktop.DBus.Error.NotSupported"
+                | "org.freedesktop.DBus.Error.UnknownMethod" => ErrorKind::Unsupported,
+                _ => ErrorKind::Unavailable,
+            });
+        }
         #[cfg(feature = "ble")]
         {
             if let Some(error) = error.downcast_ref::<btleplug::Error>() {

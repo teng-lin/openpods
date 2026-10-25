@@ -22,7 +22,8 @@ cargo build -p librepods-cli --release --no-default-features --locked
 ./target/release/librepods-cli serve --address AA:BB:CC:DD:EE:FF
 ```
 
-Use an already paired and connected device. Without `--address`, the service
+Use an already paired device. The service can wait while it is disconnected;
+`device connect` can explicitly ask BlueZ to connect it. Without `--address`, the service
 selects a single connected AirPods device and rejects ambiguity. It owns the
 AACP connection until stopped. Run clients in another terminal:
 
@@ -51,6 +52,29 @@ silently retarget a running service. `--direct` is an isolated diagnostic sessio
 that holds the same ownership lock and refuses a competing daemon/direct owner.
 Rename and long-press commands have protocol support but remain experimental
 until their actual firmware confirmations are accepted.
+
+## Bluetooth device management
+
+```bash
+librepods-cli --address AA:BB:CC:DD:EE:FF device connect
+librepods-cli device disconnect
+librepods-cli --address AA:BB:CC:DD:EE:FF device forget --yes
+librepods-cli reconnect
+```
+
+These commands require the persistent service. Bluetooth connect confirms the
+BlueZ link and schedules AACP recovery; `status.connected` separately reports
+control readiness. Disconnect stops Bluetooth audio and sets
+`connection_desired: false`, suppressing automatic control reconnection through
+watchdog and suspend/resume events. Explicit `device connect` or `reconnect`
+re-enables control recovery. This intent lasts for the daemon's lifetime.
+
+Forget requires both an explicit address and `--yes`, disconnects first when
+necessary, removes the pairing and deletes that device's private proximity keys.
+Re-pair through the desktop before connecting again. The existing `reconnect`
+command reopens only the vendor control channel and does not connect Bluetooth.
+See [device-management semantics and tests](docs/device-management.md) for
+uncertain outcomes, partial cleanup failures and target selection.
 
 ## Audio and desktop policies
 

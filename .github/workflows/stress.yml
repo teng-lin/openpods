@@ -64,12 +64,12 @@ jobs:
             fi
           }
 
-          run_logged 10m build cargo test -p librepods-daemon --no-default-features "${features[@]}" --locked --lib --test runtime --test recovery --test readback --no-run
+          run_logged 10m build cargo test -p librepods-daemon --no-default-features "${features[@]}" --locked --lib --test runtime --test recovery --test readback --test device_management --no-run
           for ((iteration=1; iteration<=CANCEL_REPEATS; iteration++)); do
             run_logged 30s "cancel-$iteration" cargo test -p librepods-daemon --no-default-features "${features[@]}" --locked --test runtime disconnected_queued_client_cannot_cause_a_late_mutation -- --exact --nocapture
           done
           for ((iteration=1; iteration<=CRITICAL_REPEATS; iteration++)); do
-            run_logged 120s "critical-$iteration" cargo test -p librepods-daemon --no-default-features "${features[@]}" --locked --lib --test runtime --test recovery --test readback -- --nocapture
+            run_logged 120s "critical-$iteration" cargo test -p librepods-daemon --no-default-features "${features[@]}" --locked --lib --test runtime --test recovery --test readback --test device_management -- --nocapture
           done
       - name: Preserve stress diagnostics
         if: always()

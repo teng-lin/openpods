@@ -12,6 +12,7 @@
 pub mod ble;
 pub mod bluez_monitor;
 pub mod desktop;
+pub mod device;
 pub mod error;
 pub mod l2cap;
 pub mod media;

@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
+fn default_connection_desired() -> bool {
+    true
+}
+
 /// Public DTO deliberately has no encryption or identity-key fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceStatus {
@@ -45,6 +49,9 @@ pub struct Snapshot {
     /// Last reconciled BlueZ link state; `connected` denotes AACP readiness.
     #[serde(default)]
     pub bluez_connected: bool,
+    /// False after an intentional device disconnect/forget until explicit reconnect.
+    #[serde(default = "default_connection_desired")]
+    pub connection_desired: bool,
     pub updated_unix_ms: u64,
     pub observed_monotonic_ms: u64,
     /// Receipt times in wall-clock milliseconds, retained through disconnects.
@@ -78,6 +85,7 @@ impl Snapshot {
             connected: state.connected,
             adapter_ready: false,
             bluez_connected: false,
+            connection_desired: true,
             updated_unix_ms: 0,
             observed_monotonic_ms: 0,
             observation_unix_ms: BTreeMap::new(),
@@ -190,6 +198,7 @@ impl Snapshot {
             "lifecycle": self.lifecycle,
             "adapter_ready": self.adapter_ready,
             "bluez_connected": self.bluez_connected,
+            "connection_desired": self.connection_desired,
             "aacp_ready": self.connected,
             "last_error": self.last_error,
             "ble": self.ble,

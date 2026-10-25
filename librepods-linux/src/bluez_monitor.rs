@@ -121,10 +121,17 @@ fn decode(objects: ManagedObjects) -> BluezSnapshot {
 }
 
 pub async fn snapshot_on(connection: &zbus::Connection) -> Result<BluezSnapshot, TransportError> {
+    snapshot_from(connection, "org.bluez").await
+}
+
+pub(crate) async fn snapshot_from(
+    connection: &zbus::Connection,
+    destination: &str,
+) -> Result<BluezSnapshot, TransportError> {
     let reply = tokio::time::timeout(
         CALL_TIMEOUT,
         connection.call_method(
-            Some("org.bluez"),
+            Some(destination),
             "/",
             Some("org.freedesktop.DBus.ObjectManager"),
             "GetManagedObjects",

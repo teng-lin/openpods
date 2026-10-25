@@ -50,6 +50,11 @@ pub enum Operation {
     FetchKeys,
     ForgetKeys,
     Reconnect,
+    DeviceConnect,
+    DeviceDisconnect,
+    DeviceForget {
+        confirmed: bool,
+    },
     Doctor,
     AudioStatus,
     SetOutput(String),
@@ -63,6 +68,12 @@ pub enum Operation {
 }
 
 impl Operation {
+    pub fn is_device_action(&self) -> bool {
+        matches!(
+            self,
+            Self::DeviceConnect | Self::DeviceDisconnect | Self::DeviceForget { .. }
+        )
+    }
     pub fn is_mutation(&self) -> bool {
         match self {
             Self::ForDevice { operation, .. } => operation.is_mutation(),
