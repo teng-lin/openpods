@@ -3,6 +3,7 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 report="${1:-$PWD/target/gui-coverage.json}"
+mkdir -p "$(dirname "$report")"
 cargo llvm-cov --manifest-path librepods-gui/Cargo.toml --no-default-features --locked --json --output-path "$report"
 python3 - "$report" <<'PY'
 import json, sys
