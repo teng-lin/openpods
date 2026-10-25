@@ -152,7 +152,7 @@ impl PanelModel {
         self.pending = false;
         match result {
             Ok(()) => {
-                self.message = Some("Daemon confirmed the request. Reading current state…".into());
+                self.message = None;
                 self.failure = None;
             }
             Err(e) => {

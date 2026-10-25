@@ -53,7 +53,7 @@ fn mutation_is_confirmed_without_optimistically_overwriting_reported_state() {
     assert!(p.message.is_none());
     p.finish(Ok(()));
     assert!(p.failure.is_none());
-    assert!(p.message.is_some());
+    assert!(p.message.is_none());
 }
 #[test]
 fn fresh_generation_is_required_and_session_changes_cancel_prepared_commands() {
