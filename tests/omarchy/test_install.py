@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -51,6 +52,24 @@ class InstallTests(unittest.TestCase):
             installer.wait_for_plugin()
             self.assertEqual(run.call_count,2)
         with self.assertRaises(RuntimeError):installer.wait_for_plugin(timeout=0)
+
+    def test_activation_starts_service_before_enabling_widget(self):
+        with mock.patch.object(installer.subprocess, 'run') as run, mock.patch.object(installer, 'wait_for_plugin'), mock.patch.object(installer, 'configure_client'):
+            installer.enable_widget(Path('/example/client'), self.root)
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(commands[:2], [
+            ['systemctl', '--user', 'daemon-reload'],
+            ['systemctl', '--user', 'enable', '--now', 'librepods-rs.service'],
+        ])
+        self.assertIn(['omarchy', 'plugin', 'enable', installer.PLUGIN_ID, '--section', 'right', '--before', 'omarchy.bluetooth'], commands)
+
+    def test_failed_service_start_does_not_enable_widget(self):
+        failure = subprocess.CalledProcessError(1, ['systemctl'])
+        with mock.patch.object(installer.subprocess, 'run', side_effect=[None, failure]) as run, mock.patch.object(installer, 'wait_for_plugin') as wait:
+            with self.assertRaises(subprocess.CalledProcessError):
+                installer.enable_widget(Path('/example/client'), self.root)
+        wait.assert_not_called()
+        self.assertFalse(any(call.args[0][0] == 'omarchy' for call in run.call_args_list))
 
     def test_installed_client_path_survives_plugin_reload_and_owned_file_upgrade(self):
         binary=Path('/example/client with spaces')

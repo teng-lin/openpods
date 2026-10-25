@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Configure a Git-installed Omarchy plugin to use an existing Rust daemon."""
+"""Configure a Git-installed Omarchy plugin and enable its installed Rust service."""
 import argparse
 import importlib.util
 import json
@@ -73,7 +73,7 @@ def main():
     if backup:
         print('Shell configuration backup:', backup)
     print('Configured org.librepods.pods with', Path(binary).absolute())
-    print('The plugin uses your existing Rust daemon. See docs/deployment.md for daemon installation/startup.')
+    print('The Rust service is started and enabled for automatic startup at login.')
     print('After updating QML dependencies, run: omarchy restart shell')
 
 

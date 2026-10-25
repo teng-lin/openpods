@@ -17,6 +17,9 @@ with tempfile.TemporaryDirectory(prefix='librepods-git-plugin-') as temp:
     plugin = home / '.config/omarchy/plugins/org.librepods.pods'
     plugin.parent.mkdir(parents=True)
     subprocess.run(['git', 'clone', '--quiet', '--no-hardlinks', str(ROOT), str(plugin)], check=True)
+    for name in ['install-omarchy.py', 'setup-omarchy.py']:
+        shutil.copy2(ROOT / 'scripts' / name, plugin / 'scripts' / name)
+    original_status = subprocess.check_output(['git', '-C', str(plugin), 'status', '--porcelain', '--untracked-files=all'], text=True)
     subprocess.run([validator, str(plugin)], check=True)
     shell = home / '.config/omarchy/shell.json'
     shell.write_text(json.dumps({'version': 1, 'idle': {'lock': 300}, 'bar': {'layout': {'left': [{'id': 'omarchy.menu'}], 'right': [{'id': 'org.librepods.pods'}, {'id': 'omarchy.bluetooth'}]}}}))
@@ -39,6 +42,15 @@ if args[:4]==['bar','set','org.librepods.pods','ctlPath']:
 print('Unexpected setup operation: '+repr(args),file=sys.stderr);sys.exit(2)
 ''')
     fake.chmod(0o755)
+    systemctl = tools / 'systemctl'
+    systemctl.write_text('''#!/usr/bin/env python3
+import json,os,sys
+from pathlib import Path
+args=sys.argv[1:]
+with (Path(os.environ['HOME'])/'systemctl.jsonl').open('a') as out:out.write(json.dumps(args)+'\\n')
+if args not in [['--user','daemon-reload'],['--user','enable','--now','librepods-rs.service']]:sys.exit(2)
+''')
+    systemctl.chmod(0o755)
     runtime = home / 'runtime'; runtime.mkdir(mode=0o700)
     env = os.environ.copy()
     env.update(HOME=str(home), XDG_CONFIG_HOME=str(home / '.config'), XDG_RUNTIME_DIR=str(runtime),
@@ -50,9 +62,11 @@ print('Unexpected setup operation: '+repr(args),file=sys.stderr);sys.exit(2)
     assert data['bar']['layout']['right'][0]['ctlPath'] == str(binary)
     assert data['bar']['layout']['right'][1] == {'id': 'omarchy.bluetooth'}
     assert (plugin / '.git').is_dir()
-    assert not subprocess.check_output(['git', '-C', str(plugin), 'status', '--porcelain', '--untracked-files=all'], env=env, text=True), 'setup dirtied the Git checkout'
+    assert subprocess.check_output(['git', '-C', str(plugin), 'status', '--porcelain', '--untracked-files=all'], env=env, text=True) == original_status, 'setup dirtied the Git checkout'
     subprocess.run([validator, str(plugin)], check=True)
     calls = [json.loads(line) for line in (home / 'calls.jsonl').read_text().splitlines()]
     assert len(calls) == 5
     assert [call for call in calls if call[:2] == ['plugin','enable']] == [['plugin','enable','org.librepods.pods']]
+    service_calls = [json.loads(line) for line in (home / 'systemctl.jsonl').read_text().splitlines()]
+    assert service_calls == [['--user','daemon-reload'],['--user','enable','--now','librepods-rs.service']]
     print('Fresh Git plugin: validation, in-place setup, preserved settings and clean checkout passed')

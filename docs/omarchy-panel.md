@@ -21,7 +21,9 @@ omarchy plugin add https://github.com/teng-lin/openpods --enable
 ~/.config/omarchy/plugins/org.librepods.pods/setup --ctl /absolute/path/to/openpods-cli
 ```
 
-Use an already running, up-to-date Rust daemon. Setup uses the client on PATH if
+Install an up-to-date Rust daemon and its user service first; see
+[deployment](deployment.md). Setup starts and enables `librepods-rs.service`
+automatically, including startup at future logins. It uses the client on PATH if
 `--ctl` is omitted. To build a client instead:
 
 ```sh
@@ -35,8 +37,10 @@ configuration is respected when choosing client build features; `--build --ble`
 can explicitly include BLE support without enabling scanning.
 
 Setup configures the client through the bar API and retains the widget placement
-you chose in Omarchy. It preserves the Git checkout and tracked QML files. It does not install/start another daemon
-or enable daemon startup. Follow [deployment](deployment.md) for those steps.
+you chose in Omarchy. It preserves the Git checkout and tracked QML files.
+Setup reloads the user service definitions and runs
+`systemctl --user enable --now librepods-rs.service` before enabling the widget.
+A missing service or failed systemd command stops setup with an error.
 After `omarchy plugin update org.librepods.pods`, rerun setup if the client needs
 rebuilding or its path changed. Restart the shell when QML dependency caching
 requires it.
@@ -48,7 +52,7 @@ and then add the Git plugin. Do not run the copy installer over a Git checkout.
 
 ## Local source installation
 
-Use an up-to-date, already running Rust daemon and its matching CLI. The native
+Use an installed, up-to-date Rust daemon, its user service and matching CLI. The native
 snapshot must contain `device.capabilities`; older snapshots fail closed for
 feature controls. GPUI remains available as a separate desktop application.
 
@@ -71,13 +75,16 @@ through a plugin rescan. Apply a full shell restart after the update if needed:
 omarchy restart shell
 ```
 
-The installer does not build/start a daemon, enable another Bluetooth owner,
-modify pairings, select codecs, or change audio routes. The stock Bluetooth and
+With `--enable`, the installer starts and enables the installed Rust service
+before enabling the widget. Stop and disable any previous AirPods daemon before
+activation, following [deployment](deployment.md). The installer does not build
+or install a daemon, modify pairings, select codecs, or change audio routes. The stock Bluetooth and
 audio panels stay available for those operations. Using this panel does not
 require legacy status publication, Qt Kvantum, elevated privileges, or the C++
 daemon. BLE remains an independent daemon option.
 
-Daemon startup is configured separately; see [deployment](deployment.md).
+The widget itself only connects to the service; systemd owns daemon startup
+and restart behavior, independently of panel reloads.
 
 Without `--enable`, only the plugin files are installed. `--plugin-dir` supports
 staging; automatic enablement targets the normal user plugin location. Widget

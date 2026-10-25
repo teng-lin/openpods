@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Install the optional Omarchy client without installing or starting a daemon."""
+"""Install the Omarchy client and start its installed service when enabled."""
 import argparse
 import hashlib
 import json
@@ -101,6 +101,8 @@ def wait_for_plugin(timeout=5):
 
 
 def enable_widget(binary, config_home, preserve_placement=False):
+    subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True)
+    subprocess.run(['systemctl', '--user', 'enable', '--now', 'librepods-rs.service'], check=True)
     subprocess.run(['omarchy', 'shell', 'shell', 'rescanPlugins'], check=True)
     wait_for_plugin()
     command = ['omarchy', 'plugin', 'enable', PLUGIN_ID]
@@ -128,7 +130,7 @@ def main():
         backup = enable_widget(binary, config_home)
         if backup:
             print('Shell configuration backup:', backup)
-        print('Enabled native Rust AirPods widget. No daemon was installed or started.')
+        print('Enabled native Rust AirPods widget and automatic daemon startup.')
 
 
 if __name__ == '__main__':
