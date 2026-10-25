@@ -56,7 +56,8 @@ until their actual firmware confirmations are accepted.
 ## Omarchy bar panel
 
 An optional QML panel adapted from omarchy-pods integrates battery and listening
-controls into the Omarchy bar, using the native Rust daemon. See
+controls into the Omarchy bar, using the native Rust daemon. The root manifest
+and executable `setup` support standard Git plugin installation. See
 [installation and behavior](docs/omarchy-panel.md). It preserves the upstream MIT
 attribution and uses original icons.
 

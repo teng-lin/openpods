@@ -100,6 +100,15 @@ def wait_for_plugin(timeout=5):
     raise RuntimeError('Omarchy did not discover the installed plugin before the deadline')
 
 
+def enable_widget(binary, config_home):
+    subprocess.run(['omarchy', 'shell', 'shell', 'rescanPlugins'], check=True)
+    wait_for_plugin()
+    subprocess.run(['omarchy', 'plugin', 'enable', PLUGIN_ID, '--section', 'right', '--before', 'omarchy.bluetooth'], check=True)
+    backup = configure_client(config_home / 'omarchy/shell.json', binary)
+    subprocess.run(['omarchy','bar','set',PLUGIN_ID,'ctlPath',str(binary)],check=True)
+    return backup
+
+
 def main():
     config_home = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
     parser = argparse.ArgumentParser(description=__doc__)
@@ -113,13 +122,9 @@ def main():
     subprocess.run(['omarchy', 'plugin', 'validate', str(ROOT / 'ui/omarchy')], check=True)
     print('Installed', install_plugin(ROOT / 'ui/omarchy', args.plugin_dir.expanduser().absolute(), binary))
     if args.enable:
-        subprocess.run(['omarchy', 'shell', 'shell', 'rescanPlugins'], check=True)
-        wait_for_plugin()
-        subprocess.run(['omarchy', 'plugin', 'enable', PLUGIN_ID, '--section', 'right', '--before', 'omarchy.bluetooth'], check=True)
-        backup = configure_client(config_home / 'omarchy/shell.json', binary)
+        backup = enable_widget(binary, config_home)
         if backup:
             print('Shell configuration backup:', backup)
-        subprocess.run(['omarchy','bar','set',PLUGIN_ID,'ctlPath',str(binary)],check=True)
         print('Enabled native Rust AirPods widget. No daemon was installed or started.')
 
 

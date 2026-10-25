@@ -8,7 +8,45 @@ conversation awareness, single-earbud ANC and pause policy. The source attributi
 and exact upstream revision are in `ui/omarchy/UPSTREAM.md`; its MIT license is
 bundled. Icons are original geometric drawings.
 
-## Install
+## Git plugin installation
+
+The repository root is an Omarchy plugin package: `manifest.json` points at
+`ui/omarchy/Panel.qml`, and the executable `setup` configures that checkout in
+place. The QML is MIT-licensed; the Rust workspace remains AGPL-3.0-only.
+
+Once this packaging is merged and published to the default GitHub branch:
+
+```sh
+omarchy plugin add https://github.com/brianpht/librepods-rs --enable
+~/.config/omarchy/plugins/org.librepods.pods/setup --ctl /absolute/path/to/librepods-cli
+```
+
+Use an already running, up-to-date Rust daemon. Setup uses the client on PATH if
+`--ctl` is omitted. To build a client instead:
+
+```sh
+~/.config/omarchy/plugins/org.librepods.pods/setup --build
+```
+
+Builds go into `$XDG_CACHE_HOME/librepods-rs/omarchy-build` (default
+`~/.cache/librepods-rs/omarchy-build`), keeping artifacts and symlinks out of the
+plugin checkout. Builds use the pinned toolchain and lockfile. Existing BLE
+configuration is respected when choosing client build features; `--build --ble`
+can explicitly include BLE support without enabling scanning.
+
+Setup changes bar configuration through the same installer helpers, and preserves
+the Git checkout and tracked QML files. It does not install/start another daemon
+or enable daemon startup. Follow [deployment](deployment.md) for those steps.
+After `omarchy plugin update org.librepods.pods`, rerun setup if the client needs
+rebuilding or its path changed. Restart the shell when QML dependency caching
+requires it.
+
+An existing copied installation uses the same plugin ID, so Omarchy will refuse a
+second installation. Keep using the copied plugin, or disable it, retain a backup
+outside the plugin directory, remove that copy through Omarchy's plugin manager,
+and then add the Git plugin. Do not run the copy installer over a Git checkout.
+
+## Local source installation
 
 Use an up-to-date, already running Rust daemon and its matching CLI. The native
 snapshot must contain `device.capabilities`; older snapshots fail closed for
