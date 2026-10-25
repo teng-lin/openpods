@@ -13,7 +13,7 @@ def measure(report):
         for file in data["files"]:
             name = file["filename"].replace("\\", "/")
             group = "core" if "/librepods-core/src/" in name else (
-                "service" if any(f"/{crate}/src/" in name for crate in ["librepods-daemon", "librepods-linux", "librepods-cli"]) else None)
+                "service" if any(f"/{crate}/src/" in name for crate in ["librepods-api", "librepods-daemon", "librepods-linux", "librepods-cli"]) else None)
             if group is not None:
                 lines = file["summary"]["lines"]
                 groups[group]["count"] += lines["count"]
@@ -40,7 +40,7 @@ def production_measure(lcov, spans):
     for name, lines in files.items():
         group = "core" if "/librepods-core/src/" in name else (
             "service" if any(f"/{crate}/src/" in name for crate in
-                ["librepods-daemon", "librepods-linux", "librepods-cli"]) else None)
+                ["librepods-api", "librepods-daemon", "librepods-linux", "librepods-cli"]) else None)
         if group is None:
             continue
         if name not in spans:

@@ -18,6 +18,7 @@ CRITICAL = {
     "librepods-core/src/device/ble_advert.rs": "untrusted optional advertisement decoding and identity",
     "librepods-core/src/device/battery.rs": "unavailable versus genuine battery measurements",
     "librepods-core/src/transport.rs": "classified transport errors and retry policy",
+    "librepods-api/src/": "shared typed status, bounded IPC and classified client uncertainty",
     "librepods-daemon/src/": "IPC, connection ownership, persistence, keys and desktop coordination",
     "librepods-linux/src/": "native bounded I/O, monitor cancellation and desktop side effects",
     "librepods-cli/src/": "direct ownership, typed requests, uncertainty and truthful status",
@@ -62,7 +63,7 @@ def audit(lcov, spans, changed, root=ROOT):
     for name, lines in lcov_lines(lcov).items():
         path = Path(name)
         if not any(f"/{crate}/src/" in name for crate in
-                   ["librepods-core", "librepods-daemon", "librepods-linux", "librepods-cli"]):
+                   ["librepods-core", "librepods-api", "librepods-daemon", "librepods-linux", "librepods-cli"]):
             continue
         relative = str(path.relative_to(root))
         if name not in spans:

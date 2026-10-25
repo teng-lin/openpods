@@ -106,7 +106,7 @@ impl Snapshot {
     }
 
     #[cfg(any(target_os = "linux", test))]
-    pub(crate) fn observe_device(&mut self, state: &DeviceState, monotonic_ms: u64, unix_ms: u64) {
+    pub fn observe_device(&mut self, state: &DeviceState, monotonic_ms: u64, unix_ms: u64) {
         self.observation_unix_ms
             .retain(|field, _| state.observations.contains_key(field));
         for (field, observation) in &state.observations {
@@ -190,7 +190,7 @@ impl Snapshot {
         let capabilities = self.device.model.capabilities();
         json!({"noise_control":capabilities.noise_control,"noise_off":capabilities.noise_off,
             "adaptive":capabilities.adaptive,"conversational_awareness":capabilities.conversational_awareness,
-            "one_bud_anc":capabilities.one_bud_anc,"ble":cfg!(feature="ble")})
+            "one_bud_anc":capabilities.one_bud_anc,"device_management":true,"ble":cfg!(feature="ble")})
     }
 
     pub fn doctor(&self) -> Value {
@@ -219,7 +219,7 @@ pub fn available(reading: BatteryState) -> bool {
 /// Large audio graphs have an explicit detailed endpoint. They must not prevent
 /// battery, command and recovery status from fitting in the native frame budget.
 #[cfg(any(target_os = "linux", test))]
-pub(crate) fn bounded_audio(value: Value) -> Value {
+pub fn bounded_audio(value: Value) -> Value {
     const DETAILS_LIMIT: usize = 32 * 1024;
     if serde_json::to_vec(&value).is_ok_and(|bytes| bytes.len() <= DETAILS_LIMIT) {
         return value;
