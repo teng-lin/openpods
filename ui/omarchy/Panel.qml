@@ -12,7 +12,7 @@ import "Model.js" as Model
 Panel {
   id: root
   moduleName: "org.librepods.pods"
-  ipcTarget: "librepods"
+  ipcTarget: "openpods"
   manageIpc: false
 
   property int cursorIndex: 0
@@ -108,6 +108,16 @@ Panel {
 
   IpcHandler {
     target: root.ipcTarget
+    function open(): void { root.open() }
+    function close(): void { root.close() }
+    function toggle(): void { root.toggle() }
+    function refresh(): string { pods.refresh(); return "ok" }
+    function noise(): string { pods.cycleNoiseMode(); return "ok" }
+    function status(): string { return Model.noiseModeName(pods.noiseMode) }
+  }
+
+  IpcHandler {
+    target: "librepods"
     function open(): void { root.open() }
     function close(): void { root.close() }
     function toggle(): void { root.toggle() }

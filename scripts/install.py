@@ -109,8 +109,10 @@ def install(prefix, binary, unit_dir, legacy_state_home=None):
     unit_path = unit_dir / UNIT
     if any(ord(character) < 32 for character in str(destination)):
         raise ValueError("binary destination contains control characters")
-    owned_destination(destination, manifest)
-    owned_destination(unit_path, manifest)
+    canonical = prefix / "bin/openpods-cli"
+    daemon = prefix / "bin/openpodsd"
+    for path in [destination, canonical, daemon, unit_path]:
+        owned_destination(path, manifest)
     # systemd performs percent expansion even inside double-quoted arguments.
     escaped = unit_escape(destination)
     unit = (ROOT / "packaging/systemd/librepods-rs.service.in").read_text()
@@ -119,7 +121,11 @@ def install(prefix, binary, unit_dir, legacy_state_home=None):
         extra = (f'Environment="XDG_STATE_HOME={unit_escape(state_home)}"\n'
                  f'ReadWritePaths="{unit_escape(native)}" "{unit_escape(legacy)}"')
         unit = unit.replace("ReadWritePaths=%t/librepods-rs", "ReadWritePaths=%t/librepods-rs\n" + extra)
+    daemon_source = binary.with_name("openpodsd")
+    daemon_bytes = daemon_source.read_bytes() if daemon_source.is_file() else b'#!/bin/sh\nexec "$(dirname -- "$0")/openpods-cli" serve "$@"\n'
     files = [(destination, binary.read_bytes(), 0o755),
+             (canonical, binary.read_bytes(), 0o755),
+             (daemon, daemon_bytes, 0o755),
              (unit_path, unit.replace("@BINARY@", escaped).encode(), 0o644)]
     backups = {path: (path.read_bytes(), path.stat().st_mode & 0o777) if path.exists() else None
                for path, _, _ in files}
@@ -149,7 +155,7 @@ def uninstall(prefix):
     for name, expected in list(manifest["files"].items()):
         path = Path(name)
         # A manifest is not permission to delete arbitrary filesystem paths.
-        valid_binary = path == prefix / "bin/librepods-cli"
+        valid_binary = path in [prefix / "bin/librepods-cli", prefix / "bin/openpods-cli", prefix / "bin/openpodsd"]
         valid_unit = manifest.get("unit_dir") is not None and path == Path(manifest["unit_dir"]) / UNIT
         if not (valid_binary or valid_unit) or path.is_symlink():
             preserved.append(name)
@@ -169,7 +175,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["install", "uninstall"])
     parser.add_argument("--prefix", type=Path, default=Path.home() / ".local")
-    parser.add_argument("--binary", type=Path, default=ROOT / "target/release/librepods-cli")
+    parser.add_argument("--binary", type=Path, default=ROOT / "target/release/openpods-cli")
     parser.add_argument("--unit-dir", type=Path)
     parser.add_argument("--legacy", action="store_true", help="opt in to a narrowly writable legacy status directory")
     parser.add_argument("--state-home", type=Path, help="state home used by --legacy; defaults to XDG_STATE_HOME")

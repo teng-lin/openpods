@@ -1,9 +1,11 @@
 [package]
 name = "librepods-cli"
+autobins = false
+default-run = "openpods-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "CLI daemon for LibrePods — testing and headless operation on Linux and Windows"
+description = "OpenPods command client and background service"
 
 [features]
 default = []
@@ -24,3 +26,17 @@ librepods-linux = { version = "0.1.0", path = "../librepods-linux" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 librepods-windows = { version = "0.1.0", path = "../librepods-windows" }
+
+[[bin]]
+name = "openpods-cli"
+path = "src/main.rs"
+
+[[bin]]
+name = "openpodsd"
+path = "src/daemon.rs"
+
+[[bin]]
+name = "librepods-cli"
+path = "src/legacy.rs"
+test = false
+bench = false

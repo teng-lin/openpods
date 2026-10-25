@@ -116,12 +116,12 @@ def main():
     config_home = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--plugin-dir', type=Path, default=config_home / 'omarchy/plugins' / PLUGIN_ID)
-    parser.add_argument('--ctl', default=shutil.which('librepods-cli'))
+    parser.add_argument('--ctl', default=(shutil.which('openpods-cli') or shutil.which('librepods-cli')))
     parser.add_argument('--enable', action='store_true', help='place the widget before Bluetooth and configure its client')
     args = parser.parse_args()
     binary = Path(args.ctl).expanduser().absolute() if args.ctl else None
     if not binary or not binary.is_file() or not os.access(binary, os.X_OK):
-        parser.error('--ctl must name an existing executable librepods-cli')
+        parser.error('--ctl must name an existing executable OpenPods client')
     subprocess.run(['omarchy', 'plugin', 'validate', str(ROOT / 'ui/omarchy')], check=True)
     print('Installed', install_plugin(ROOT / 'ui/omarchy', args.plugin_dir.expanduser().absolute(), binary))
     if args.enable:

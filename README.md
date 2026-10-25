@@ -1,4 +1,18 @@
-# LibrePods RS
+# OpenPods
+
+AirPods battery and listening controls with a Rust daemon, a native desktop app,
+and an Omarchy bar plugin.
+
+OpenPods is derived from [brianpht/librepods-rs](https://github.com/brianpht/librepods-rs)
+and the [LibrePods project](https://github.com/kavishdevar/librepods). Original
+copyright notices, protocol references and MIT QML attribution are retained.
+
+The desktop application is `openpods`, the client is `openpods-cli`, and the
+background entry point is `openpodsd`. Existing `librepods-cli`/`librepods-gui`
+commands, `librepods-rs.service`, `librepods-rs` configuration/state paths, and
+Omarchy plugin ID `org.librepods.pods` remain compatible. Internal Rust crate
+names stay stable for library users.
+
 
 A Rust Apple Accessory Protocol (AACP) implementation with a persistent Linux
 service, local CLI, optional native GPUI desktop, and reusable protocol core. The primary development device
@@ -19,7 +33,7 @@ BLE builds additionally use the system D-Bus development library.
 
 ```bash
 cargo build -p librepods-cli --release --no-default-features --locked
-./target/release/librepods-cli serve --address AA:BB:CC:DD:EE:FF
+./target/release/openpodsd --address AA:BB:CC:DD:EE:FF
 ```
 
 Use an already paired device. The service can wait while it is disconnected;
@@ -28,16 +42,16 @@ selects a single connected AirPods device and rejects ambiguity. It owns the
 AACP connection until stopped. Run clients in another terminal:
 
 ```bash
-./target/release/librepods-cli status --json
-./target/release/librepods-cli --status
-./target/release/librepods-cli capabilities --json
-./target/release/librepods-cli doctor --json
-./target/release/librepods-cli --noise-control anc
-./target/release/librepods-cli --noise-control transparency
-./target/release/librepods-cli --noise-control adaptive
-./target/release/librepods-cli --conversation-awareness on
-./target/release/librepods-cli --one-bud-anc off
-./target/release/librepods-cli adaptive-level 50
+./target/release/openpods-cli status --json
+./target/release/openpods-cli --status
+./target/release/openpods-cli capabilities --json
+./target/release/openpods-cli doctor --json
+./target/release/openpods-cli --noise-control anc
+./target/release/openpods-cli --noise-control transparency
+./target/release/openpods-cli --noise-control adaptive
+./target/release/openpods-cli --conversation-awareness on
+./target/release/openpods-cli --one-bud-anc off
+./target/release/openpods-cli adaptive-level 50
 ```
 
 Adaptive level accepts 0–100 and requires a fresh Adaptive-mode report. Off and
@@ -78,10 +92,10 @@ build remains free of GPUI and Qt.
 ## Bluetooth device management
 
 ```bash
-librepods-cli --address AA:BB:CC:DD:EE:FF device connect
-librepods-cli device disconnect
-librepods-cli --address AA:BB:CC:DD:EE:FF device forget --yes
-librepods-cli reconnect
+openpods-cli --address AA:BB:CC:DD:EE:FF device connect
+openpods-cli device disconnect
+openpods-cli --address AA:BB:CC:DD:EE:FF device forget --yes
+openpods-cli reconnect
 ```
 
 These commands require the persistent service. Bluetooth connect confirms the
@@ -103,13 +117,13 @@ uncertain outcomes, partial cleanup failures and target selection.
 Audio observation and repairs are separate from ANC and battery communication:
 
 ```bash
-./target/release/librepods-cli audio status --json
-./target/release/librepods-cli audio output SINK_NAME
-./target/release/librepods-cli audio input SOURCE_NAME
-./target/release/librepods-cli audio profile PROFILE_NAME
-./target/release/librepods-cli audio move-stream STREAM_ID SINK_NAME
-./target/release/librepods-cli audio unmute
-./target/release/librepods-cli ear off
+./target/release/openpods-cli audio status --json
+./target/release/openpods-cli audio output SINK_NAME
+./target/release/openpods-cli audio input SOURCE_NAME
+./target/release/openpods-cli audio profile PROFILE_NAME
+./target/release/openpods-cli audio move-stream STREAM_ID SINK_NAME
+./target/release/openpods-cli audio unmute
+./target/release/openpods-cli ear off
 ```
 
 Audio discovery uses structured `pactl` JSON through PipeWire's PulseAudio
@@ -141,9 +155,9 @@ changing startup enablement. Keep exactly one connection owner enabled.
 The existing panel can use the compatibility client:
 
 ```bash
-librepods-cli compat status
-librepods-cli compat noise:anc
-librepods-cli compat ear:both
+openpods-cli compat status
+openpods-cli compat noise:anc
+openpods-cli compat ear:both
 ```
 
 Optional legacy publication requires `legacy_compatibility: true`. It preserves
@@ -155,10 +169,10 @@ is `$XDG_STATE_HOME/librepods-rs/status.json` (default `~/.local/state`).
 
 ```bash
 cargo build -p librepods-cli --release --features ble --locked
-librepods-cli keys fetch
-librepods-cli ble on
-librepods-cli ble off
-librepods-cli keys forget
+openpods-cli keys fetch
+openpods-cli ble on
+openpods-cli ble off
+openpods-cli keys forget
 ```
 
 A BLE-capable build still defaults to scanning off. Fetching keys is explicit and
@@ -175,7 +189,7 @@ Case/lid telemetry may remain unavailable indefinitely without affecting control
 | `librepods-core` | Pure parsers, encoders, reducer, capabilities and deterministic policies |
 | `librepods-linux` | BlueZ, cancellable L2CAP, optional BLE, sleep and desktop adapters |
 | `librepods-daemon` | Single session owner, command queue, IPC, persistence and policy orchestration |
-| `librepods-cli` | Thin local client and Linux service entry point |
+| `openpods-cli` | Thin local client and Linux service entry point |
 | `librepods-windows` | Platform library adapters; cross-compiled contracts, explicit unsupported operations |
 
 The persistent service and new CLI runtime currently support Linux. Windows

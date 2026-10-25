@@ -30,7 +30,7 @@ def build_client(root, ble=False):
     env = os.environ.copy()
     env['CARGO_TARGET_DIR'] = str(target)
     subprocess.run(command, env=env, check=True)
-    return target / 'release/librepods-cli'
+    return target / 'release/openpods-cli'
 
 
 def configure_checkout(root, binary, config_home):
@@ -48,7 +48,7 @@ def configure_checkout(root, binary, config_home):
 def main():
     parser = argparse.ArgumentParser(prog='setup', description=__doc__)
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument('--ctl', type=Path, help='existing librepods-cli; defaults to PATH')
+    mode.add_argument('--ctl', type=Path, help='existing OpenPods client; defaults to PATH')
     mode.add_argument('--build', action='store_true', help='build a client into the external user cache')
     parser.add_argument('--ble', action='store_true', help='include BLE support in a --build client; does not enable scanning')
     args = parser.parse_args()
@@ -66,9 +66,9 @@ def main():
             if not isinstance(stored, dict):
                 raise ValueError('Rust daemon configuration must be a JSON object')
             ble = ble or stored.get('ble_enabled') is True
-    binary = build_client(ROOT, ble) if args.build else args.ctl or shutil.which('librepods-cli')
+    binary = build_client(ROOT, ble) if args.build else args.ctl or (shutil.which('openpods-cli') or shutil.which('librepods-cli'))
     if not binary:
-        parser.error('librepods-cli was not found; pass --ctl /absolute/path/to/librepods-cli or --build')
+        parser.error('OpenPods client was not found; pass --ctl /absolute/path/to/openpods-cli or --build')
     backup = configure_checkout(ROOT, Path(binary), config_home)
     if backup:
         print('Shell configuration backup:', backup)

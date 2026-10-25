@@ -15,7 +15,7 @@ Item {
   property string actionStatus: ""
   property int retryMs: 1000
   property bool watchStarted: false
-  readonly property string ctlPath: String(settings.ctlPath || Client.path || "librepods-cli")
+  readonly property string ctlPath: String(settings.ctlPath || Client.path || "openpods-cli")
   readonly property bool busy: commandProcess.running
   readonly property bool connected: daemonReachable && reported.connected
   readonly property bool hasAirPods: connected

@@ -171,6 +171,22 @@ class Installation(unittest.TestCase):
         with self.assertRaises(ValueError):
             installer.install(self.root / "bad\nExecStart=unsafe", self.binary, self.unit_dir)
 
+    def test_openpods_commands_and_legacy_alias_are_installed_and_removed(self):
+        daemon=self.binary.with_name("openpodsd");daemon.write_bytes(b"daemon binary")
+        installer.install(self.prefix,self.binary,self.unit_dir)
+        self.assertEqual((self.prefix/"bin/openpods-cli").read_bytes(),self.binary.read_bytes())
+        self.assertEqual((self.prefix/"bin/librepods-cli").read_bytes(),self.binary.read_bytes())
+        self.assertEqual((self.prefix/"bin/openpodsd").read_bytes(),b"daemon binary")
+        installer.uninstall(self.prefix)
+        self.assertFalse((self.prefix/"bin/openpods-cli").exists())
+        self.assertFalse((self.prefix/"bin/openpodsd").exists())
+
+    def test_rename_preserves_unowned_canonical_commands(self):
+        command=self.prefix/"bin/openpods-cli";command.parent.mkdir(parents=True);command.write_text("existing user command")
+        with self.assertRaisesRegex(ValueError,"unowned"):
+            installer.install(self.prefix,self.binary,self.unit_dir)
+        self.assertEqual(command.read_text(),"existing user command")
+
 
 if __name__ == "__main__":
     unittest.main()

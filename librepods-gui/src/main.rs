@@ -8,7 +8,7 @@ fn main() {
         match arg.as_str() {
             "--demo" => demo = true,
             "--help" | "-h" => {
-                println!("LibrePods GUI\n\nUsage: librepods-gui [--demo]\n\nConnects to the current user's librepods-rs daemon.\n--demo uses synthetic data and never contacts Bluetooth or the daemon.");
+                println!("OpenPods GUI\n\nUsage: openpods [--demo]\n\nConnects to the current user's librepods-rs daemon.\n--demo uses synthetic data and never contacts Bluetooth or the daemon.");
                 return;
             }
             _ => {
@@ -18,7 +18,7 @@ fn main() {
         }
     }
     if let Err(e) = view::run(demo) {
-        eprintln!("LibrePods GUI: {e}");
+        eprintln!("OpenPods GUI: {e}");
         std::process::exit(1);
     }
 }

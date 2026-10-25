@@ -3,7 +3,7 @@
 use std::process::Command;
 #[test]
 fn help_and_invalid_arguments_work_without_graphics_or_runtime() {
-    let binary = env!("CARGO_BIN_EXE_librepods-gui");
+    let binary = env!("CARGO_BIN_EXE_openpods");
     let output = Command::new(binary)
         .args(["--help"])
         .env_remove("XDG_RUNTIME_DIR")
@@ -18,7 +18,7 @@ fn help_and_invalid_arguments_work_without_graphics_or_runtime() {
 }
 #[test]
 fn live_launch_without_a_runtime_reports_an_actionable_error_before_graphics() {
-    let output = Command::new(env!("CARGO_BIN_EXE_librepods-gui"))
+    let output = Command::new(env!("CARGO_BIN_EXE_openpods"))
         .env_remove("XDG_RUNTIME_DIR")
         .env_remove("DISPLAY")
         .env_remove("WAYLAND_DISPLAY")

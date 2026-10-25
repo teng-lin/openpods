@@ -1,5 +1,7 @@
 [package]
 name = "librepods-gui"
+autobins = false
+default-run = "openpods"
 version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-only"
@@ -24,10 +26,17 @@ tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "time"] }
 tempfile = "3"
 
 [[bin]]
-name = "librepods-gui"
+name = "openpods"
 path = "src/main.rs"
 required-features = ["desktop"]
 
 # Isolate GPUI portal async-io from the daemon's zbus/tokio feature.
 [workspace]
 resolver = "2"
+
+[[bin]]
+name = "librepods-gui"
+path = "src/legacy.rs"
+required-features = ["desktop"]
+test = false
+bench = false

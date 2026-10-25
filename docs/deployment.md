@@ -13,7 +13,7 @@ private ownership manifest. It does not start/enable a service, change pairings,
 grant capabilities or edit Bluetooth/audio/panel configuration. Existing files
 without a matching ownership manifest and modified installed files are preserved.
 
-The unit runs `librepods-cli serve` with private runtime/state/config directories,
+The unit runs `openpods-cli serve` with private runtime/state/config directories,
 read-only home/system access, no ambient capabilities, no new privileges and only
 local/Bluetooth/netlink socket families. Test the real service restrictions on
 the host; a command that works in a terminal does not prove sandboxed operation.
@@ -23,8 +23,8 @@ For a machine without an existing owner:
 
 ```bash
 systemctl --user start librepods-rs.service
-librepods-cli doctor
-librepods-cli status --json
+openpods-cli doctor
+openpods-cli status --json
 ```
 
 For a machine with no previous AirPods service, enable automatic startup after
@@ -41,8 +41,8 @@ Run these explicit steps only when ready to change which service owns the AirPod
 ```bash
 python3 scripts/migrate.py capture --old-unit "OLD_OWNER.service" --snapshot /path/to/private/rollback.json
 python3 scripts/migrate.py switch --snapshot /path/to/private/rollback.json
-librepods-cli doctor
-librepods-cli status --json
+openpods-cli doctor
+openpods-cli status --json
 ```
 
 Capture is read-only and refuses to overwrite an existing rollback record. Switch

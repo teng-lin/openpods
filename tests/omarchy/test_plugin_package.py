@@ -66,7 +66,7 @@ class PluginPackageTests(unittest.TestCase):
                 self.assertIn('--locked', command)
                 self.assertNotIn('--features', command)
                 self.assertEqual(run.call_args.kwargs['env']['CARGO_TARGET_DIR'], str(cache / 'librepods-rs/omarchy-build'))
-                self.assertEqual(binary, cache / 'librepods-rs/omarchy-build/release/librepods-cli')
+                self.assertEqual(binary, cache / 'librepods-rs/omarchy-build/release/openpods-cli')
                 setup.build_client(root, ble=True)
                 self.assertEqual(run.call_args.args[0][-2:], ['--features', 'ble'])
             with mock.patch.dict(os.environ, {'XDG_CACHE_HOME': str(root / 'cache')}):

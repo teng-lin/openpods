@@ -46,7 +46,7 @@ impl Panel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        window.set_window_title("LibrePods");
+        window.set_window_title("OpenPods");
         let focus = cx.focus_handle();
         focus.focus(window);
         let mut model = PanelModel::default();
@@ -316,7 +316,7 @@ impl Render for Panel {
                     .flex()
                     .justify_between()
                     .items_center()
-                    .child(div().text_xs().text_color(rgb(MUTED)).child("LIBREPODS"))
+                    .child(div().text_xs().text_color(rgb(MUTED)).child("OPENPODS"))
                     .child(
                         div()
                             .text_xs()
@@ -577,7 +577,7 @@ impl Render for Panel {
         if !current && !self.model.pending {
             content =
                 content.child(div().text_xs().text_color(rgb(MUTED)).child(
-                    "Waiting for the daemon. If it is not running, start librepods-cli serve. Retrying automatically.",
+                    "Waiting for the daemon. If it is not running, start openpodsd. Retrying automatically.",
                 ));
         } else if self.model.capabilities["device_management"] != true {
             content = content.child(
@@ -675,15 +675,15 @@ pub fn run(demo_mode: bool) -> Result<(), Box<dyn std::error::Error>> {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(460.), px(500.))),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("LibrePods".into()),
+                    title: Some("OpenPods".into()),
                     ..Default::default()
                 }),
-                app_id: Some("org.librepods.GUI".into()),
+                app_id: Some("org.openpods.GUI".into()),
                 ..Default::default()
             },
             move |window, cx| cx.new(|cx| Panel::new(demo_mode, client, window, cx)),
         ) {
-            *error.borrow_mut() = Some(format!("Cannot open LibrePods window: {e}"));
+            *error.borrow_mut() = Some(format!("Cannot open OpenPods window: {e}"));
             cx.quit();
         }
         cx.activate(true);

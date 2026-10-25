@@ -1,6 +1,6 @@
 # Native GPUI desktop
 
-`librepods-gui` is a standalone Linux control window built with the published
+`openpods` is a standalone Linux control window built with the published
 GPUI 0.2.2 API. It uses the existing user's daemon socket. It does not open
 Bluetooth, take the session lock, scan BLE, change file capabilities, launch a
 daemon, or change audio routes. The daemon remains the sole AACP owner.
@@ -17,7 +17,7 @@ is shared with the rest of this workspace.
 
 ```sh
 cargo build --manifest-path librepods-gui/Cargo.toml --features desktop --release --locked
-./librepods-gui/target/release/librepods-gui --demo
+./librepods-gui/target/release/openpods --demo
 ```
 
 Demo mode uses only synthetic data and simulated actions; it never constructs
@@ -25,8 +25,8 @@ an IPC client. Close the demo and launch without `--demo` to use your daemon:
 
 ```sh
 # In another terminal, if the service is not already running:
-librepods-cli serve --address AA:BB:CC:DD:EE:FF
-./librepods-gui/target/release/librepods-gui
+openpodsd --address AA:BB:CC:DD:EE:FF
+./librepods-gui/target/release/openpods
 ```
 
 Use one daemon. An existing systemd user service is sufficient. The GUI retries
@@ -93,9 +93,9 @@ After reviewing the built application, these commands install only the GUI and
 its launcher under your account; they do not install/start a daemon:
 
 ```sh
-install -Dm755 librepods-gui/target/release/librepods-gui ~/.local/bin/librepods-gui
-install -Dm644 packaging/org.librepods.GUI.desktop ~/.local/share/applications/org.librepods.GUI.desktop
-install -Dm644 packaging/org.librepods.GUI.svg ~/.local/share/icons/hicolor/scalable/apps/org.librepods.GUI.svg
+install -Dm755 librepods-gui/target/release/openpods ~/.local/bin/openpods
+install -Dm644 packaging/org.openpods.GUI.desktop ~/.local/share/applications/org.openpods.GUI.desktop
+install -Dm644 packaging/org.openpods.GUI.svg ~/.local/share/icons/hicolor/scalable/apps/org.openpods.GUI.svg
 ```
 
 ## Verification

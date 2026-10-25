@@ -1,6 +1,6 @@
 [Unit]
-Description=LibrePods Rust AirPods service
-Documentation=https://github.com/brianpht/librepods-rs
+Description=OpenPods AirPods service
+Documentation=https://github.com/teng-lin/openpods
 After=graphical-session.target
 PartOf=graphical-session.target
 StartLimitIntervalSec=60

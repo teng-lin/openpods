@@ -14,11 +14,11 @@ The repository root is an Omarchy plugin package: `manifest.json` points at
 `ui/omarchy/Panel.qml`, and the executable `setup` configures that checkout in
 place. The QML is MIT-licensed; the Rust workspace remains AGPL-3.0-only.
 
-Once this packaging is merged and published to the default GitHub branch:
+Authorized users with Git credentials configured can install the private repository:
 
 ```sh
-omarchy plugin add https://github.com/brianpht/librepods-rs --enable
-~/.config/omarchy/plugins/org.librepods.pods/setup --ctl /absolute/path/to/librepods-cli
+omarchy plugin add https://github.com/teng-lin/openpods --enable
+~/.config/omarchy/plugins/org.librepods.pods/setup --ctl /absolute/path/to/openpods-cli
 ```
 
 Use an already running, up-to-date Rust daemon. Setup uses the client on PATH if
@@ -53,7 +53,7 @@ snapshot must contain `device.capabilities`; older snapshots fail closed for
 feature controls. GPUI remains available as a separate desktop application.
 
 ```sh
-python3 scripts/install-omarchy.py --ctl /absolute/path/to/librepods-cli --enable
+python3 scripts/install-omarchy.py --ctl /absolute/path/to/openpods-cli --enable
 ```
 
 This installs `org.librepods.pods` under the user plugin directory and places its
@@ -85,7 +85,7 @@ settings include `hideWhenDisconnected` and an optional `ctlPath` override.
 
 ## Behavior and errors
 
-One persistent `librepods-cli --status --json` client streams native snapshots.
+One persistent `openpods-cli --status --json` client streams native snapshots.
 A lightweight status probe every 15 seconds checks responsiveness while the
 stream is open; opening/refreshing the panel also requests status. A failed
 connection retries with bounded backoff. Missing executables produce an explicit
@@ -107,9 +107,9 @@ The panel supports the upstream mouse and keyboard navigation, including
 listening-mode shortcuts, j/k row selection, arrow adjustment and activation.
 
 ```sh
-omarchy shell librepods open
-omarchy shell librepods close
-omarchy shell librepods status
+omarchy shell openpods open
+omarchy shell openpods close
+omarchy shell openpods status
 ```
 
 ## Tests and removal
