@@ -381,6 +381,12 @@ impl Render for Panel {
             };
             for (label, key, b) in readings {
                 let b = model::battery(s, label, key, b, current);
+                let now_unix_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64;
+                let detail = b.detail_at(now_unix_ms);
                 batteries = batteries.child(
                     div()
                         .flex_1()
@@ -401,13 +407,7 @@ impl Render for Panel {
                                         .unwrap_or_else(|| "—".into()),
                                 ),
                         )
-                        .child(
-                            div()
-                                .mt_1()
-                                .text_xs()
-                                .text_color(rgb(MUTED))
-                                .child(b.detail),
-                        ),
+                        .child(div().mt_1().text_xs().text_color(rgb(MUTED)).child(detail)),
                 );
             }
             content = content.child(batteries);

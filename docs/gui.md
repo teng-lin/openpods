@@ -36,7 +36,11 @@ a missing socket automatically. Closing the window leaves the daemon running.
 
 - Left/right/case battery percentages, or a headset battery for AirPods Max.
   Missing readings display `—`; actual zero is `0%`. Retained or expired
-  readings are labelled “Last reported”, including after daemon loss.
+  readings are labelled “Last reported” with their age, including after daemon
+  loss. An unavailable AACP case report preserves a prior valid case reading as
+  stale, with its original source and receipt time. Fresh valid reports replace
+  that history; real 0% remains valid. This history lasts for the running daemon,
+  and does not manufacture a value when none was received.
 - Off, ANC, Transparency and Adaptive, gated by model and fresh metadata.
 - Adaptive strength in ten-point steps, only with a fresh Adaptive-mode report.
 - Conversation awareness and single-earbud ANC with observed On/Off states.

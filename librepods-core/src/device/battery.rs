@@ -90,6 +90,19 @@ pub struct BatteryState {
     pub status: BatteryStatus,
 }
 
+impl BatteryState {
+    /// A percentage is usable only with a known charging/discharging status.
+    pub fn is_available(self) -> bool {
+        self.level <= 100
+            && matches!(
+                self.status,
+                BatteryStatus::Charging
+                    | BatteryStatus::Discharging
+                    | BatteryStatus::OptimizedCharging
+            )
+    }
+}
+
 impl Default for BatteryState {
     fn default() -> Self {
         Self {

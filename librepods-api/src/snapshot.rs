@@ -210,10 +210,7 @@ impl Snapshot {
 }
 
 pub fn available(reading: BatteryState) -> bool {
-    matches!(
-        reading.status,
-        BatteryStatus::Charging | BatteryStatus::Discharging | BatteryStatus::OptimizedCharging
-    )
+    reading.is_available()
 }
 
 /// Large audio graphs have an explicit detailed endpoint. They must not prevent
@@ -463,5 +460,27 @@ mod tests {
         assert!(value["device"]["listening_mode"].is_null());
         assert_eq!(snapshot.legacy()["noise_mode"], -1);
         assert_eq!(snapshot.legacy()["case"]["available"], false);
+    }
+    #[test]
+    fn unavailable_case_preserves_original_wall_time_and_legacy_unavailability() {
+        let mut state = DeviceState::default();
+        state.begin_session(1);
+        let known = librepods_core::protocol::parser::parse(&[4, 0, 4, 0, 4, 0, 1, 8, 1, 60, 2, 1])
+            .unwrap();
+        state.apply_packet(&known, 1, 10);
+        let mut snapshot = Snapshot::new("test".into(), &state);
+        snapshot.observe_device(&state, 10, 1000);
+        let unavailable =
+            librepods_core::protocol::parser::parse(&[4, 0, 4, 0, 4, 0, 1, 8, 1, 0, 4, 1]).unwrap();
+        state.apply_packet(&unavailable, 1, 20);
+        snapshot.observe_device(&state, 20, 2000);
+        assert_eq!(snapshot.device.battery.case_.level, 60);
+        assert_eq!(snapshot.observation_unix_ms["battery.case"], 1000);
+        assert!(snapshot.device.observations["battery.case"].stale);
+        assert_eq!(snapshot.legacy()["case"]["available"], false);
+        state.apply_packet(&known, 1, 30);
+        snapshot.observe_device(&state, 30, 3000);
+        assert_eq!(snapshot.observation_unix_ms["battery.case"], 3000);
+        assert_eq!(snapshot.legacy()["case"]["available"], true);
     }
 }

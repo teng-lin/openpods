@@ -261,3 +261,36 @@ fn empty_panel_is_unavailable_and_boolean_reports_are_exact() {
     s.schema_version = 2;
     assert!(validate_action(&s, &s.capabilities(), Action::Disconnect).is_err());
 }
+
+#[test]
+fn retained_case_history_is_labelled_and_aged_without_inventing_a_percentage() {
+    use librepods_core::device::state::DeviceState;
+    let mut state = DeviceState::default();
+    state.begin_session(1);
+    let known =
+        librepods_core::protocol::parser::parse(&[4, 0, 4, 0, 4, 0, 1, 8, 1, 60, 2, 1]).unwrap();
+    state.apply_packet(&known, 1, 10);
+    let unavailable =
+        librepods_core::protocol::parser::parse(&[4, 0, 4, 0, 4, 0, 1, 8, 1, 0, 4, 1]).unwrap();
+    state.apply_packet(&unavailable, 1, 20);
+    let mut s = librepods_api::snapshot::Snapshot::new("test".into(), &state);
+    s.observation_unix_ms.insert("battery.case".into(), 1000);
+    let b = battery(&s, "Case", "battery.case", s.device.battery.case_, true);
+    assert_eq!(b.percent, Some(60));
+    assert!(b.stale);
+    assert_eq!(b.detail_at(1500), "Last reported · just now");
+    assert_eq!(b.detail_at(121000), "Last reported · 2m ago");
+    assert_eq!(b.detail_at(7201000), "Last reported · 2h ago");
+    assert_eq!(b.detail_at(172801000), "Last reported · 2d ago");
+    assert_eq!(b.detail_at(500), "Last reported");
+    let empty = librepods_api::snapshot::Snapshot::new("empty".into(), &DeviceState::default());
+    let b = battery(
+        &empty,
+        "Case",
+        "battery.case",
+        empty.device.battery.case_,
+        true,
+    );
+    assert_eq!(b.percent, None);
+    assert_eq!(b.detail_at(1000), "Not reported");
+}

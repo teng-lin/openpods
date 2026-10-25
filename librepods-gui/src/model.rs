@@ -247,6 +247,25 @@ pub struct BatteryView {
     pub percent: Option<u8>,
     pub detail: &'static str,
     pub stale: bool,
+    pub reported_unix_ms: Option<u64>,
+}
+impl BatteryView {
+    pub fn detail_at(&self, now_unix_ms: u64) -> String {
+        let Some(receipt) = self
+            .reported_unix_ms
+            .filter(|time| self.stale && *time <= now_unix_ms)
+        else {
+            return self.detail.into();
+        };
+        let seconds = now_unix_ms.saturating_sub(receipt) / 1000;
+        let age = match seconds {
+            0..=59 => "just now".into(),
+            60..=3599 => format!("{}m ago", seconds / 60),
+            3600..=86399 => format!("{}h ago", seconds / 3600),
+            _ => format!("{}d ago", seconds / 86400),
+        };
+        format!("Last reported · {age}")
+    }
 }
 pub fn battery(
     s: &Snapshot,
@@ -261,6 +280,11 @@ pub fn battery(
         label: label.into(),
         percent: known.then_some(b.level),
         stale,
+        reported_unix_ms: s
+            .observation_unix_ms
+            .get(key)
+            .copied()
+            .filter(|time| known && *time > 0),
         detail: if !known {
             "Not reported"
         } else if stale {
