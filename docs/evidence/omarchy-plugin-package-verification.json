@@ -1,0 +1,30 @@
+{
+  "source_commit": "8ecb7f2a4ffa7e9dc67580c04b7ed9d36b837b79",
+  "verified_utc": "2026-10-25T01:41:45.190269+00:00",
+  "plugin_id": "org.librepods.pods",
+  "package_entry": "ui/omarchy/Panel.qml",
+  "setup": "Executable root setup configures a Git-installed checkout in place.",
+  "validation": {
+    "root_manifest": "passed",
+    "nested_copy_manifest": "passed",
+    "unit_tests": 12,
+    "fresh_git_clone_integration": "passed",
+    "git_checkout_clean_after_setup": true,
+    "existing_widget_placement_preserved": true,
+    "unrelated_shell_settings_preserved": true
+  },
+  "build_behavior": {
+    "optional_client_build": true,
+    "locked_dependencies": true,
+    "artifacts_outside_plugin_checkout": true,
+    "existing_ble_preference_preserved": true,
+    "daemon_started_by_setup": false
+  },
+  "git_install_test_scope": "Real Git clone and real Omarchy manifest validator, with a fake isolated Omarchy session/client. No live desktop changes.",
+  "publication": {
+    "merged_to_master": false,
+    "pushed": false,
+    "github_install_ready_after_publication": true
+  },
+  "existing_local_plugin": "Left enabled and running; no second installation attempted."
+}
