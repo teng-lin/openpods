@@ -1,0 +1,52 @@
+{
+  "source_commit": "71bf2a71d9159946b8e5767d24597a22ef97c681",
+  "verified_utc": "2026-10-25T00:55:12.782348+00:00",
+  "hardware": "AirPods Pro 2 USB-C",
+  "gui_noise_mode_change": {
+    "from": "NoiseCancellation",
+    "to": "Transparency",
+    "input": "GPUI keyboard control",
+    "confirmed_by": "native AACP daemon status",
+    "original_restored": true,
+    "restored_through": "native IPC"
+  },
+  "native_ipc_hardware_checks": {
+    "conversation_awareness_off_then_on": "confirmed",
+    "single_earbud_anc_on_then_off": "confirmed",
+    "bluetooth_disconnect": "confirmed",
+    "bluetooth_connect_and_aacp_recovery": "confirmed"
+  },
+  "restoration": {
+    "listening_mode": true,
+    "conversation_awareness": true,
+    "single_earbud_anc": true,
+    "default_output": true,
+    "default_input": true,
+    "audio_profile": true
+  },
+  "success_feedback_removed": true,
+  "gui_automated_tests_after_feedback_change": 27,
+  "running_daemon": {
+    "ble_compiled": true,
+    "device_management_capability": true,
+    "binary_sha256": "24dee97ecd7f4d045d28f927f5c8ab8085cbd65e29046a6365cfbd5bcdb0354e"
+  },
+  "ble": {
+    "enabled": true,
+    "keys_acquired_and_persisted_privately": true,
+    "key_file_mode": "0600",
+    "disconnected_scan_seconds": 20,
+    "scan_started": true,
+    "scan_error": null,
+    "valid_case_reading_received": false,
+    "reconnected_health": "paused",
+    "connected_scanning": false
+  },
+  "case_display": "Unknown; latest AACP status is Disconnected, not a real 0% reading.",
+  "soak": "Previous old-binary/PID soak intentionally interrupted for the user-authorized upgrade; partial samples preserved. No 24-hour pass claimed.",
+  "not_tested": [
+    "Bluetooth forget on real hardware",
+    "BLE scan concurrent with connected AACP",
+    "Adaptive strength on real hardware"
+  ]
+}
