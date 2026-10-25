@@ -1,7 +1,7 @@
 # LibrePods RS
 
 A Rust Apple Accessory Protocol (AACP) implementation with a persistent Linux
-service, local CLI, and reusable protocol core. The primary development device
+service, local CLI, optional native GPUI desktop, and reusable protocol core. The primary development device
 is AirPods Pro 2 USB-C on Omarchy. See the [release evidence](docs/release-evidence.md)
 for acceptance status; unfinished hardware and soak gates remain unfinished.
 
@@ -52,6 +52,20 @@ silently retarget a running service. `--direct` is an isolated diagnostic sessio
 that holds the same ownership lock and refuses a competing daemon/direct owner.
 Rename and long-press commands have protocol support but remain experimental
 until their actual firmware confirmations are accepted.
+
+## Native desktop
+
+A standalone GPUI window provides battery percentages, noise modes, Adaptive
+strength, conversation awareness, single-earbud ANC, pause policy, and Bluetooth
+connection actions. Build it separately; BLE remains optional:
+
+```sh
+cargo run --manifest-path librepods-gui/Cargo.toml --features desktop --locked -- --demo
+# Omit --demo to use your running daemon.
+```
+
+See [GUI setup, behavior and verification](docs/gui.md). The default daemon/CLI
+build remains free of GPUI and Qt.
 
 ## Bluetooth device management
 

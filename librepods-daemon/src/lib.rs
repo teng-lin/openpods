@@ -8,16 +8,16 @@
 pub mod backend;
 #[cfg(target_os = "linux")]
 pub mod ble;
-pub mod config;
-pub mod error;
-pub mod ipc;
+pub use librepods_api::config;
+pub use librepods_api::error;
+pub use librepods_api::ipc;
 #[cfg(target_os = "linux")]
 pub mod keys;
 #[cfg(target_os = "linux")]
 pub mod runtime;
 #[cfg(target_os = "linux")]
 pub mod session;
-pub mod snapshot;
+pub use librepods_api::snapshot;
 #[cfg(target_os = "linux")]
 pub mod storage;
 

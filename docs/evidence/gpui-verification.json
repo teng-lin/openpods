@@ -1,0 +1,74 @@
+{
+  "source_commit": "9db2d97561d2881dd3487085551c9eadb86904e6",
+  "recorded_utc": "2026-10-25T00:47:17.104652+00:00",
+  "gui_tests": {
+    "headless_gpui": 4,
+    "unix_socket_and_worker": 9,
+    "launch_errors": 2,
+    "model": 12,
+    "total": 27,
+    "result": "passed"
+  },
+  "gui_production_line_coverage": {
+    "model.rs": {
+      "count": 209,
+      "covered": 208,
+      "percent": 99.52153110047848
+    },
+    "client.rs": {
+      "count": 102,
+      "covered": 94,
+      "percent": 92.15686274509804
+    },
+    "demo.rs": {
+      "count": 88,
+      "covered": 88,
+      "percent": 100.0
+    }
+  },
+  "renderer_coverage": "Excluded from production percentage; pointer, keyboard, confirmation and narrow-window scrolling have GPUI headless tests.",
+  "root_production_line_coverage": {
+    "core": {
+      "covered": 1953,
+      "count": 2011
+    },
+    "service_including_shared_api": {
+      "covered": 5903,
+      "count": 6626
+    }
+  },
+  "root_changed_critical_line_coverage": {
+    "covered": 7100,
+    "count": 7846,
+    "percent": 90.49197043079276
+  },
+  "root_critical_comparison_base": "399e7759053d4b0dfe1d37813b0ca9d0bde7af5c",
+  "passed_checks": [
+    "root workspace tests without BLE",
+    "root workspace tests with librepods-cli/ble",
+    "CLI process contract: 24 checks per variant",
+    "strict root BLE Clippy",
+    "strict GUI Clippy with ui-test",
+    "format checks in both workspaces",
+    "dependency advisory/license/source/bans checks for both lockfiles",
+    "GUI isolation and portal runtime dependency graph",
+    "packaging Python suite: 34 tests",
+    "Windows MSVC minimal compile check",
+    "native Wayland demo launch and visual inspection"
+  ],
+  "hardware_mutations_tested": false,
+  "running_daemon_redeployed": false,
+  "desktop_configuration_changed": false,
+  "limitations": [
+    "Linux native GUI only",
+    "No tray or Quickshell integration",
+    "No audio routing interface in this first window",
+    "X11 compiled but not run in a live X11 session",
+    "Live Bluetooth setting actions were not exercised during this task"
+  ],
+  "notes": [
+    "GUI has a separate Cargo workspace/lockfile to prevent D-Bus runtime feature unification.",
+    "BLE remains optional and the GUI has no Bluetooth backend dependency.",
+    "GPUI dependency proc-macro-error2 2.0.1 emits an upstream future-compatibility warning; strict application Clippy passes."
+  ]
+}

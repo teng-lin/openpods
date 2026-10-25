@@ -602,14 +602,29 @@ impl DeviceState {
             return false;
         }
         let mut fields = Vec::new();
+        let mut unavailable_case_report = false;
         match packet {
             ParsedPacket::Battery(info) => {
                 if let Some(side) = info.primary_side() {
                     self.aacp_primary_side = Some(side);
                 }
                 // A later battery notification does not retroactively orient an older wear report.
+                let previous_case = self.battery.case_;
                 self.battery.merge(info);
                 for component in &info.present {
+                    if *component == Component::Case && !info.case_.is_available() {
+                        unavailable_case_report = true;
+                        // Keep the last usable value and its receipt time, never promote it to fresh.
+                        if previous_case.is_available()
+                            && self.observations.contains_key("battery.case")
+                        {
+                            self.battery.case_ = previous_case;
+                        }
+                        if let Some(observation) = self.observations.get_mut("battery.case") {
+                            observation.stale = true;
+                        }
+                        continue;
+                    }
                     fields.push(format!("battery.{}", component.name().to_lowercase()));
                 }
                 for component in info.unknown_records.keys() {
@@ -722,7 +737,7 @@ impl DeviceState {
             | ParsedPacket::HandshakeAck
             | ParsedPacket::FeaturesAck => {}
         }
-        if fields.is_empty() {
+        if fields.is_empty() && !unavailable_case_report {
             return false;
         }
         for field in fields {
@@ -1151,5 +1166,85 @@ mod ble_reducer_tests {
         state.apply_verified_ble(&advert, 1, 3, 100);
         assert_eq!(state.battery.headset.level, 42);
         assert_eq!(state.wear_primary_side, None);
+    }
+    #[test]
+    fn unavailable_case_report_retains_last_good_reading_as_stale() {
+        use crate::device::battery::{BatteryState, BatteryStatus};
+        let mut state = DeviceState::default();
+        state.begin_session(1);
+        let mut advertisement = advert();
+        advertisement.case_battery = Some(60);
+        state.apply_verified_ble(&advertisement, 1, 100, 30_000);
+        let receipt = state.observations["battery.case"];
+        state.end_session(1);
+        state.begin_session(2);
+        let unavailable =
+            crate::protocol::parser::parse(&[4, 0, 4, 0, 4, 0, 1, 8, 1, 0, 4, 1]).unwrap();
+        state.apply_packet(&unavailable, 2, 200);
+        assert_eq!(
+            state.battery.case_,
+            BatteryState {
+                level: 60,
+                status: BatteryStatus::Discharging
+            }
+        );
+        let retained = state.observations["battery.case"];
+        assert!(retained.stale);
+        assert_eq!(retained.source, receipt.source);
+        assert_eq!(retained.generation, receipt.generation);
+        assert_eq!(retained.observed_at_ms, receipt.observed_at_ms);
+        let real_zero =
+            crate::protocol::parser::parse(&[4, 0, 4, 0, 4, 0, 1, 8, 1, 0, 2, 1]).unwrap();
+        assert!(state.apply_packet(&real_zero, 2, 201));
+        assert_eq!(state.battery.case_.level, 0);
+        assert_eq!(state.battery.case_.status, BatteryStatus::Discharging);
+        assert!(state.fresh("battery.case"));
+        assert_eq!(state.observations["battery.case"].observed_at_ms, 201);
+    }
+    #[test]
+    fn unavailable_case_report_marks_current_history_stale_without_losing_other_components() {
+        let mut state = DeviceState::default();
+        state.begin_session(1);
+        let known = crate::protocol::parser::parse(&[4, 0, 4, 0, 4, 0, 1, 8, 1, 70, 1, 1]).unwrap();
+        state.apply_packet(&known, 1, 100);
+        let mixed =
+            crate::protocol::parser::parse(&[4, 0, 4, 0, 4, 0, 2, 4, 1, 40, 2, 1, 8, 1, 0, 4, 1])
+                .unwrap();
+        assert!(state.apply_packet(&mixed, 1, 200));
+        assert_eq!(state.battery.left.level, 40);
+        assert!(state.fresh("battery.left"));
+        assert_eq!(state.battery.case_.level, 70);
+        assert!(!state.fresh("battery.case"));
+        assert_eq!(state.observations["battery.case"].observed_at_ms, 100);
+        let mut advertisement = advert();
+        advertisement.case_battery = Some(80);
+        state.apply_verified_ble(&advertisement, 1, 201, 30_000);
+        assert_eq!(state.battery.case_.level, 80);
+        assert!(state.fresh("battery.case"));
+        assert_eq!(
+            state.observations["battery.case"].source,
+            ObservationSource::Ble
+        );
+    }
+
+    #[test]
+    fn unavailable_case_without_history_does_not_block_ble_or_invent_a_level() {
+        for status in [4, 0x99] {
+            let mut state = DeviceState::default();
+            state.begin_session(1);
+            let unavailable =
+                crate::protocol::parser::parse(&[4, 0, 4, 0, 4, 0, 1, 8, 1, 0, status, 1]).unwrap();
+            state.apply_packet(&unavailable, 1, 100);
+            assert!(!state.battery.case_.is_available());
+            assert!(!state.fresh("battery.case"));
+            let mut advertisement = advert();
+            advertisement.case_battery = Some(60);
+            state.apply_verified_ble(&advertisement, 1, 101, 30_000);
+            assert_eq!(state.battery.case_.level, 60);
+            assert!(state.fresh("battery.case"));
+            state.apply_packet(&unavailable, 1, 102);
+            assert_eq!(state.battery.case_.level, 60);
+            assert!(!state.fresh("battery.case"));
+        }
     }
 }

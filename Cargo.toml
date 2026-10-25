@@ -1,11 +1,13 @@
 [workspace]
 members = [
     "librepods-core",
+    "librepods-api",
     "librepods-linux",
     "librepods-windows",
     "librepods-cli",
     "librepods-daemon",
 ]
+exclude = ["librepods-gui"]
 resolver = "2"
 
 [workspace.package]

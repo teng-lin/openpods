@@ -1,0 +1,33 @@
+[package]
+name = "librepods-gui"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+
+[features]
+default = []
+desktop = ["dep:gpui"]
+ui-test = ["desktop", "gpui/test-support"]
+
+[dependencies]
+librepods-core = { version = "0.1.0", path = "../librepods-core" }
+librepods-api = { version = "0.1.0", path = "../librepods-api", features = ["transport"] }
+serde_json = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio = { version = "1", features = ["rt", "time"] }
+gpui = { version = "=0.2.2", optional = true, default-features = false, features = ["wayland", "x11"] }
+
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "time"] }
+tempfile = "3"
+
+[[bin]]
+name = "librepods-gui"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+# Isolate GPUI portal async-io from the daemon's zbus/tokio feature.
+[workspace]
+resolver = "2"

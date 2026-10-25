@@ -765,6 +765,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "librepods-api"
+version = "0.1.0"
+dependencies = [
+ "librepods-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "librepods-cli"
 version = "0.1.0"
 dependencies = [
@@ -794,6 +805,7 @@ name = "librepods-daemon"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "librepods-api",
  "librepods-core",
  "librepods-linux",
  "librepods-windows",
