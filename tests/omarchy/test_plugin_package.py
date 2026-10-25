@@ -40,7 +40,7 @@ class PluginPackageTests(unittest.TestCase):
             with mock.patch.object(setup.subprocess, 'run') as run, mock.patch.object(setup.installer, 'enable_widget') as enable:
                 setup.configure_checkout(checkout, binary, config)
                 run.assert_called_once_with(['omarchy', 'plugin', 'validate', str(checkout)], check=True)
-                enable.assert_called_once_with(binary, config)
+                enable.assert_called_once_with(binary, config, preserve_placement=True)
             self.assertEqual((checkout / '.git/HEAD').read_text(), 'keep-git')
             self.assertEqual((checkout / 'Panel.qml').read_text(), 'keep-source')
             self.assertFalse((checkout / setup.installer.OWNED).exists())

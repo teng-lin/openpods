@@ -100,10 +100,13 @@ def wait_for_plugin(timeout=5):
     raise RuntimeError('Omarchy did not discover the installed plugin before the deadline')
 
 
-def enable_widget(binary, config_home):
+def enable_widget(binary, config_home, preserve_placement=False):
     subprocess.run(['omarchy', 'shell', 'shell', 'rescanPlugins'], check=True)
     wait_for_plugin()
-    subprocess.run(['omarchy', 'plugin', 'enable', PLUGIN_ID, '--section', 'right', '--before', 'omarchy.bluetooth'], check=True)
+    command = ['omarchy', 'plugin', 'enable', PLUGIN_ID]
+    if not preserve_placement:
+        command += ['--section', 'right', '--before', 'omarchy.bluetooth']
+    subprocess.run(command, check=True)
     backup = configure_client(config_home / 'omarchy/shell.json', binary)
     subprocess.run(['omarchy','bar','set',PLUGIN_ID,'ctlPath',str(binary)],check=True)
     return backup

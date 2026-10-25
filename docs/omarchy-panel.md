@@ -34,8 +34,8 @@ plugin checkout. Builds use the pinned toolchain and lockfile. Existing BLE
 configuration is respected when choosing client build features; `--build --ble`
 can explicitly include BLE support without enabling scanning.
 
-Setup changes bar configuration through the same installer helpers, and preserves
-the Git checkout and tracked QML files. It does not install/start another daemon
+Setup configures the client through the bar API and retains the widget placement
+you chose in Omarchy. It preserves the Git checkout and tracked QML files. It does not install/start another daemon
 or enable daemon startup. Follow [deployment](deployment.md) for those steps.
 After `omarchy plugin update org.librepods.pods`, rerun setup if the client needs
 rebuilding or its path changed. Restart the shell when QML dependency caching
@@ -118,6 +118,7 @@ omarchy shell librepods status
 node tests/omarchy/model.mjs
 python3 -m unittest discover -s tests/omarchy -p 'test_*.py' -v
 python3 tests/omarchy/service.py
+python3 tests/omarchy/git-install.py
 omarchy plugin validate ui/omarchy
 ```
 

@@ -42,7 +42,7 @@ def configure_checkout(root, binary, config_home):
         raise ValueError('the Rust client must be an existing executable')
     subprocess.run(['omarchy', 'plugin', 'validate', str(root)], check=True)
     # Configure in place: the Git checkout and tracked QML files stay untouched.
-    return installer.enable_widget(binary, config_home)
+    return installer.enable_widget(binary, config_home, preserve_placement=True)
 
 
 def main():
