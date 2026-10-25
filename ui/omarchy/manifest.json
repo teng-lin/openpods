@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "org.librepods.pods",
+  "name": "LibrePods",
+  "version": "0.1.0",
+  "author": "GM; LibrePods contributors",
+  "license": "MIT",
+  "description": "Omarchy AirPods controls backed by the LibrePods Rust daemon.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "LibrePods",
+    "description": "Battery for each pod and the case, plus the listening controls macOS keeps in its Sound menu.",
+    "category": "Audio",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "hideWhenDisconnected": false,
+      "ctlPath": ""
+    },
+    "schema": [
+      {
+        "key": "hideWhenDisconnected",
+        "type": "boolean",
+        "label": "Hide the icon when no AirPods are connected",
+        "defaultValue": false
+      },
+      {
+        "key": "ctlPath",
+        "type": "path",
+        "label": "Path to librepods-cli",
+        "description": "Use the installed Rust client. It connects to the existing daemon.",
+        "defaultValue": ""
+      }
+    ]
+  }
+}

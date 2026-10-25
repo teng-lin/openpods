@@ -53,6 +53,13 @@ that holds the same ownership lock and refuses a competing daemon/direct owner.
 Rename and long-press commands have protocol support but remain experimental
 until their actual firmware confirmations are accepted.
 
+## Omarchy bar panel
+
+An optional QML panel adapted from omarchy-pods integrates battery and listening
+controls into the Omarchy bar, using the native Rust daemon. See
+[installation and behavior](docs/omarchy-panel.md). It preserves the upstream MIT
+attribution and uses original icons.
+
 ## Native desktop
 
 A standalone GPUI window provides battery percentages, noise modes, Adaptive
