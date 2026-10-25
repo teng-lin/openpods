@@ -1531,7 +1531,7 @@ mod dispatch_tests {
             panic!("dispatch guard must not reconnect")
         }
     }
-    struct Spy(AtomicUsize);
+    pub(super) struct Spy(pub(super) AtomicUsize);
     impl SessionTransport for Spy {
         fn send(&self, _: &[u8], _: Duration) -> Result<(), TransportError> {
             self.0.fetch_add(1, Ordering::SeqCst);
@@ -1542,7 +1542,7 @@ mod dispatch_tests {
         }
         fn close(&self) {}
     }
-    fn owner(transport: Arc<Spy>) -> Worker {
+    pub(super) fn owner(transport: Arc<Spy>) -> Worker {
         let started = Instant::now();
         let mut state = DeviceState::default();
         state.begin_session(1);

@@ -399,6 +399,34 @@ mod tests {
     use librepods_linux::bluez_monitor::{AdapterSnapshot, BluezSnapshot, DeviceSnapshot};
 
     #[test]
+    fn unsupported_backends_do_not_prepare_or_mutate_a_device() {
+        struct Unsupported;
+        impl Backend for Unsupported {
+            fn discover(&self, _: Option<&str>) -> Result<Endpoint, DaemonError> {
+                panic!("no discovery")
+            }
+            fn connect(
+                &self,
+                _: &Endpoint,
+                _: Duration,
+            ) -> Result<Arc<dyn SessionTransport>, DaemonError> {
+                panic!("no control connection")
+            }
+        }
+        let mut prepared = false;
+        let error = Unsupported
+            .device_action(
+                "00:11:22:33:44:55",
+                DeviceAction::Disconnect,
+                std::time::Instant::now() + Duration::from_secs(1),
+                &|| false,
+                &mut || prepared = true,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Unsupported);
+        assert!(!prepared);
+    }
+    #[test]
     fn device_failures_keep_explicit_codes_and_do_not_automatically_retry() {
         use librepods_linux::device::{DeviceError, FailureKind};
         for (kind, code) in [

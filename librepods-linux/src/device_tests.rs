@@ -453,13 +453,17 @@ type ManagedObjects = std::collections::HashMap<
         std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
     >,
 >;
-struct DeniedManager;
+struct DeniedManager(u8);
 #[zbus::interface(name = "org.freedesktop.DBus.ObjectManager")]
 impl DeniedManager {
     fn get_managed_objects(&self) -> zbus::fdo::Result<ManagedObjects> {
-        Err(zbus::fdo::Error::AccessDenied(
-            "test policy denies enumeration".into(),
-        ))
+        Err(match self.0 {
+            0 => zbus::fdo::Error::AccessDenied("test policy denies enumeration".into()),
+            1 => zbus::fdo::Error::Timeout("test query timeout".into()),
+            2 => zbus::fdo::Error::InvalidArgs("test invalid query".into()),
+            3 => zbus::fdo::Error::NotSupported("test unsupported query".into()),
+            _ => zbus::fdo::Error::Failed("test unavailable query".into()),
+        })
     }
 }
 #[tokio::test]
@@ -469,7 +473,7 @@ async fn enumeration_permission_denial_is_typed_before_owner_preparation() {
         .unwrap()
         .name("org.bluez")
         .unwrap()
-        .serve_at("/", DeniedManager)
+        .serve_at("/", DeniedManager(0))
         .unwrap()
         .build()
         .await
@@ -629,5 +633,40 @@ async fn cancelled_or_denied_disconnect_does_not_continue_to_pairing_removal() {
                 .len(),
             1
         );
+    }
+}
+
+#[tokio::test]
+async fn snapshot_failures_keep_their_machine_codes_before_any_owner_effect() {
+    for (mode, expected) in [
+        (1, FailureKind::TimedOut),
+        (2, FailureKind::InvalidInput),
+        (3, FailureKind::Unsupported),
+        (4, FailureKind::Unavailable),
+    ] {
+        let bus = crate::test_bus::TestBus::start();
+        let _service = zbus::connection::Builder::address(bus.address.as_str())
+            .unwrap()
+            .name("org.bluez")
+            .unwrap()
+            .serve_at("/", DeniedManager(mode))
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let client = client(&bus).await;
+        let mut prepared = false;
+        let error = execute_on(
+            &client,
+            ADDRESS,
+            DeviceAction::Connect,
+            Instant::now() + Duration::from_secs(1),
+            &|| false,
+            &mut || prepared = true,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind, expected);
+        assert!(!prepared);
     }
 }

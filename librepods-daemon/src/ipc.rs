@@ -69,6 +69,9 @@ pub enum Operation {
 
 impl Operation {
     pub fn is_device_action(&self) -> bool {
+        if let Self::ForDevice { operation, .. } = self {
+            return operation.is_device_action();
+        }
         matches!(
             self,
             Self::DeviceConnect | Self::DeviceDisconnect | Self::DeviceForget { .. }
@@ -184,6 +187,22 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, DaemonError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn device_classification_preserves_target_wrappers_and_mutation_semantics() {
+        for operation in [
+            Operation::DeviceConnect,
+            Operation::DeviceDisconnect,
+            Operation::DeviceForget { confirmed: true },
+        ] {
+            let wrapped = Operation::ForDevice {
+                address: "00:11:22:33:44:55".into(),
+                operation: Box::new(operation),
+            };
+            assert!(wrapped.is_device_action());
+            assert!(wrapped.is_mutation());
+        }
+        assert!(!Operation::Status.is_device_action());
+    }
     #[test]
     fn frames_are_typed_versioned_and_bounded() {
         let request = Request {

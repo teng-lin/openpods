@@ -153,3 +153,138 @@ impl Worker {
         let _ = envelope.reply.send(response);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::dispatch_tests::{owner, Spy};
+    use super::*;
+    use librepods_core::transport::DeviceActionResult;
+    use std::sync::atomic::AtomicUsize;
+    const ADDRESS: &str = "00:11:22:33:44:55";
+    struct DeviceBackend(Mutex<Vec<DeviceAction>>);
+    impl Backend for DeviceBackend {
+        fn discover(&self, _: Option<&str>) -> Result<crate::backend::Endpoint, DaemonError> {
+            panic!("no discovery in dispatch")
+        }
+        fn connect(
+            &self,
+            _: &crate::backend::Endpoint,
+            _: Duration,
+        ) -> Result<Arc<dyn SessionTransport>, DaemonError> {
+            panic!("no AACP connection in dispatch")
+        }
+        fn device_action(
+            &self,
+            address: &str,
+            action: DeviceAction,
+            _: Instant,
+            _: &(dyn Fn() -> bool + Sync),
+            prepare: &mut dyn FnMut(),
+        ) -> Result<DeviceActionResult, DaemonError> {
+            prepare();
+            self.0.lock().unwrap().push(action);
+            Ok(DeviceActionResult {
+                address: address.into(),
+                bluetooth_connected: action == DeviceAction::Connect,
+                paired: action != DeviceAction::Forget,
+                changed: true,
+            })
+        }
+    }
+    fn request(id: u64, operation: Operation) -> (Envelope, oneshot::Receiver<Response>) {
+        let (reply, rx) = oneshot::channel();
+        (
+            Envelope {
+                device_epoch: 0,
+                suspend_epoch: 0,
+                peer: None,
+                target_address: Some(ADDRESS.into()),
+                request: Request {
+                    version: 1,
+                    id,
+                    timeout_ms: 1000,
+                    operation,
+                },
+                deadline: Instant::now() + Duration::from_secs(1),
+                reply,
+                dispatched: Arc::new(AtomicBool::new(false)),
+            },
+            rx,
+        )
+    }
+    #[test]
+    fn owned_queue_retains_later_device_intents_and_cancels_ordinary_work() {
+        let spy = Arc::new(Spy(AtomicUsize::new(0)));
+        let mut actor = owner(spy.clone());
+        actor.state.set_device_identity(ADDRESS, "Synthetic");
+        actor.recovery.ready(0);
+        let backend = Arc::new(DeviceBackend(Mutex::new(Vec::new())));
+        actor.backend = backend.clone();
+        let (ordinary, mut cancelled) = request(
+            1,
+            Operation::EarPolicy(crate::config::EarPolicy::OneRemoved),
+        );
+        actor.enqueue(ordinary);
+        let (disconnect, mut first) = request(2, Operation::DeviceDisconnect);
+        actor.enqueue(disconnect);
+        let (connect, mut second) = request(3, Operation::DeviceConnect);
+        actor.enqueue(connect);
+        assert_eq!(
+            actor.queue.iter().map(|e| e.request.id).collect::<Vec<_>>(),
+            [2, 3, 1]
+        );
+        actor.dispatch();
+        assert!(first.try_recv().unwrap().error.is_none());
+        assert_eq!(
+            cancelled.try_recv().unwrap().error.unwrap().code,
+            ErrorCode::Cancelled
+        );
+        assert_eq!(actor.queue.len(), 1);
+        assert_eq!(
+            actor.queue.front().unwrap().device_epoch,
+            *actor.device_epoch.borrow()
+        );
+        actor.dispatch();
+        assert!(second.try_recv().unwrap().error.is_none());
+        assert_eq!(
+            *backend.0.lock().unwrap(),
+            [DeviceAction::Disconnect, DeviceAction::Connect]
+        );
+        assert!(actor.recovery.is_desired());
+        assert_eq!(spy.0.load(Ordering::SeqCst), 0);
+        // An old admission forced into the queue still cannot dispatch after the barrier.
+        let (old, mut rejected) = request(
+            4,
+            Operation::EarPolicy(crate::config::EarPolicy::BothRemoved),
+        );
+        actor.queue.push_back(old);
+        actor.dispatch();
+        assert_eq!(
+            rejected.try_recv().unwrap().error.unwrap().code,
+            ErrorCode::Cancelled
+        );
+    }
+    #[test]
+    fn owner_rechecks_destructive_confirmation_without_touching_a_backend() {
+        let mut actor = owner(Arc::new(Spy(AtomicUsize::new(0))));
+        let generation = actor.generation;
+        for op in [
+            Operation::DeviceForget { confirmed: false },
+            Operation::DeviceForget { confirmed: true },
+            Operation::DeviceConnect,
+        ] {
+            let (mut envelope, mut response) = request(1, op);
+            envelope.target_address = None;
+            if matches!(envelope.request.operation, Operation::DeviceConnect) {
+                envelope.request.operation = Operation::Status;
+            }
+            actor.dispatch_device(envelope);
+            assert_eq!(
+                response.try_recv().unwrap().error.unwrap().code,
+                ErrorCode::InvalidInput
+            );
+        }
+        assert_eq!(actor.generation, generation);
+        assert_eq!(*actor.device_epoch.borrow(), 0);
+    }
+}
