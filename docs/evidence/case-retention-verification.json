@@ -1,0 +1,79 @@
+{
+  "source_commit": "6076047915e7e33c23d1e43a4e5cdad9f77fcb51",
+  "verified_utc": "2026-10-25T01:06:08.204700+00:00",
+  "reproduction": "Two new reducer tests failed before the fix: an unavailable case report replaced valid 60% BLE history and 70% AACP history with Disconnected/0.",
+  "regression_checks": [
+    "Retain BLE case history across AACP reconnect",
+    "Preserve source, generation and original observation time",
+    "Unavailable AACP marks retained history stale",
+    "Fresh BLE fills unavailable AACP immediately",
+    "No history remains unknown",
+    "Unknown status does not invent a value",
+    "Other battery components update independently",
+    "A real available 0% replaces retained history",
+    "Snapshot preserves the original wall-clock receipt",
+    "Legacy output marks retained history unavailable",
+    "GUI labels history Last reported with age and tolerates wall-clock changes"
+  ],
+  "passed": [
+    "Workspace tests with and without BLE, plus CLI process contracts via scripts/coverage.sh",
+    "Strict root BLE Clippy",
+    "Strict GUI ui-test Clippy",
+    "GUI automated suite: 28 tests",
+    "Root and GUI format checks",
+    "Root/core/service and changed critical coverage gates",
+    "GUI per-file production coverage gates"
+  ],
+  "gui_production_line_coverage": {
+    "model.rs": {
+      "count": 229,
+      "covered": 228,
+      "percent": 99.56331877729258
+    },
+    "client.rs": {
+      "count": 102,
+      "covered": 94,
+      "percent": 92.15686274509804
+    },
+    "demo.rs": {
+      "count": 88,
+      "covered": 88,
+      "percent": 100.0
+    }
+  },
+  "root_production_line_coverage": {
+    "core": {
+      "covered": 1988,
+      "count": 2093
+    },
+    "service": {
+      "covered": 5905,
+      "count": 6631
+    }
+  },
+  "changed_critical_production_line_coverage": {
+    "covered": 7123,
+    "count": 7913,
+    "percent": 90.01642866169594
+  },
+  "changed_critical_comparison_base": "399e7759053d4b0dfe1d37813b0ca9d0bde7af5c",
+  "deployment": {
+    "daemon_updated": true,
+    "gui_updated": true,
+    "ble_enabled": true
+  },
+  "live_observation": {
+    "case_percent": 100,
+    "source": "Aacp",
+    "stale": true,
+    "aacp_connected": true,
+    "audio_health": "Healthy",
+    "user_report": "seems to work"
+  },
+  "limitations": [
+    "Retention lasts for the running daemon and selected device.",
+    "A valid reading must be received before history can be displayed.",
+    "Connected BLE scanning remains disabled; case history does not imply current telemetry.",
+    "This does not establish overall stability superiority over omarchy-pods."
+  ]
+}
