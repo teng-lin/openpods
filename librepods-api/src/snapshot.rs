@@ -21,6 +21,8 @@ pub struct DeviceStatus {
     pub model_number: String,
     pub manufacturer: String,
     pub model: AirPodsModel,
+    #[serde(default)]
+    pub capabilities: librepods_core::device::state::ModelCapabilities,
     pub battery: BatteryInfo,
     pub listening_mode: Option<NoiseControlMode>,
     pub primary_in_ear: Option<bool>,
@@ -269,6 +271,7 @@ impl From<&DeviceState> for DeviceStatus {
             model_number: state.model_number.clone(),
             manufacturer: state.manufacturer.clone(),
             model: state.model,
+            capabilities: state.model.capabilities(),
             battery: state.battery.clone(),
             listening_mode: state.noise_control_reported.then_some(state.noise_control),
             primary_in_ear: state.wear.and_then(|wear| wear.primary.in_ear()),

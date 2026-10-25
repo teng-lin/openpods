@@ -1,0 +1,53 @@
+{
+  "source_commit": "7766c7b8ffaa2ac79203e5542022ebae09a49c64",
+  "recorded_utc": "2026-10-25T01:31:11.274342+00:00",
+  "upstream": {
+    "project": "https://github.com/thisisgm/omarchy-pods",
+    "revision": "fff7fec600a5b9a61cdb40e93eccbcceb4b8f824",
+    "license": "MIT",
+    "borrowed": [
+      "Panel.qml layout and components",
+      "Model.js display helpers"
+    ],
+    "original_icons_used": true
+  },
+  "checks": {
+    "native_model_assertions": "passed",
+    "installer_unit_tests": 7,
+    "quickshell_service_harness": "passed",
+    "missing_executable_and_fallback_harness": "passed",
+    "service_qmllint": "passed",
+    "omarchy_manifest_validation": "passed",
+    "root_workspace_ble_tests": "passed",
+    "root_strict_ble_clippy": "passed",
+    "gpui_regressions": 28,
+    "existing_packaging_tests": 34,
+    "existing_legacy_compatibility_tests": "passed"
+  },
+  "live": {
+    "plugin_id": "org.librepods.pods",
+    "installed_and_enabled": true,
+    "native_status_stream_connected": true,
+    "panel_mode": "Noise Cancellation",
+    "audio_health": "Healthy",
+    "ble_enabled": true,
+    "no_second_bluetooth_owner_started": true
+  },
+  "issues_reproduced_and_fixed": [
+    "Plugin discovery is asynchronous; enabling immediately after rescan initially failed. Installer now waits for discovery.",
+    "The shell initially launched a missing client from PATH. Installed fallback path and bar API setting handoff restore the connection after reload.",
+    "QML dependency caching retained an earlier Service component during development; full shell restart loaded the updated component."
+  ],
+  "command_safety": [
+    "Typed native CLI argument arrays assert the selected address.",
+    "No optimistic writes, queued replay, or automatic mutation retry.",
+    "Headless harness verifies pending state, failed confirmation and reconnect without replay."
+  ],
+  "limitations": [
+    "Native device.capabilities field requires the updated Rust daemon.",
+    "Real hardware commands were not triggered automatically during this panel task; live readout and panel rendering were verified.",
+    "Omarchy shell may need a restart after dependency updates.",
+    "Headless Quickshell tests run locally; model and installer tests are included in CI.",
+    "Startup enablement of the existing Rust service was not changed."
+  ]
+}
